@@ -124,7 +124,8 @@ nano::store::store (
 	nano::peer_store & peer_store_a,
 	nano::confirmation_height_store & confirmation_height_store_a,
 	nano::final_vote_store & final_vote_store_a,
-	nano::version_store & version_store_a
+	nano::version_store & version_store_a,
+	nano::asset_store & asset_store_a
 ) :
 	block (block_store_a),
 	frontier (frontier_store_a),
@@ -135,7 +136,8 @@ nano::store::store (
 	peer (peer_store_a),
 	confirmation_height (confirmation_height_store_a),
 	final_vote (final_vote_store_a),
-	version (version_store_a)
+	version (version_store_a),
+	asset (asset_store_a)
 {
 }
 // clang-format on

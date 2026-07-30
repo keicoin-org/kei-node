@@ -118,6 +118,8 @@ add_library(
   ledger_walker.cpp
   lmdb/account_store.hpp
   lmdb/account_store.cpp
+  lmdb/asset_store.hpp
+  lmdb/asset_store.cpp
   lmdb/block_store.hpp
   lmdb/block_store.cpp
   lmdb/confirmation_height_store.hpp
@@ -182,6 +184,8 @@ add_library(
   rocksdb/block_store.hpp
   rocksdb/block_store.cpp
   rocksdb/confirmation_height_store.hpp
+  rocksdb/asset_store.hpp
+  rocksdb/asset_store.cpp
   rocksdb/confirmation_height_store.cpp
   rocksdb/final_vote_store.hpp
   rocksdb/final_vote_store.cpp

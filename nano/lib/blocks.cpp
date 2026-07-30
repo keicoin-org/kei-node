@@ -4,6 +4,7 @@
 #include <nano/lib/memory.hpp>
 #include <nano/lib/numbers.hpp>
 #include <nano/lib/threading.hpp>
+#include <nano/secure/buffer.hpp>
 #include <nano/secure/common.hpp>
 
 #include <boost/endian/conversion.hpp>
@@ -1331,9 +1332,12 @@ void nano::state_block::signature_set (nano::signature const & signature_a)
 	signature = signature_a;
 }
 
-namespace
+bool nano::asset_op_valid (uint8_t raw_a)
 {
-char const * asset_op_to_string (nano::asset_op op_a)
+	return raw_a <= static_cast<uint8_t> (nano::asset_op::asset_receive);
+}
+
+char const * nano::asset_op_to_string (nano::asset_op op_a)
 {
 	switch (op_a)
 	{
@@ -1351,7 +1355,7 @@ char const * asset_op_to_string (nano::asset_op op_a)
 	return "invalid";
 }
 
-bool asset_op_from_string (std::string const & text_a, nano::asset_op & op_a)
+bool nano::asset_op_from_string (std::string const & text_a, nano::asset_op & op_a)
 {
 	bool error (false);
 	if (text_a == "issue")
@@ -1381,33 +1385,52 @@ bool asset_op_from_string (std::string const & text_a, nano::asset_op & op_a)
 	return error;
 }
 
-std::string bytes_to_hex (std::vector<uint8_t> const & bytes_a)
+namespace
 {
-	std::string result;
-	result.reserve (bytes_a.size () * 2);
-	static char const digits[] = "0123456789ABCDEF";
-	for (auto byte : bytes_a)
+/** Strings in the payload are length-prefixed, little-endian like payload_len itself. */
+void write_payload_string (nano::stream & stream_a, std::string const & value_a)
+{
+	uint16_t const length (static_cast<uint16_t> (value_a.size ()));
+	nano::write (stream_a, boost::endian::native_to_little (length));
+	if (length > 0)
 	{
-		result.push_back (digits[byte >> 4]);
-		result.push_back (digits[byte & 0x0f]);
+		auto written (stream_a.sputn (reinterpret_cast<uint8_t const *> (value_a.data ()), length));
+		(void)written;
+		debug_assert (written == length);
 	}
-	return result;
 }
 
-bool hex_nibble (char c, uint8_t & value_a)
+bool read_payload_string (nano::stream & stream_a, std::string & value_a, std::size_t max_a)
+{
+	uint16_t length{ 0 };
+	nano::read (stream_a, length);
+	boost::endian::little_to_native_inplace (length);
+	if (length > max_a)
+	{
+		return true;
+	}
+	value_a.resize (length);
+	if (length > 0 && stream_a.sgetn (reinterpret_cast<uint8_t *> (&value_a[0]), length) != length)
+	{
+		throw std::runtime_error ("Failed to read payload string");
+	}
+	return false;
+}
+
+bool transfer_policy_from_string (std::string const & text_a, nano::transfer_policy & policy_a)
 {
 	bool error (false);
-	if (c >= '0' && c <= '9')
+	if (text_a == "open")
 	{
-		value_a = static_cast<uint8_t> (c - '0');
+		policy_a = nano::transfer_policy::open;
 	}
-	else if (c >= 'a' && c <= 'f')
+	else if (text_a == "issuer-only")
 	{
-		value_a = static_cast<uint8_t> (c - 'a' + 10);
+		policy_a = nano::transfer_policy::issuer_only;
 	}
-	else if (c >= 'A' && c <= 'F')
+	else if (text_a == "none")
 	{
-		value_a = static_cast<uint8_t> (c - 'A' + 10);
+		policy_a = nano::transfer_policy::none;
 	}
 	else
 	{
@@ -1416,29 +1439,243 @@ bool hex_nibble (char c, uint8_t & value_a)
 	return error;
 }
 
-bool hex_to_bytes (std::string const & text_a, std::vector<uint8_t> & bytes_a)
+bool swap_policy_from_string (std::string const & text_a, nano::swap_policy & policy_a)
 {
-	bool error (text_a.size () % 2 != 0);
-	if (!error)
+	bool error (false);
+	if (text_a == "two-way")
 	{
-		bytes_a.clear ();
-		bytes_a.reserve (text_a.size () / 2);
-		for (std::size_t i (0); !error && i < text_a.size (); i += 2)
-		{
-			uint8_t hi{ 0 };
-			uint8_t lo{ 0 };
-			error = hex_nibble (text_a[i], hi) || hex_nibble (text_a[i + 1], lo);
-			if (!error)
-			{
-				bytes_a.push_back (static_cast<uint8_t> ((hi << 4) | lo));
-			}
-		}
+		policy_a = nano::swap_policy::two_way;
+	}
+	else if (text_a == "one-way")
+	{
+		policy_a = nano::swap_policy::one_way;
+	}
+	else if (text_a == "off")
+	{
+		policy_a = nano::swap_policy::off;
+	}
+	else
+	{
+		error = true;
+	}
+	return error;
+}
+
+bool asset_kind_from_string (std::string const & text_a, nano::asset_kind & kind_a)
+{
+	bool error (false);
+	if (text_a == "token")
+	{
+		kind_a = nano::asset_kind::token;
+	}
+	else if (text_a == "item")
+	{
+		kind_a = nano::asset_kind::item;
+	}
+	else
+	{
+		error = true;
 	}
 	return error;
 }
 }
 
-nano::asset_hashables::asset_hashables (nano::account const & account_a, nano::block_hash const & previous_a, nano::account const & representative_a, nano::amount const & balance_a, nano::asset_op op_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a, nano::link const & link_a, std::vector<uint8_t> const & payload_a) :
+char const * nano::transfer_policy_to_string (nano::transfer_policy policy_a)
+{
+	switch (policy_a)
+	{
+		case nano::transfer_policy::open:
+			return "open";
+		case nano::transfer_policy::issuer_only:
+			return "issuer-only";
+		case nano::transfer_policy::none:
+			return "none";
+	}
+	return "invalid";
+}
+
+char const * nano::swap_policy_to_string (nano::swap_policy policy_a)
+{
+	switch (policy_a)
+	{
+		case nano::swap_policy::two_way:
+			return "two-way";
+		case nano::swap_policy::one_way:
+			return "one-way";
+		case nano::swap_policy::off:
+			return "off";
+	}
+	return "invalid";
+}
+
+char const * nano::asset_kind_to_string (nano::asset_kind kind_a)
+{
+	switch (kind_a)
+	{
+		case nano::asset_kind::unspecified:
+			return "";
+		case nano::asset_kind::token:
+			return "token";
+		case nano::asset_kind::item:
+			return "item";
+	}
+	return "";
+}
+
+bool nano::normalize_symbol (std::string const & symbol_a, std::string & result_a)
+{
+	std::string trimmed (symbol_a);
+	auto const whitespace = " \t\n\r\f\v";
+	auto first (trimmed.find_first_not_of (whitespace));
+	if (first == std::string::npos)
+	{
+		return true;
+	}
+	trimmed = trimmed.substr (first, trimmed.find_last_not_of (whitespace) - first + 1);
+	if (trimmed.empty () || trimmed.size () > nano::asset_payload::max_symbol)
+	{
+		return true;
+	}
+	std::string upper;
+	upper.reserve (trimmed.size ());
+	for (auto c : trimmed)
+	{
+		if (c >= 'a' && c <= 'z')
+		{
+			c = static_cast<char> (c - 'a' + 'A');
+		}
+		auto const alphanumeric = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+		if (!alphanumeric && !(c == '-' && !upper.empty ()))
+		{
+			// The leading character cannot be "-", which is what stops a symbol
+			// from being visually confusable with a negative number.
+			return true;
+		}
+		upper.push_back (c);
+	}
+	result_a = upper;
+	return false;
+}
+
+nano::uint256_union nano::derive_asset_id (nano::public_key const & issuer_a, std::string const & symbol_a)
+{
+	nano::uint256_union result;
+	blake2b_state hash;
+	auto status (blake2b_init (&hash, sizeof (result.bytes)));
+	debug_assert (status == 0);
+	blake2b_update (&hash, issuer_a.bytes.data (), issuer_a.bytes.size ());
+	blake2b_update (&hash, symbol_a.data (), symbol_a.size ());
+	status = blake2b_final (&hash, result.bytes.data (), sizeof (result.bytes));
+	debug_assert (status == 0);
+	return result;
+}
+
+bool nano::asset_payload::operator== (nano::asset_payload const & other_a) const
+{
+	return name == other_a.name && symbol == other_a.symbol && decimals == other_a.decimals && max_supply == other_a.max_supply && transfer == other_a.transfer && swap == other_a.swap && description == other_a.description && image == other_a.image && kind == other_a.kind && memo == other_a.memo;
+}
+
+void nano::asset_payload::serialize (nano::stream & stream_a, nano::asset_op op_a) const
+{
+	switch (op_a)
+	{
+		case nano::asset_op::issue:
+			write_payload_string (stream_a, name);
+			write_payload_string (stream_a, symbol);
+			nano::write (stream_a, decimals);
+			nano::write (stream_a, max_supply);
+			nano::write (stream_a, static_cast<uint8_t> (transfer));
+			nano::write (stream_a, static_cast<uint8_t> (swap));
+			write_payload_string (stream_a, description);
+			write_payload_string (stream_a, image);
+			nano::write (stream_a, static_cast<uint8_t> (kind));
+			break;
+		case nano::asset_op::mint:
+		case nano::asset_op::transfer:
+			write_payload_string (stream_a, memo);
+			break;
+		case nano::asset_op::burn:
+		case nano::asset_op::asset_receive:
+			break;
+	}
+}
+
+bool nano::asset_payload::deserialize (nano::stream & stream_a, nano::asset_op op_a, std::size_t size_a)
+{
+	std::vector<uint8_t> bytes;
+	try
+	{
+		nano::read (stream_a, bytes, size_a);
+	}
+	catch (std::runtime_error const &)
+	{
+		return true;
+	}
+
+	bool error (false);
+	nano::bufferstream payload_stream (bytes.data (), bytes.size ());
+	try
+	{
+		switch (op_a)
+		{
+			case nano::asset_op::issue:
+			{
+				error = read_payload_string (payload_stream, name, nano::asset_payload::max_name);
+				error = error || read_payload_string (payload_stream, symbol, nano::asset_payload::max_symbol);
+				if (!error)
+				{
+					nano::read (payload_stream, decimals);
+					nano::read (payload_stream, max_supply);
+					uint8_t transfer_raw{ 0 };
+					uint8_t swap_raw{ 0 };
+					nano::read (payload_stream, transfer_raw);
+					nano::read (payload_stream, swap_raw);
+					error = transfer_raw > static_cast<uint8_t> (nano::transfer_policy::none) || swap_raw > static_cast<uint8_t> (nano::swap_policy::off);
+					transfer = static_cast<nano::transfer_policy> (transfer_raw);
+					swap = static_cast<nano::swap_policy> (swap_raw);
+				}
+				error = error || read_payload_string (payload_stream, description, nano::asset_payload::max_description);
+				error = error || read_payload_string (payload_stream, image, nano::asset_payload::max_image);
+				if (!error)
+				{
+					uint8_t kind_raw{ 0 };
+					nano::read (payload_stream, kind_raw);
+					error = kind_raw > static_cast<uint8_t> (nano::asset_kind::item);
+					kind = static_cast<nano::asset_kind> (kind_raw);
+				}
+				break;
+			}
+			case nano::asset_op::mint:
+			case nano::asset_op::transfer:
+				error = read_payload_string (payload_stream, memo, nano::asset_payload::max_memo);
+				break;
+			case nano::asset_op::burn:
+			case nano::asset_op::asset_receive:
+				break;
+		}
+	}
+	catch (std::runtime_error const &)
+	{
+		error = true;
+	}
+
+	// A canonical encoding has exactly one representation, so trailing bytes are
+	// not "extra data to ignore" — they are a second encoding of the same block,
+	// which is precisely what canonical means to rule out.
+	return error || !nano::at_end (payload_stream);
+}
+
+std::vector<uint8_t> nano::asset_payload::to_bytes (nano::asset_op op_a) const
+{
+	std::vector<uint8_t> bytes;
+	{
+		nano::vectorstream stream (bytes);
+		serialize (stream, op_a);
+	}
+	return bytes;
+}
+
+nano::asset_hashables::asset_hashables (nano::account const & account_a, nano::block_hash const & previous_a, nano::account const & representative_a, nano::amount const & balance_a, nano::asset_op op_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a, nano::link const & link_a, nano::asset_payload const & payload_a) :
 	account (account_a),
 	previous (previous_a),
 	representative (representative_a),
@@ -1461,16 +1698,21 @@ nano::asset_hashables::asset_hashables (bool & error_a, nano::stream & stream_a)
 		nano::read (stream_a, balance);
 		uint8_t op_raw{ 0 };
 		nano::read (stream_a, op_raw);
-		op = static_cast<nano::asset_op> (op_raw);
-		nano::read (stream_a, asset_id);
-		nano::read (stream_a, amount);
-		nano::read (stream_a, link);
-		// payload_len is little-endian on the wire — decisions-m2.md §7, the one
-		// field in this layout that departs from Nano's big-endian convention.
-		uint16_t payload_len{ 0 };
-		nano::read (stream_a, payload_len);
-		boost::endian::little_to_native_inplace (payload_len);
-		nano::read (stream_a, payload, payload_len);
+		error_a = !nano::asset_op_valid (op_raw);
+		if (!error_a)
+		{
+			op = static_cast<nano::asset_op> (op_raw);
+			nano::read (stream_a, asset_id);
+			nano::read (stream_a, amount);
+			nano::read (stream_a, link);
+			// payload_len is little-endian on the wire — decisions-m2.md §7, the
+			// one field in this layout that departs from Nano's big-endian
+			// convention.
+			uint16_t payload_len{ 0 };
+			nano::read (stream_a, payload_len);
+			boost::endian::little_to_native_inplace (payload_len);
+			error_a = payload.deserialize (stream_a, op, payload_len);
+		}
 	}
 	catch (std::runtime_error const &)
 	{
@@ -1478,6 +1720,17 @@ nano::asset_hashables::asset_hashables (bool & error_a, nano::stream & stream_a)
 	}
 }
 
+/**
+ * The JSON shape is the SDK's, not a second one of the node's own invention:
+ * `op` is a nested object keyed by `kind`, exactly as `AssetBlockBody` in
+ * `@keicoin/core` defines it, because `process` has to accept what the SDK
+ * already signs and `docs/rpc.md` promises that reads come back in the shape
+ * `process` accepts.
+ *
+ * The flat fields of the §7 wire layout are derived from it: an `issue` names no
+ * asset id because the id is `H(issuer ‖ symbol)`, and a `mint` or `transfer`
+ * names a recipient address where the layout carries a public key.
+ */
 nano::asset_hashables::asset_hashables (bool & error_a, boost::property_tree::ptree const & tree_a)
 {
 	try
@@ -1486,48 +1739,183 @@ nano::asset_hashables::asset_hashables (bool & error_a, boost::property_tree::pt
 		auto previous_l (tree_a.get<std::string> ("previous"));
 		auto representative_l (tree_a.get<std::string> ("representative"));
 		auto balance_l (tree_a.get<std::string> ("balance"));
-		auto op_l (tree_a.get<std::string> ("op"));
-		auto asset_id_l (tree_a.get<std::string> ("asset_id"));
-		auto amount_l (tree_a.get<std::string> ("amount"));
-		auto link_l (tree_a.get<std::string> ("link"));
-		auto payload_l (tree_a.get<std::string> ("payload", ""));
 		error_a = account.decode_account (account_l);
+		error_a = error_a || previous.decode_hex (previous_l);
+		error_a = error_a || representative.decode_account (representative_l);
+		error_a = error_a || balance.decode_dec (balance_l);
 		if (!error_a)
 		{
-			error_a = previous.decode_hex (previous_l);
-		}
-		if (!error_a)
-		{
-			error_a = representative.decode_account (representative_l);
-		}
-		if (!error_a)
-		{
-			error_a = balance.decode_dec (balance_l);
-		}
-		if (!error_a)
-		{
-			error_a = asset_op_from_string (op_l, op);
-		}
-		if (!error_a)
-		{
-			error_a = asset_id.decode_hex (asset_id_l);
-		}
-		if (!error_a)
-		{
-			error_a = amount.decode_dec (amount_l);
-		}
-		if (!error_a)
-		{
-			error_a = link.decode_account (link_l) && link.decode_hex (link_l);
-		}
-		if (!error_a)
-		{
-			error_a = hex_to_bytes (payload_l, payload);
+			error_a = deserialize_op_json (tree_a.get_child ("op"));
 		}
 	}
 	catch (std::runtime_error const &)
 	{
 		error_a = true;
+	}
+	catch (boost::property_tree::ptree_error const &)
+	{
+		error_a = true;
+	}
+}
+
+bool nano::asset_hashables::deserialize_op_json (boost::property_tree::ptree const & op_a)
+{
+	auto error (nano::asset_op_from_string (op_a.get<std::string> ("kind"), op));
+	if (error)
+	{
+		return error;
+	}
+	asset_id.clear ();
+	amount.clear ();
+	link.clear ();
+	payload = nano::asset_payload{};
+
+	switch (op)
+	{
+		case nano::asset_op::issue:
+		{
+			payload.name = op_a.get<std::string> ("name");
+			error = payload.name.empty () || payload.name.size () > nano::asset_payload::max_name;
+			error = error || nano::normalize_symbol (op_a.get<std::string> ("symbol"), payload.symbol);
+			if (error)
+			{
+				return error;
+			}
+			auto const decimals_l (op_a.get<int> ("decimals"));
+			error = decimals_l < 0 || decimals_l > 18;
+			if (error)
+			{
+				return error;
+			}
+			payload.decimals = static_cast<uint8_t> (decimals_l);
+			// An absent or null maxSupply is uncapped, which is stored as zero.
+			// A maxSupply that is explicitly zero is not the same statement and
+			// is refused here rather than silently read as "uncapped".
+			auto const max_supply_l (op_a.get<std::string> ("maxSupply", ""));
+			if (!max_supply_l.empty ())
+			{
+				error = payload.max_supply.decode_dec (max_supply_l) || payload.max_supply.is_zero ();
+				if (error)
+				{
+					return error;
+				}
+			}
+			error = transfer_policy_from_string (op_a.get<std::string> ("transfer"), payload.transfer);
+			error = error || swap_policy_from_string (op_a.get<std::string> ("swap"), payload.swap);
+			if (error)
+			{
+				return error;
+			}
+			auto const metadata (op_a.get_child_optional ("metadata"));
+			if (metadata)
+			{
+				payload.description = metadata->get<std::string> ("description", "");
+				payload.image = metadata->get<std::string> ("image", "");
+				auto const kind_l (metadata->get<std::string> ("kind", ""));
+				if (!kind_l.empty ())
+				{
+					error = asset_kind_from_string (kind_l, payload.kind);
+				}
+				error = error || payload.description.size () > nano::asset_payload::max_description || payload.image.size () > nano::asset_payload::max_image;
+			}
+			// Derived, never assigned (SPEC §5.6.1), so an issuance cannot name
+			// an id that is not its own.
+			asset_id = nano::derive_asset_id (account, payload.symbol);
+			break;
+		}
+		case nano::asset_op::mint:
+		case nano::asset_op::transfer:
+		{
+			nano::account to;
+			error = asset_id.decode_hex (op_a.get<std::string> ("asset"));
+			error = error || to.decode_account (op_a.get<std::string> ("to"));
+			error = error || amount.decode_dec (op_a.get<std::string> ("amount"));
+			link = to;
+			payload.memo = op_a.get<std::string> ("memo", "");
+			error = error || payload.memo.size () > nano::asset_payload::max_memo;
+			break;
+		}
+		case nano::asset_op::burn:
+		{
+			error = asset_id.decode_hex (op_a.get<std::string> ("asset"));
+			error = error || amount.decode_dec (op_a.get<std::string> ("amount"));
+			break;
+		}
+		case nano::asset_op::asset_receive:
+		{
+			// The source block hash. Which asset it pays is the receivable's
+			// business, not the collecting block's (decisions-m2.md §10).
+			nano::block_hash source;
+			error = source.decode_hex (op_a.get<std::string> ("link"));
+			link = source;
+			break;
+		}
+	}
+	return error;
+}
+
+void nano::asset_hashables::serialize_op_json (boost::property_tree::ptree & op_a) const
+{
+	op_a.put ("kind", nano::asset_op_to_string (op));
+	switch (op)
+	{
+		case nano::asset_op::issue:
+		{
+			op_a.put ("name", payload.name);
+			op_a.put ("symbol", payload.symbol);
+			op_a.put ("decimals", static_cast<int> (payload.decimals));
+			if (payload.max_supply.is_zero ())
+			{
+				op_a.put ("maxSupply", "");
+			}
+			else
+			{
+				op_a.put ("maxSupply", payload.max_supply.to_string_dec ());
+			}
+			op_a.put ("transfer", nano::transfer_policy_to_string (payload.transfer));
+			op_a.put ("swap", nano::swap_policy_to_string (payload.swap));
+			if (!payload.description.empty () || !payload.image.empty () || payload.kind != nano::asset_kind::unspecified)
+			{
+				boost::property_tree::ptree metadata;
+				if (!payload.description.empty ())
+				{
+					metadata.put ("description", payload.description);
+				}
+				if (!payload.image.empty ())
+				{
+					metadata.put ("image", payload.image);
+				}
+				if (payload.kind != nano::asset_kind::unspecified)
+				{
+					metadata.put ("kind", nano::asset_kind_to_string (payload.kind));
+				}
+				op_a.add_child ("metadata", metadata);
+			}
+			break;
+		}
+		case nano::asset_op::mint:
+		case nano::asset_op::transfer:
+		{
+			op_a.put ("asset", asset_id.to_string ());
+			op_a.put ("to", nano::account (link).to_account ());
+			op_a.put ("amount", amount.to_string_dec ());
+			if (!payload.memo.empty ())
+			{
+				op_a.put ("memo", payload.memo);
+			}
+			break;
+		}
+		case nano::asset_op::burn:
+		{
+			op_a.put ("asset", asset_id.to_string ());
+			op_a.put ("amount", amount.to_string_dec ());
+			break;
+		}
+		case nano::asset_op::asset_receive:
+		{
+			op_a.put ("link", nano::block_hash (link).to_string ());
+			break;
+		}
 	}
 }
 
@@ -1542,13 +1930,19 @@ void nano::asset_hashables::hash (blake2b_state & hash_a) const
 	blake2b_update (&hash_a, asset_id.bytes.data (), sizeof (asset_id.bytes));
 	blake2b_update (&hash_a, amount.bytes.data (), sizeof (amount.bytes));
 	blake2b_update (&hash_a, link.bytes.data (), sizeof (link.bytes));
-	if (!payload.empty ())
+	// The length is hashed alongside the bytes. The payload is the last field,
+	// so length-prefixing is not strictly needed for injectivity here, but it
+	// keeps the hash covering exactly what the wire carries.
+	auto const bytes (payload.to_bytes (op));
+	uint16_t const payload_len (boost::endian::native_to_little (static_cast<uint16_t> (bytes.size ())));
+	blake2b_update (&hash_a, &payload_len, sizeof (payload_len));
+	if (!bytes.empty ())
 	{
-		blake2b_update (&hash_a, payload.data (), payload.size ());
+		blake2b_update (&hash_a, bytes.data (), bytes.size ());
 	}
 }
 
-nano::asset_block::asset_block (nano::account const & account_a, nano::block_hash const & previous_a, nano::account const & representative_a, nano::amount const & balance_a, nano::asset_op op_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a, nano::link const & link_a, std::vector<uint8_t> const & payload_a, nano::raw_key const & prv_a, nano::public_key const & pub_a, uint64_t work_a) :
+nano::asset_block::asset_block (nano::account const & account_a, nano::block_hash const & previous_a, nano::account const & representative_a, nano::amount const & balance_a, nano::asset_op op_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a, nano::link const & link_a, nano::asset_payload const & payload_a, nano::raw_key const & prv_a, nano::public_key const & pub_a, uint64_t work_a) :
 	hashables (account_a, previous_a, representative_a, balance_a, op_a, asset_id_a, amount_a, link_a, payload_a),
 	signature (nano::sign_message (prv_a, pub_a, hash ())),
 	work (work_a)
@@ -1643,9 +2037,10 @@ void nano::asset_block::serialize (nano::stream & stream_a) const
 	write (stream_a, hashables.asset_id);
 	write (stream_a, hashables.amount);
 	write (stream_a, hashables.link);
-	uint16_t const payload_len (static_cast<uint16_t> (hashables.payload.size ()));
+	auto const payload_bytes (hashables.payload.to_bytes (hashables.op));
+	uint16_t const payload_len (static_cast<uint16_t> (payload_bytes.size ()));
 	write (stream_a, boost::endian::native_to_little (payload_len));
-	write (stream_a, hashables.payload);
+	write (stream_a, payload_bytes);
 	write (stream_a, signature);
 	write (stream_a, boost::endian::native_to_big (work));
 }
@@ -1661,17 +2056,24 @@ bool nano::asset_block::deserialize (nano::stream & stream_a)
 		read (stream_a, hashables.balance);
 		uint8_t op_raw{ 0 };
 		read (stream_a, op_raw);
-		hashables.op = static_cast<nano::asset_op> (op_raw);
-		read (stream_a, hashables.asset_id);
-		read (stream_a, hashables.amount);
-		read (stream_a, hashables.link);
-		uint16_t payload_len{ 0 };
-		read (stream_a, payload_len);
-		boost::endian::little_to_native_inplace (payload_len);
-		read (stream_a, hashables.payload, payload_len);
-		read (stream_a, signature);
-		read (stream_a, work);
-		boost::endian::big_to_native_inplace (work);
+		error = !nano::asset_op_valid (op_raw);
+		if (!error)
+		{
+			hashables.op = static_cast<nano::asset_op> (op_raw);
+			read (stream_a, hashables.asset_id);
+			read (stream_a, hashables.amount);
+			read (stream_a, hashables.link);
+			uint16_t payload_len{ 0 };
+			read (stream_a, payload_len);
+			boost::endian::little_to_native_inplace (payload_len);
+			error = hashables.payload.deserialize (stream_a, hashables.op, payload_len);
+		}
+		if (!error)
+		{
+			read (stream_a, signature);
+			read (stream_a, work);
+			boost::endian::big_to_native_inplace (work);
+		}
 	}
 	catch (std::runtime_error const &)
 	{
@@ -1697,13 +2099,9 @@ void nano::asset_block::serialize_json (boost::property_tree::ptree & tree) cons
 	tree.put ("previous", hashables.previous.to_string ());
 	tree.put ("representative", representative ().to_account ());
 	tree.put ("balance", hashables.balance.to_string_dec ());
-	tree.put ("balance_decimal", convert_raw_to_dec (hashables.balance.to_string_dec ()));
-	tree.put ("op", asset_op_to_string (hashables.op));
-	tree.put ("asset_id", hashables.asset_id.to_string ());
-	tree.put ("amount", hashables.amount.to_string_dec ());
-	tree.put ("link", hashables.link.to_string ());
-	tree.put ("link_as_account", hashables.link.to_account ());
-	tree.put ("payload", bytes_to_hex (hashables.payload));
+	boost::property_tree::ptree op;
+	hashables.serialize_op_json (op);
+	tree.add_child ("op", op);
 	std::string signature_l;
 	signature.encode_hex (signature_l);
 	tree.put ("signature", signature_l);
@@ -1720,56 +2118,24 @@ bool nano::asset_block::deserialize_json (boost::property_tree::ptree const & tr
 		auto previous_l (tree_a.get<std::string> ("previous"));
 		auto representative_l (tree_a.get<std::string> ("representative"));
 		auto balance_l (tree_a.get<std::string> ("balance"));
-		auto op_l (tree_a.get<std::string> ("op"));
-		auto asset_id_l (tree_a.get<std::string> ("asset_id"));
-		auto amount_l (tree_a.get<std::string> ("amount"));
-		auto link_l (tree_a.get<std::string> ("link"));
-		auto payload_l (tree_a.get<std::string> ("payload", ""));
 		auto work_l (tree_a.get<std::string> ("work"));
 		auto signature_l (tree_a.get<std::string> ("signature"));
 		error = hashables.account.decode_account (account_l);
+		error = error || hashables.previous.decode_hex (previous_l);
+		error = error || hashables.representative.decode_account (representative_l);
+		error = error || hashables.balance.decode_dec (balance_l);
 		if (!error)
 		{
-			error = hashables.previous.decode_hex (previous_l);
+			error = hashables.deserialize_op_json (tree_a.get_child ("op"));
 		}
-		if (!error)
-		{
-			error = hashables.representative.decode_account (representative_l);
-		}
-		if (!error)
-		{
-			error = hashables.balance.decode_dec (balance_l);
-		}
-		if (!error)
-		{
-			error = asset_op_from_string (op_l, hashables.op);
-		}
-		if (!error)
-		{
-			error = hashables.asset_id.decode_hex (asset_id_l);
-		}
-		if (!error)
-		{
-			error = hashables.amount.decode_dec (amount_l);
-		}
-		if (!error)
-		{
-			error = hashables.link.decode_account (link_l) && hashables.link.decode_hex (link_l);
-		}
-		if (!error)
-		{
-			error = hex_to_bytes (payload_l, hashables.payload);
-		}
-		if (!error)
-		{
-			error = nano::from_string_hex (work_l, work);
-		}
-		if (!error)
-		{
-			error = signature.decode_hex (signature_l);
-		}
+		error = error || nano::from_string_hex (work_l, work);
+		error = error || signature.decode_hex (signature_l);
 	}
 	catch (std::runtime_error const &)
+	{
+		error = true;
+	}
+	catch (boost::property_tree::ptree_error const &)
 	{
 		error = true;
 	}

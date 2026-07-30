@@ -4,6 +4,7 @@
 #include <nano/lib/logger_mt.hpp>
 #include <nano/lib/numbers.hpp>
 #include <nano/node/rocksdb/account_store.hpp>
+#include <nano/node/rocksdb/asset_store.hpp>
 #include <nano/node/rocksdb/block_store.hpp>
 #include <nano/node/rocksdb/confirmation_height_store.hpp>
 #include <nano/node/rocksdb/final_vote_store.hpp>
@@ -40,6 +41,7 @@ namespace rocksdb
 	{
 	private:
 		nano::rocksdb::account_store account_store;
+		nano::rocksdb::asset_store asset_store;
 		nano::rocksdb::block_store block_store;
 		nano::rocksdb::confirmation_height_store confirmation_height_store;
 		nano::rocksdb::final_vote_store final_vote_store;
@@ -52,6 +54,7 @@ namespace rocksdb
 
 	public:
 		friend class nano::rocksdb::account_store;
+		friend class nano::rocksdb::asset_store;
 		friend class nano::rocksdb::block_store;
 		friend class nano::rocksdb::confirmation_height_store;
 		friend class nano::rocksdb::final_vote_store;
@@ -149,6 +152,7 @@ namespace rocksdb
 
 		bool do_upgrades (nano::write_transaction const &);
 		void upgrade_v21_to_v22 (nano::write_transaction const &);
+		void upgrade_v22_to_v23 (nano::write_transaction const &);
 
 		void construct_column_family_mutexes ();
 		::rocksdb::Options get_db_options ();

@@ -147,6 +147,82 @@ public:
 	nano::block_hash hash{ 0 };
 };
 
+/**
+ * A key into one of the two asset tables (decisions-m2.md §9, SPEC §7).
+ *
+ * The same facts are indexed both ways — `holdings` keyed (account, asset_id)
+ * and `holders` keyed (asset_id, account) — so one type serves both, and the
+ * `holding_key`/`holder_key` factories are what make the ordering explicit at
+ * the call site. Both orderings are prefix-scannable, which is the whole point:
+ * `ownedBy(account)` and `owner(itemId)` are each one range scan.
+ */
+class asset_key final
+{
+public:
+	asset_key () = default;
+	asset_key (nano::uint256_union const &, nano::uint256_union const &);
+	bool deserialize (nano::stream &);
+	bool operator== (nano::asset_key const &) const;
+	nano::uint256_union const & key () const;
+	nano::uint256_union first{ 0 };
+	nano::uint256_union second{ 0 };
+};
+nano::asset_key holding_key (nano::account const &, nano::uint256_union const & asset_id);
+nano::asset_key holder_key (nano::uint256_union const & asset_id, nano::account const &);
+
+/**
+ * A token's immutable parameters plus the one thing about it that moves.
+ *
+ * Everything but `circulating` is fixed at issuance (SPEC §5.6.1): the record is
+ * written once by the `issue` block and thereafter only its circulating supply
+ * changes, as mints and burns move it.
+ */
+class asset_info final
+{
+public:
+	asset_info () = default;
+	void serialize (nano::stream &) const;
+	bool deserialize (nano::stream &);
+	bool operator== (nano::asset_info const &) const;
+	/** True when maxSupply is uncapped, which is stored as zero (SPEC §5.6.6). */
+	bool uncapped () const;
+
+	nano::account issuer{};
+	std::string name;
+	std::string symbol;
+	uint8_t decimals{ 0 };
+	nano::amount max_supply{ 0 };
+	nano::transfer_policy transfer{ nano::transfer_policy::open };
+	nano::swap_policy swap{ nano::swap_policy::off };
+	std::string description;
+	std::string image;
+	nano::asset_kind kind{ nano::asset_kind::unspecified };
+	/** Capped by max_supply, so burning frees headroom (SPEC §5.6.6). */
+	nano::amount circulating{ 0 };
+};
+
+/**
+ * An uncollected asset arrival — the asset-side twin of `pending_info`.
+ *
+ * A mint or a transfer writes one of these and touches nothing of the
+ * recipient's (SPEC §5.6.3), so junk minted to a million addresses stays the
+ * sender's storage problem rather than becoming permanent per-account state.
+ */
+class asset_pending_info final
+{
+public:
+	asset_pending_info () = default;
+	asset_pending_info (nano::account const &, nano::uint256_union const &, nano::amount const &, std::string const &);
+	void serialize (nano::stream &) const;
+	bool deserialize (nano::stream &);
+	bool operator== (nano::asset_pending_info const &) const;
+	nano::account source{};
+	nano::uint256_union asset_id{ 0 };
+	nano::amount amount{ 0 };
+	/** Carried through so the recipient sees what the sender labelled it (§8). */
+	std::string memo;
+};
+
 class endpoint_key final
 {
 public:

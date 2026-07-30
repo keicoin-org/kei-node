@@ -346,6 +346,169 @@ nano::account const & nano::pending_key::key () const
 	return account;
 }
 
+nano::asset_key::asset_key (nano::uint256_union const & first_a, nano::uint256_union const & second_a) :
+	first (first_a),
+	second (second_a)
+{
+}
+
+bool nano::asset_key::deserialize (nano::stream & stream_a)
+{
+	auto error (false);
+	try
+	{
+		nano::read (stream_a, first.bytes);
+		nano::read (stream_a, second.bytes);
+	}
+	catch (std::runtime_error const &)
+	{
+		error = true;
+	}
+
+	return error;
+}
+
+bool nano::asset_key::operator== (nano::asset_key const & other_a) const
+{
+	return first == other_a.first && second == other_a.second;
+}
+
+nano::uint256_union const & nano::asset_key::key () const
+{
+	return first;
+}
+
+nano::asset_key nano::holding_key (nano::account const & account_a, nano::uint256_union const & asset_id_a)
+{
+	return nano::asset_key (account_a, asset_id_a);
+}
+
+nano::asset_key nano::holder_key (nano::uint256_union const & asset_id_a, nano::account const & account_a)
+{
+	return nano::asset_key (asset_id_a, account_a);
+}
+
+namespace
+{
+void write_stored_string (nano::stream & stream_a, std::string const & value_a)
+{
+	uint16_t const length (static_cast<uint16_t> (value_a.size ()));
+	nano::write (stream_a, length);
+	if (length > 0)
+	{
+		auto written (stream_a.sputn (reinterpret_cast<uint8_t const *> (value_a.data ()), length));
+		(void)written;
+		debug_assert (written == length);
+	}
+}
+
+void read_stored_string (nano::stream & stream_a, std::string & value_a)
+{
+	uint16_t length{ 0 };
+	nano::read (stream_a, length);
+	value_a.resize (length);
+	if (length > 0 && stream_a.sgetn (reinterpret_cast<uint8_t *> (&value_a[0]), length) != length)
+	{
+		throw std::runtime_error ("Failed to read stored string");
+	}
+}
+}
+
+void nano::asset_info::serialize (nano::stream & stream_a) const
+{
+	nano::write (stream_a, issuer.bytes);
+	write_stored_string (stream_a, name);
+	write_stored_string (stream_a, symbol);
+	nano::write (stream_a, decimals);
+	nano::write (stream_a, max_supply.bytes);
+	nano::write (stream_a, static_cast<uint8_t> (transfer));
+	nano::write (stream_a, static_cast<uint8_t> (swap));
+	write_stored_string (stream_a, description);
+	write_stored_string (stream_a, image);
+	nano::write (stream_a, static_cast<uint8_t> (kind));
+	nano::write (stream_a, circulating.bytes);
+}
+
+bool nano::asset_info::deserialize (nano::stream & stream_a)
+{
+	auto error (false);
+	try
+	{
+		nano::read (stream_a, issuer.bytes);
+		read_stored_string (stream_a, name);
+		read_stored_string (stream_a, symbol);
+		nano::read (stream_a, decimals);
+		nano::read (stream_a, max_supply.bytes);
+		uint8_t transfer_raw{ 0 };
+		uint8_t swap_raw{ 0 };
+		uint8_t kind_raw{ 0 };
+		nano::read (stream_a, transfer_raw);
+		nano::read (stream_a, swap_raw);
+		transfer = static_cast<nano::transfer_policy> (transfer_raw);
+		swap = static_cast<nano::swap_policy> (swap_raw);
+		read_stored_string (stream_a, description);
+		read_stored_string (stream_a, image);
+		nano::read (stream_a, kind_raw);
+		kind = static_cast<nano::asset_kind> (kind_raw);
+		nano::read (stream_a, circulating.bytes);
+	}
+	catch (std::runtime_error const &)
+	{
+		error = true;
+	}
+
+	return error;
+}
+
+bool nano::asset_info::operator== (nano::asset_info const & other_a) const
+{
+	return issuer == other_a.issuer && name == other_a.name && symbol == other_a.symbol && decimals == other_a.decimals && max_supply == other_a.max_supply && transfer == other_a.transfer && swap == other_a.swap && description == other_a.description && image == other_a.image && kind == other_a.kind && circulating == other_a.circulating;
+}
+
+bool nano::asset_info::uncapped () const
+{
+	return max_supply.is_zero ();
+}
+
+nano::asset_pending_info::asset_pending_info (nano::account const & source_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a, std::string const & memo_a) :
+	source (source_a),
+	asset_id (asset_id_a),
+	amount (amount_a),
+	memo (memo_a)
+{
+}
+
+void nano::asset_pending_info::serialize (nano::stream & stream_a) const
+{
+	nano::write (stream_a, source.bytes);
+	nano::write (stream_a, asset_id.bytes);
+	nano::write (stream_a, amount.bytes);
+	write_stored_string (stream_a, memo);
+}
+
+bool nano::asset_pending_info::deserialize (nano::stream & stream_a)
+{
+	auto error (false);
+	try
+	{
+		nano::read (stream_a, source.bytes);
+		nano::read (stream_a, asset_id.bytes);
+		nano::read (stream_a, amount.bytes);
+		read_stored_string (stream_a, memo);
+	}
+	catch (std::runtime_error const &)
+	{
+		error = true;
+	}
+
+	return error;
+}
+
+bool nano::asset_pending_info::operator== (nano::asset_pending_info const & other_a) const
+{
+	return source == other_a.source && asset_id == other_a.asset_id && amount == other_a.amount && memo == other_a.memo;
+}
+
 nano::unchecked_info::unchecked_info (std::shared_ptr<nano::block> const & block_a) :
 	block (block_a),
 	modified_m (nano::seconds_since_epoch ())

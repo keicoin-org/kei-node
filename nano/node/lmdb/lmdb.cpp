@@ -50,7 +50,8 @@ nano::lmdb::store::store (nano::logger_mt & logger_a, boost::filesystem::path co
 		peer_store,
 		confirmation_height_store,
 		final_vote_store,
-		version_store
+		version_store,
+		asset_store
 	},
 	// clang-format on
 	block_store{ *this },
@@ -63,6 +64,7 @@ nano::lmdb::store::store (nano::logger_mt & logger_a, boost::filesystem::path co
 	confirmation_height_store{ *this },
 	final_vote_store{ *this },
 	version_store{ *this },
+	asset_store{ *this },
 	logger (logger_a),
 	env (error, path_a, nano::mdb_env::options::make ().set_config (lmdb_config_a).set_use_no_mem_init (true)),
 	mdb_txn_tracker (logger_a, txn_tracking_config_a, block_processor_batch_max_time_a),
@@ -217,6 +219,13 @@ void nano::lmdb::store::open_databases (bool & error_a, nano::transaction const 
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "pending", flags, &pending_store.pending_v0_handle) != 0;
 	pending_store.pending_handle = pending_store.pending_v0_handle;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "final_votes", flags, &final_vote_store.final_votes_handle) != 0;
+	// Kei's asset tables (decisions-m2.md §9). They arrive with database v23,
+	// which is why they are opened unconditionally rather than behind a version
+	// check — every Kei database has them.
+	error_a |= mdb_dbi_open (env.tx (transaction_a), "assets", flags, &asset_store.assets_handle) != 0;
+	error_a |= mdb_dbi_open (env.tx (transaction_a), "holdings", flags, &asset_store.holdings_handle) != 0;
+	error_a |= mdb_dbi_open (env.tx (transaction_a), "holders", flags, &asset_store.holders_handle) != 0;
+	error_a |= mdb_dbi_open (env.tx (transaction_a), "asset_pending", flags, &asset_store.asset_pending_handle) != 0;
 
 	auto version_l = version.get (transaction_a);
 	if (version_l < 19)
@@ -304,6 +313,9 @@ bool nano::lmdb::store::do_upgrades (nano::write_transaction & transaction_a, na
 			upgrade_v21_to_v22 (transaction_a);
 			[[fallthrough]];
 		case 22:
+			upgrade_v22_to_v23 (transaction_a);
+			[[fallthrough]];
+		case 23:
 			break;
 		default:
 			logger.always_log (boost::str (boost::format ("The version of the ledger (%1%) is too high for this node") % version_l));
@@ -777,6 +789,20 @@ void nano::lmdb::store::upgrade_v20_to_v21 (nano::write_transaction const & tran
 	logger.always_log ("Finished creating new final_vote table");
 }
 
+void nano::lmdb::store::upgrade_v22_to_v23 (nano::write_transaction const & transaction_a)
+{
+	logger.always_log ("Preparing v22 to v23 database upgrade...");
+	// The asset tables are created empty. There is nothing to migrate: a v22
+	// database predates asset blocks, and ledger_processor rejected every one of
+	// them, so no asset-typed state can exist to carry forward.
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "assets", MDB_CREATE, &asset_store.assets_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "holdings", MDB_CREATE, &asset_store.holdings_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "holders", MDB_CREATE, &asset_store.holders_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "asset_pending", MDB_CREATE, &asset_store.asset_pending_handle));
+	version.put (transaction_a, 23);
+	logger.always_log ("Finished creating the asset tables");
+}
+
 void nano::lmdb::store::upgrade_v21_to_v22 (nano::write_transaction const & transaction_a)
 {
 	logger.always_log ("Preparing v21 to v22 database upgrade...");
@@ -876,6 +902,14 @@ MDB_dbi nano::lmdb::store::table_to_dbi (tables table_a) const
 			return block_store.blocks_handle;
 		case tables::pending:
 			return pending_store.pending_handle;
+		case tables::assets:
+			return asset_store.assets_handle;
+		case tables::holdings:
+			return asset_store.holdings_handle;
+		case tables::holders:
+			return asset_store.holders_handle;
+		case tables::asset_pending:
+			return asset_store.asset_pending_handle;
 		case tables::online_weight:
 			return online_weight_store.online_weight_handle;
 		case tables::meta:

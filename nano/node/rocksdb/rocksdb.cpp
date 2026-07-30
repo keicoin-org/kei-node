@@ -72,7 +72,8 @@ nano::rocksdb::store::store (nano::logger_mt & logger_a, boost::filesystem::path
 		peer_store,
 		confirmation_height_store,
 		final_vote_store,
-		version_store
+		version_store,
+		asset_store
 	},
 	// clang-format on
 	block_store{ *this },
@@ -85,6 +86,7 @@ nano::rocksdb::store::store (nano::logger_mt & logger_a, boost::filesystem::path
 	confirmation_height_store{ *this },
 	final_vote_store{ *this },
 	version_store{ *this },
+	asset_store{ *this },
 	logger{ logger_a },
 	constants{ constants },
 	rocksdb_config{ rocksdb_config_a },
@@ -192,7 +194,11 @@ std::unordered_map<char const *, nano::tables> nano::rocksdb::store::create_cf_n
 		{ "peers", tables::peers },
 		{ "confirmation_height", tables::confirmation_height },
 		{ "pruned", tables::pruned },
-		{ "final_votes", tables::final_votes } };
+		{ "final_votes", tables::final_votes },
+		{ "assets", tables::assets },
+		{ "holdings", tables::holdings },
+		{ "holders", tables::holders },
+		{ "asset_pending", tables::asset_pending } };
 
 	debug_assert (map.size () == all_tables ().size () + 1);
 	return map;
@@ -262,6 +268,9 @@ bool nano::rocksdb::store::do_upgrades (nano::write_transaction const & transact
 			upgrade_v21_to_v22 (transaction_a);
 			[[fallthrough]];
 		case 22:
+			upgrade_v22_to_v23 (transaction_a);
+			[[fallthrough]];
+		case 23:
 			break;
 		default:
 			logger.always_log (boost::str (boost::format ("The version of the ledger (%1%) is too high for this node") % version_l));
@@ -269,6 +278,17 @@ bool nano::rocksdb::store::do_upgrades (nano::write_transaction const & transact
 			break;
 	}
 	return error_l;
+}
+
+void nano::rocksdb::store::upgrade_v22_to_v23 (nano::write_transaction const & transaction_a)
+{
+	logger.always_log ("Preparing v22 to v23 database upgrade...");
+	// Nothing to migrate — a v22 database predates asset blocks, and
+	// ledger_processor rejected every one of them, so no asset-typed state can
+	// exist to carry forward. The column families themselves are created by
+	// create_column_families () when the database is opened.
+	version.put (transaction_a, 23);
+	logger.always_log ("Finished creating the asset tables");
 }
 
 void nano::rocksdb::store::upgrade_v21_to_v22 (nano::write_transaction const & transaction_a)
@@ -298,6 +318,9 @@ void nano::rocksdb::store::generate_tombstone_map ()
 	tombstone_map.emplace (std::piecewise_construct, std::forward_as_tuple (nano::tables::blocks), std::forward_as_tuple (0, 25000));
 	tombstone_map.emplace (std::piecewise_construct, std::forward_as_tuple (nano::tables::accounts), std::forward_as_tuple (0, 25000));
 	tombstone_map.emplace (std::piecewise_construct, std::forward_as_tuple (nano::tables::pending), std::forward_as_tuple (0, 25000));
+	tombstone_map.emplace (std::piecewise_construct, std::forward_as_tuple (nano::tables::holdings), std::forward_as_tuple (0, 25000));
+	tombstone_map.emplace (std::piecewise_construct, std::forward_as_tuple (nano::tables::holders), std::forward_as_tuple (0, 25000));
+	tombstone_map.emplace (std::piecewise_construct, std::forward_as_tuple (nano::tables::asset_pending), std::forward_as_tuple (0, 25000));
 }
 
 rocksdb::ColumnFamilyOptions nano::rocksdb::store::get_common_cf_options (std::shared_ptr<::rocksdb::TableFactory> const & table_factory_a, unsigned long long memtable_size_bytes_a) const
@@ -394,6 +417,22 @@ rocksdb::ColumnFamilyOptions nano::rocksdb::store::get_cf_options (std::string c
 	{
 		std::shared_ptr<::rocksdb::TableFactory> table_factory (::rocksdb::NewBlockBasedTableFactory (get_active_table_options (block_cache_size_bytes * 2)));
 		cf_options = get_active_cf_options (table_factory, memtable_size_bytes);
+	}
+	else if (cf_name_a == "assets")
+	{
+		// One entry per token ever issued, and issuance burns 1,000 Kei, so this
+		// stays small and is never deleted from in the normal case.
+		cf_options = get_small_cf_options (small_table_factory);
+	}
+	else if (cf_name_a == "holdings" || cf_name_a == "holders" || cf_name_a == "asset_pending")
+	{
+		// Zero balances are deleted rather than kept at zero (SPEC §7), and every
+		// collected receivable is a delete, so all three see heavy deletion —
+		// the same shape as "pending".
+		std::shared_ptr<::rocksdb::TableFactory> table_factory (::rocksdb::NewBlockBasedTableFactory (get_active_table_options (block_cache_size_bytes)));
+		cf_options = get_active_cf_options (table_factory, memtable_size_bytes);
+		cf_options.level0_file_num_compaction_trigger = 2;
+		cf_options.max_bytes_for_level_base = memtable_size_bytes * 2;
 	}
 	else if (cf_name_a == "final_votes")
 	{
@@ -525,6 +564,14 @@ rocksdb::ColumnFamilyHandle * nano::rocksdb::store::table_to_column_family (tabl
 			return get_column_family ("confirmation_height");
 		case tables::final_votes:
 			return get_column_family ("final_votes");
+		case tables::assets:
+			return get_column_family ("assets");
+		case tables::holdings:
+			return get_column_family ("holdings");
+		case tables::holders:
+			return get_column_family ("holders");
+		case tables::asset_pending:
+			return get_column_family ("asset_pending");
 		default:
 			release_assert (false);
 			return get_column_family ("");
@@ -866,7 +913,7 @@ void nano::rocksdb::store::on_flush (::rocksdb::FlushJobInfo const & flush_job_i
 
 std::vector<nano::tables> nano::rocksdb::store::all_tables () const
 {
-	return std::vector<nano::tables>{ tables::accounts, tables::blocks, tables::confirmation_height, tables::final_votes, tables::frontiers, tables::meta, tables::online_weight, tables::peers, tables::pending, tables::pruned, tables::vote };
+	return std::vector<nano::tables>{ tables::accounts, tables::asset_pending, tables::assets, tables::blocks, tables::confirmation_height, tables::final_votes, tables::frontiers, tables::holders, tables::holdings, tables::meta, tables::online_weight, tables::peers, tables::pending, tables::pruned, tables::vote };
 }
 
 bool nano::rocksdb::store::copy_db (boost::filesystem::path const & destination_path)

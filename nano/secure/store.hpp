@@ -103,6 +103,34 @@ public:
 		static_assert (std::is_standard_layout<nano::pending_key>::value, "Standard layout is required");
 	}
 
+	db_val (nano::asset_key const & val_a) :
+		db_val (sizeof (val_a), const_cast<nano::asset_key *> (&val_a))
+	{
+		static_assert (std::is_standard_layout<nano::asset_key>::value, "Standard layout is required");
+	}
+
+	// asset_info and asset_pending_info both carry variable-length strings, so
+	// unlike pending_info they are serialised rather than memcpy'd.
+	db_val (nano::asset_info const & val_a) :
+		buffer (std::make_shared<std::vector<uint8_t>> ())
+	{
+		{
+			nano::vectorstream stream (*buffer);
+			val_a.serialize (stream);
+		}
+		convert_buffer_to_value ();
+	}
+
+	db_val (nano::asset_pending_info const & val_a) :
+		buffer (std::make_shared<std::vector<uint8_t>> ())
+	{
+		{
+			nano::vectorstream stream (*buffer);
+			val_a.serialize (stream);
+		}
+		convert_buffer_to_value ();
+	}
+
 	db_val (nano::confirmation_height_info const & val_a) :
 		buffer (std::make_shared<std::vector<uint8_t>> ())
 	{
@@ -193,6 +221,35 @@ public:
 		debug_assert (size () == sizeof (result));
 		static_assert (sizeof (nano::pending_key::account) + sizeof (nano::pending_key::hash) == sizeof (result), "Packed class");
 		std::copy (reinterpret_cast<uint8_t const *> (data ()), reinterpret_cast<uint8_t const *> (data ()) + sizeof (result), reinterpret_cast<uint8_t *> (&result));
+		return result;
+	}
+
+	explicit operator nano::asset_key () const
+	{
+		nano::asset_key result;
+		debug_assert (size () == sizeof (result));
+		static_assert (sizeof (nano::asset_key::first) + sizeof (nano::asset_key::second) == sizeof (result), "Packed class");
+		std::copy (reinterpret_cast<uint8_t const *> (data ()), reinterpret_cast<uint8_t const *> (data ()) + sizeof (result), reinterpret_cast<uint8_t *> (&result));
+		return result;
+	}
+
+	explicit operator nano::asset_info () const
+	{
+		nano::bufferstream stream (reinterpret_cast<uint8_t const *> (data ()), size ());
+		nano::asset_info result;
+		bool error (result.deserialize (stream));
+		(void)error;
+		debug_assert (!error);
+		return result;
+	}
+
+	explicit operator nano::asset_pending_info () const
+	{
+		nano::bufferstream stream (reinterpret_cast<uint8_t const *> (data ()), size ());
+		nano::asset_pending_info result;
+		bool error (result.deserialize (stream));
+		(void)error;
+		debug_assert (!error);
 		return result;
 	}
 
@@ -506,11 +563,15 @@ private:
 enum class tables
 {
 	accounts,
+	asset_pending,
+	assets,
 	blocks,
 	confirmation_height,
 	default_unused, // RocksDB only
 	final_votes,
 	frontiers,
+	holders,
+	holdings,
 	meta,
 	online_weight,
 	peers,
@@ -634,6 +695,54 @@ public:
 	virtual nano::store_iterator<nano::pending_key, nano::pending_info> begin (nano::transaction const &) const = 0;
 	virtual nano::store_iterator<nano::pending_key, nano::pending_info> end () const = 0;
 	virtual void for_each_par (std::function<void (nano::read_transaction const &, nano::store_iterator<nano::pending_key, nano::pending_info>, nano::store_iterator<nano::pending_key, nano::pending_info>)> const & action_a) const = 0;
+};
+
+/**
+ * Manages the asset tables: the token records themselves, the two holdings
+ * indexes, and uncollected asset arrivals (decisions-m2.md §9, SPEC §7).
+ *
+ * `holdings` and `holders` hold the same facts in both orderings, which doubles
+ * the write cost of every asset movement and is what buys `balanceOf` in a
+ * single lookup and `owner(itemId)` as a one-entry prefix scan.
+ *
+ * Zero balances are deleted from both, never kept at zero: a player's state
+ * footprint shrinks when they spend, and history stays on the chain.
+ */
+class asset_store
+{
+public:
+	virtual void put (nano::write_transaction const &, nano::uint256_union const & asset_id, nano::asset_info const &) = 0;
+	virtual bool get (nano::transaction const &, nano::uint256_union const & asset_id, nano::asset_info &) = 0;
+	virtual void del (nano::write_transaction const &, nano::uint256_union const & asset_id) = 0;
+	virtual bool exists (nano::transaction const &, nano::uint256_union const & asset_id) = 0;
+	virtual size_t count (nano::transaction const &) = 0;
+	virtual nano::store_iterator<nano::uint256_union, nano::asset_info> begin (nano::transaction const &) const = 0;
+	virtual nano::store_iterator<nano::uint256_union, nano::asset_info> begin (nano::transaction const &, nano::uint256_union const & asset_id) const = 0;
+	virtual nano::store_iterator<nano::uint256_union, nano::asset_info> end () const = 0;
+
+	/** Both indexes move together, so this writes `holdings` and `holders` in one call. */
+	virtual void balance_put (nano::write_transaction const &, nano::account const &, nano::uint256_union const & asset_id, nano::amount const &) = 0;
+	/** Deletes from both indexes. Called when a balance reaches zero. */
+	virtual void balance_del (nano::write_transaction const &, nano::account const &, nano::uint256_union const & asset_id) = 0;
+	/** Zero when absent, because an absent entry and a zero balance are the same fact. */
+	virtual nano::amount balance (nano::transaction const &, nano::account const &, nano::uint256_union const & asset_id) = 0;
+	/** How many distinct assets an account holds, against the §7 cap of 1,024. */
+	virtual size_t holdings_count (nano::transaction const &, nano::account const &) = 0;
+
+	virtual nano::store_iterator<nano::asset_key, nano::amount> holdings_begin (nano::transaction const &, nano::asset_key const &) const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::amount> holdings_begin (nano::transaction const &) const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::amount> holdings_end () const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::amount> holders_begin (nano::transaction const &, nano::asset_key const &) const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::amount> holders_begin (nano::transaction const &) const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::amount> holders_end () const = 0;
+
+	virtual void pending_put (nano::write_transaction const &, nano::pending_key const &, nano::asset_pending_info const &) = 0;
+	virtual bool pending_get (nano::transaction const &, nano::pending_key const &, nano::asset_pending_info &) = 0;
+	virtual void pending_del (nano::write_transaction const &, nano::pending_key const &) = 0;
+	virtual bool pending_exists (nano::transaction const &, nano::pending_key const &) = 0;
+	virtual nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_begin (nano::transaction const &, nano::pending_key const &) const = 0;
+	virtual nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_begin (nano::transaction const &) const = 0;
+	virtual nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_end () const = 0;
 };
 
 /**
@@ -786,7 +895,8 @@ public:
 		nano::peer_store &,
 		nano::confirmation_height_store &,
 		nano::final_vote_store &,
-		nano::version_store &
+		nano::version_store &,
+		nano::asset_store &
 	);
 	// clang-format on
 	virtual ~store () = default;
@@ -803,7 +913,7 @@ public:
 	account_store & account;
 	pending_store & pending;
 	static int constexpr version_minimum{ 14 };
-	static int constexpr version_current{ 22 };
+	static int constexpr version_current{ 23 };
 
 public:
 	online_weight_store & online_weight;
@@ -812,6 +922,7 @@ public:
 	confirmation_height_store & confirmation_height;
 	final_vote_store & final_vote;
 	version_store & version;
+	asset_store & asset;
 
 	virtual unsigned max_block_write_batch_num () const = 0;
 

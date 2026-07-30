@@ -5,6 +5,7 @@
 #include <nano/lib/logger_mt.hpp>
 #include <nano/lib/numbers.hpp>
 #include <nano/node/lmdb/account_store.hpp>
+#include <nano/node/lmdb/asset_store.hpp>
 #include <nano/node/lmdb/block_store.hpp>
 #include <nano/node/lmdb/confirmation_height_store.hpp>
 #include <nano/node/lmdb/final_vote_store.hpp>
@@ -48,6 +49,7 @@ namespace lmdb
 	{
 	private:
 		nano::lmdb::account_store account_store;
+		nano::lmdb::asset_store asset_store;
 		nano::lmdb::block_store block_store;
 		nano::lmdb::confirmation_height_store confirmation_height_store;
 		nano::lmdb::final_vote_store final_vote_store;
@@ -59,6 +61,7 @@ namespace lmdb
 		nano::lmdb::version_store version_store;
 
 		friend class nano::lmdb::account_store;
+		friend class nano::lmdb::asset_store;
 		friend class nano::lmdb::block_store;
 		friend class nano::lmdb::confirmation_height_store;
 		friend class nano::lmdb::final_vote_store;
@@ -134,6 +137,7 @@ namespace lmdb
 		void upgrade_v19_to_v20 (nano::write_transaction const &);
 		void upgrade_v20_to_v21 (nano::write_transaction const &);
 		void upgrade_v21_to_v22 (nano::write_transaction const &);
+		void upgrade_v22_to_v23 (nano::write_transaction const &);
 
 		std::shared_ptr<nano::block> block_get_v18 (nano::transaction const & transaction_a, nano::block_hash const & hash_a) const;
 		nano::mdb_val block_raw_get_v18 (nano::transaction const & transaction_a, nano::block_hash const & hash_a, nano::block_type & type_a) const;

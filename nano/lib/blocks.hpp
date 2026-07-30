@@ -43,6 +43,98 @@ enum class asset_op : uint8_t
 	transfer = 3,
 	asset_receive = 4
 };
+bool asset_op_valid (uint8_t);
+char const * asset_op_to_string (nano::asset_op);
+bool asset_op_from_string (std::string const &, nano::asset_op &);
+
+/** Who may move units. Protocol-enforced and immutable once issued (SPEC §5.4). */
+enum class transfer_policy : uint8_t
+{
+	open = 0,
+	issuer_only = 1,
+	none = 2
+};
+/** Whether the issuer's own SDK runs a swap desk. Stored, never enforced (SPEC §5.4). */
+enum class swap_policy : uint8_t
+{
+	two_way = 0,
+	one_way = 1,
+	off = 2
+};
+/**
+ * An SDK-level hint so a wallet can tell a currency from a sword. The protocol
+ * does not know or care — an item is a token with supply 1 and 0 decimals.
+ */
+enum class asset_kind : uint8_t
+{
+	unspecified = 0,
+	token = 1,
+	item = 2
+};
+char const * transfer_policy_to_string (nano::transfer_policy);
+char const * swap_policy_to_string (nano::swap_policy);
+/** The empty string for `unspecified`, which the RPC omits rather than emits. */
+char const * asset_kind_to_string (nano::asset_kind);
+
+/**
+ * The op-specific tail of an asset block, and the block's one variable-length
+ * field (decisions-m2.md §7).
+ *
+ * §7 originally said the payload carried issuance metadata only. It carries the
+ * memo too, because §8 puts memos on the asset block and a `transfer` is where
+ * a memo is worth having — the shop in the Button demo correlates an order to
+ * an arrival, and doing that by amount and timing is racy. The payload is
+ * therefore op-keyed: issuance metadata for `issue`, a memo for `mint` and
+ * `transfer`, and empty for `burn` and `asset_receive`.
+ *
+ * The encoding is canonical, and it is what gets hashed — there is deliberately
+ * no separate "raw bytes" representation to keep in step with the parsed one.
+ */
+class asset_payload final
+{
+public:
+	bool operator== (nano::asset_payload const &) const;
+	/** Write the canonical encoding for `op`. Writes nothing for an op that carries none. */
+	void serialize (nano::stream &, nano::asset_op) const;
+	/** Read the canonical encoding for `op`, and fail if it does not consume `size` exactly. */
+	bool deserialize (nano::stream &, nano::asset_op, std::size_t size);
+	/** The canonical encoding as bytes, which is what the block hash covers. */
+	std::vector<uint8_t> to_bytes (nano::asset_op) const;
+
+	// `issue` only.
+	std::string name;
+	std::string symbol;
+	uint8_t decimals{ 0 };
+	/** Raw units. Zero means uncapped, which is why a cap of zero is rejected. */
+	nano::amount max_supply{ 0 };
+	nano::transfer_policy transfer{ nano::transfer_policy::open };
+	nano::swap_policy swap{ nano::swap_policy::off };
+	std::string description;
+	/** An IPFS CID. The chain stores the pointer; the asset lives on IPFS (SPEC §7). */
+	std::string image;
+	nano::asset_kind kind{ nano::asset_kind::unspecified };
+
+	// `mint` and `transfer` only (decisions-m2.md §8).
+	std::string memo;
+
+	// Bounds, enforced here so a block that cannot be stored cannot be parsed
+	// either. The ledger repeats the ones that carry a user-facing message.
+	static std::size_t constexpr max_name = 64;
+	static std::size_t constexpr max_symbol = 20;
+	static std::size_t constexpr max_description = 256;
+	static std::size_t constexpr max_image = 128;
+	static std::size_t constexpr max_memo = 128;
+};
+
+/**
+ * Asset identity is derived, not assigned (SPEC §5.6.1) — blake2b-256 over the
+ * issuer's public key and the normalised symbol. That is what makes issuance
+ * idempotent structurally rather than by lookup, and it is why nothing can race
+ * an issuance.
+ */
+nano::uint256_union derive_asset_id (nano::public_key const &, std::string const & symbol);
+/** Uppercased and trimmed. Returns false if the symbol is not 1-20 of [A-Z0-9-]. */
+bool normalize_symbol (std::string const &, std::string &);
 class block_details
 {
 	static_assert (std::is_same<std::underlying_type<nano::epoch>::type, uint8_t> (), "Epoch enum is not the proper type");
@@ -398,10 +490,14 @@ class asset_hashables
 {
 public:
 	asset_hashables () = default;
-	asset_hashables (nano::account const &, nano::block_hash const &, nano::account const &, nano::amount const &, nano::asset_op, nano::uint256_union const &, nano::amount const &, nano::link const &, std::vector<uint8_t> const &);
+	asset_hashables (nano::account const &, nano::block_hash const &, nano::account const &, nano::amount const &, nano::asset_op, nano::uint256_union const &, nano::amount const &, nano::link const &, nano::asset_payload const &);
 	asset_hashables (bool &, nano::stream &);
 	asset_hashables (bool &, boost::property_tree::ptree const &);
 	void hash (blake2b_state &) const;
+	/** Read the SDK's nested `op` object into the flat fields of the §7 layout. */
+	bool deserialize_op_json (boost::property_tree::ptree const &);
+	/** Write those fields back out in the shape `process` accepts. */
+	void serialize_op_json (boost::property_tree::ptree &) const;
 	// Signer. One chain per account (§5.6.1), same as every inherited block type.
 	nano::account account;
 	// Links into the account's one chain.
@@ -420,12 +516,10 @@ public:
 	nano::amount amount;
 	// Counterparty account, or the source block hash for `asset_receive`.
 	nano::link link;
-	// Issuance metadata only: name, symbol, decimals, max supply, transfer
-	// policy, swap policy, IPFS CID. Empty for everything but `issue`. This is
-	// the one variable-length field in an otherwise fixed-size layout — see
-	// decisions-m2.md §7, which flags the wire format "provisional until it
-	// compiles" precisely because of this field.
-	std::vector<uint8_t> payload;
+	// The op-specific tail: issuance metadata for `issue`, a memo for `mint`
+	// and `transfer`, empty otherwise. The one variable-length field in an
+	// otherwise fixed-size layout — see decisions-m2.md §7.
+	nano::asset_payload payload;
 	// The fixed-size portion only. payload_len (2 bytes) plus payload itself
 	// follow this and are not part of this constant — see serialize().
 	static std::size_t constexpr size = sizeof (account) + sizeof (previous) + sizeof (representative) + sizeof (balance) + sizeof (op) + sizeof (asset_id) + sizeof (amount) + sizeof (link);
@@ -434,7 +528,7 @@ class asset_block : public nano::block
 {
 public:
 	asset_block () = default;
-	asset_block (nano::account const &, nano::block_hash const &, nano::account const &, nano::amount const &, nano::asset_op, nano::uint256_union const &, nano::amount const &, nano::link const &, std::vector<uint8_t> const &, nano::raw_key const &, nano::public_key const &, uint64_t);
+	asset_block (nano::account const &, nano::block_hash const &, nano::account const &, nano::amount const &, nano::asset_op, nano::uint256_union const &, nano::amount const &, nano::link const &, nano::asset_payload const &, nano::raw_key const &, nano::public_key const &, uint64_t);
 	asset_block (bool &, nano::stream &);
 	asset_block (bool &, boost::property_tree::ptree const &);
 	virtual ~asset_block () = default;
