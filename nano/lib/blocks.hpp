@@ -13,6 +13,7 @@
 #include <boost/property_tree/ptree_fwd.hpp>
 
 #include <unordered_map>
+#include <vector>
 
 namespace nano
 {
@@ -26,7 +27,21 @@ enum class block_type : uint8_t
 	receive = 3,
 	open = 4,
 	change = 5,
-	state = 6
+	state = 6,
+	// Kei's native token primitive (decisions-m2.md §7). Every inherited type
+	// keeps its number and its meaning, per decisions-m2.md §2.
+	asset = 7
+};
+// The five asset operations M2 validates (decisions-m2.md §0, §7, §11).
+// commit/commit_close and the swap legs are SPEC §5.6.4 operations that land
+// with M4 and M5 and are deliberately not members of this enum yet.
+enum class asset_op : uint8_t
+{
+	issue = 0,
+	mint = 1,
+	burn = 2,
+	transfer = 3,
+	asset_receive = 4
 };
 class block_details
 {
@@ -379,6 +394,84 @@ public:
 	uint64_t work;
 	static std::size_t constexpr size = nano::state_hashables::size + sizeof (signature) + sizeof (work);
 };
+class asset_hashables
+{
+public:
+	asset_hashables () = default;
+	asset_hashables (nano::account const &, nano::block_hash const &, nano::account const &, nano::amount const &, nano::asset_op, nano::uint256_union const &, nano::amount const &, nano::link const &, std::vector<uint8_t> const &);
+	asset_hashables (bool &, nano::stream &);
+	asset_hashables (bool &, boost::property_tree::ptree const &);
+	void hash (blake2b_state &) const;
+	// Signer. One chain per account (§5.6.1), same as every inherited block type.
+	nano::account account;
+	// Links into the account's one chain.
+	nano::block_hash previous;
+	// Carried, so an asset block never silently changes delegation.
+	nano::account representative;
+	// The account's Kei balance, unchanged from its predecessor — except on
+	// `issue`, which burns 1,000 Kei (decisions-m2.md §7, §12), and where this
+	// field is how the burn is expressed.
+	nano::amount balance;
+	// issue | mint | burn | transfer | asset_receive
+	nano::asset_op op;
+	// H(issuer_pubkey ‖ symbol) — derived, never assigned (§5.6.1).
+	nano::uint256_union asset_id;
+	// Units, in the asset's own decimals. Zero for `issue`.
+	nano::amount amount;
+	// Counterparty account, or the source block hash for `asset_receive`.
+	nano::link link;
+	// Issuance metadata only: name, symbol, decimals, max supply, transfer
+	// policy, swap policy, IPFS CID. Empty for everything but `issue`. This is
+	// the one variable-length field in an otherwise fixed-size layout — see
+	// decisions-m2.md §7, which flags the wire format "provisional until it
+	// compiles" precisely because of this field.
+	std::vector<uint8_t> payload;
+	// The fixed-size portion only. payload_len (2 bytes) plus payload itself
+	// follow this and are not part of this constant — see serialize().
+	static std::size_t constexpr size = sizeof (account) + sizeof (previous) + sizeof (representative) + sizeof (balance) + sizeof (op) + sizeof (asset_id) + sizeof (amount) + sizeof (link);
+};
+class asset_block : public nano::block
+{
+public:
+	asset_block () = default;
+	asset_block (nano::account const &, nano::block_hash const &, nano::account const &, nano::amount const &, nano::asset_op, nano::uint256_union const &, nano::amount const &, nano::link const &, std::vector<uint8_t> const &, nano::raw_key const &, nano::public_key const &, uint64_t);
+	asset_block (bool &, nano::stream &);
+	asset_block (bool &, boost::property_tree::ptree const &);
+	virtual ~asset_block () = default;
+	using nano::block::hash;
+	void hash (blake2b_state &) const override;
+	uint64_t block_work () const override;
+	void block_work_set (uint64_t) override;
+	nano::block_hash const & previous () const override;
+	nano::account const & account () const override;
+	nano::root const & root () const override;
+	nano::link const & link () const override;
+	nano::account const & representative () const override;
+	nano::amount const & balance () const override;
+	void serialize (nano::stream &) const override;
+	bool deserialize (nano::stream &);
+	void serialize_json (std::string &, bool = false) const override;
+	void serialize_json (boost::property_tree::ptree &) const override;
+	bool deserialize_json (boost::property_tree::ptree const &);
+	void visit (nano::block_visitor &) const override;
+	void visit (nano::mutable_block_visitor &) override;
+	nano::block_type type () const override;
+	nano::signature const & block_signature () const override;
+	void signature_set (nano::signature const &) override;
+	bool operator== (nano::block const &) const override;
+	bool operator== (nano::asset_block const &) const;
+	bool valid_predecessor (nano::block const &) const override;
+	nano::asset_hashables hashables;
+	nano::signature signature;
+	uint64_t work;
+	// Unlike send/receive/open/change/state, this is not a compile-time
+	// constant — the payload is variable length (decisions-m2.md §7). There is
+	// deliberately no `nano::block::size (nano::block_type::asset)` entry
+	// (that dispatcher assumes a fixed size and backs the fixed-size wire read
+	// in nano::bootstrap::block_deserializer); asset blocks do not travel that
+	// path yet because M2's definition of done is a single local node, not
+	// bootstrap or block relay (decisions-m2.md §0).
+};
 class block_visitor
 {
 public:
@@ -387,6 +480,7 @@ public:
 	virtual void open_block (nano::open_block const &) = 0;
 	virtual void change_block (nano::change_block const &) = 0;
 	virtual void state_block (nano::state_block const &) = 0;
+	virtual void asset_block (nano::asset_block const &) = 0;
 	virtual ~block_visitor () = default;
 };
 class mutable_block_visitor
@@ -397,6 +491,7 @@ public:
 	virtual void open_block (nano::open_block &) = 0;
 	virtual void change_block (nano::change_block &) = 0;
 	virtual void state_block (nano::state_block &) = 0;
+	virtual void asset_block (nano::asset_block &) = 0;
 	virtual ~mutable_block_visitor () = default;
 };
 /**

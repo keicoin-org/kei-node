@@ -50,7 +50,7 @@ void nano::public_key::encode_account (std::string & destination_a) const
 		number_l >>= 5;
 		destination_a.push_back (account_encode (r));
 	}
-	destination_a.append ("_nab");
+	destination_a.append ("_iek");
 	std::reverse (destination_a.begin (), destination_a.end ());
 }
 
@@ -86,15 +86,19 @@ bool nano::public_key::decode_account (std::string const & source_a)
 	auto error (source_a.size () < 5);
 	if (!error)
 	{
-		auto ban_prefix (source_a[0] == 'b' && source_a[1] == 'a' && source_a[2] == 'n' && (source_a[3] == '_' || source_a[3] == '-'));
-		auto nano_prefix (source_a[0] == 'b' && source_a[1] == 'a' && source_a[2] == 'n' && source_a[3] == 'o' && (source_a[4] == '_' || source_a[4] == '-'));
+		// Banano inherited a dual-prefix decode (4-char "ban_" and a 5-char
+		// legacy variant) from Nano's own xrb_ -> nano_ rebrand; that history
+		// does not exist for Kei, so there is only ever one prefix. Both
+		// "ban_" and "kei_" are four characters, which is what keeps this a
+		// constant-sized change (decisions-m2.md §13).
+		auto kei_prefix (source_a[0] == 'k' && source_a[1] == 'e' && source_a[2] == 'i' && (source_a[3] == '_' || source_a[3] == '-'));
 		auto node_id_prefix = (source_a[0] == 'n' && source_a[1] == 'o' && source_a[2] == 'd' && source_a[3] == 'e' && source_a[4] == '_');
-		error = (ban_prefix && source_a.size () != 64) || (nano_prefix && source_a.size () != 65);
+		error = (kei_prefix && source_a.size () != 64);
 		if (!error)
 		{
-			if (ban_prefix || nano_prefix || node_id_prefix)
+			if (kei_prefix || node_id_prefix)
 			{
-				auto i (source_a.begin () + (ban_prefix ? 4 : 5));
+				auto i (source_a.begin () + (kei_prefix ? 4 : 5));
 				if (*i == '1' || *i == '3')
 				{
 					nano::uint512_t number_l;

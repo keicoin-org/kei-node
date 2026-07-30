@@ -76,6 +76,16 @@ size_t nano::block::size (nano::block_type type_a)
 		case nano::block_type::state:
 			result = nano::state_block::size;
 			break;
+		case nano::block_type::asset:
+			// asset_block is variable-length (decisions-m2.md §7) and has no
+			// compile-time size, so it cannot answer the fixed-size wire read
+			// this dispatcher backs (nano::bootstrap::block_deserializer).
+			// M2's definition of done is a single local node — no bootstrap or
+			// block relay — so that path deliberately does not support asset
+			// blocks yet; 0 makes the deserializer reject rather than
+			// misread. Revisit when P2P relay of asset blocks is scoped.
+			result = 0;
+			break;
 	}
 	return result;
 }
@@ -1321,6 +1331,518 @@ void nano::state_block::signature_set (nano::signature const & signature_a)
 	signature = signature_a;
 }
 
+namespace
+{
+char const * asset_op_to_string (nano::asset_op op_a)
+{
+	switch (op_a)
+	{
+		case nano::asset_op::issue:
+			return "issue";
+		case nano::asset_op::mint:
+			return "mint";
+		case nano::asset_op::burn:
+			return "burn";
+		case nano::asset_op::transfer:
+			return "transfer";
+		case nano::asset_op::asset_receive:
+			return "asset_receive";
+	}
+	return "invalid";
+}
+
+bool asset_op_from_string (std::string const & text_a, nano::asset_op & op_a)
+{
+	bool error (false);
+	if (text_a == "issue")
+	{
+		op_a = nano::asset_op::issue;
+	}
+	else if (text_a == "mint")
+	{
+		op_a = nano::asset_op::mint;
+	}
+	else if (text_a == "burn")
+	{
+		op_a = nano::asset_op::burn;
+	}
+	else if (text_a == "transfer")
+	{
+		op_a = nano::asset_op::transfer;
+	}
+	else if (text_a == "asset_receive")
+	{
+		op_a = nano::asset_op::asset_receive;
+	}
+	else
+	{
+		error = true;
+	}
+	return error;
+}
+
+std::string bytes_to_hex (std::vector<uint8_t> const & bytes_a)
+{
+	std::string result;
+	result.reserve (bytes_a.size () * 2);
+	static char const digits[] = "0123456789ABCDEF";
+	for (auto byte : bytes_a)
+	{
+		result.push_back (digits[byte >> 4]);
+		result.push_back (digits[byte & 0x0f]);
+	}
+	return result;
+}
+
+bool hex_nibble (char c, uint8_t & value_a)
+{
+	bool error (false);
+	if (c >= '0' && c <= '9')
+	{
+		value_a = static_cast<uint8_t> (c - '0');
+	}
+	else if (c >= 'a' && c <= 'f')
+	{
+		value_a = static_cast<uint8_t> (c - 'a' + 10);
+	}
+	else if (c >= 'A' && c <= 'F')
+	{
+		value_a = static_cast<uint8_t> (c - 'A' + 10);
+	}
+	else
+	{
+		error = true;
+	}
+	return error;
+}
+
+bool hex_to_bytes (std::string const & text_a, std::vector<uint8_t> & bytes_a)
+{
+	bool error (text_a.size () % 2 != 0);
+	if (!error)
+	{
+		bytes_a.clear ();
+		bytes_a.reserve (text_a.size () / 2);
+		for (std::size_t i (0); !error && i < text_a.size (); i += 2)
+		{
+			uint8_t hi{ 0 };
+			uint8_t lo{ 0 };
+			error = hex_nibble (text_a[i], hi) || hex_nibble (text_a[i + 1], lo);
+			if (!error)
+			{
+				bytes_a.push_back (static_cast<uint8_t> ((hi << 4) | lo));
+			}
+		}
+	}
+	return error;
+}
+}
+
+nano::asset_hashables::asset_hashables (nano::account const & account_a, nano::block_hash const & previous_a, nano::account const & representative_a, nano::amount const & balance_a, nano::asset_op op_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a, nano::link const & link_a, std::vector<uint8_t> const & payload_a) :
+	account (account_a),
+	previous (previous_a),
+	representative (representative_a),
+	balance (balance_a),
+	op (op_a),
+	asset_id (asset_id_a),
+	amount (amount_a),
+	link (link_a),
+	payload (payload_a)
+{
+}
+
+nano::asset_hashables::asset_hashables (bool & error_a, nano::stream & stream_a)
+{
+	try
+	{
+		nano::read (stream_a, account);
+		nano::read (stream_a, previous);
+		nano::read (stream_a, representative);
+		nano::read (stream_a, balance);
+		uint8_t op_raw{ 0 };
+		nano::read (stream_a, op_raw);
+		op = static_cast<nano::asset_op> (op_raw);
+		nano::read (stream_a, asset_id);
+		nano::read (stream_a, amount);
+		nano::read (stream_a, link);
+		// payload_len is little-endian on the wire — decisions-m2.md §7, the one
+		// field in this layout that departs from Nano's big-endian convention.
+		uint16_t payload_len{ 0 };
+		nano::read (stream_a, payload_len);
+		boost::endian::little_to_native_inplace (payload_len);
+		nano::read (stream_a, payload, payload_len);
+	}
+	catch (std::runtime_error const &)
+	{
+		error_a = true;
+	}
+}
+
+nano::asset_hashables::asset_hashables (bool & error_a, boost::property_tree::ptree const & tree_a)
+{
+	try
+	{
+		auto account_l (tree_a.get<std::string> ("account"));
+		auto previous_l (tree_a.get<std::string> ("previous"));
+		auto representative_l (tree_a.get<std::string> ("representative"));
+		auto balance_l (tree_a.get<std::string> ("balance"));
+		auto op_l (tree_a.get<std::string> ("op"));
+		auto asset_id_l (tree_a.get<std::string> ("asset_id"));
+		auto amount_l (tree_a.get<std::string> ("amount"));
+		auto link_l (tree_a.get<std::string> ("link"));
+		auto payload_l (tree_a.get<std::string> ("payload", ""));
+		error_a = account.decode_account (account_l);
+		if (!error_a)
+		{
+			error_a = previous.decode_hex (previous_l);
+		}
+		if (!error_a)
+		{
+			error_a = representative.decode_account (representative_l);
+		}
+		if (!error_a)
+		{
+			error_a = balance.decode_dec (balance_l);
+		}
+		if (!error_a)
+		{
+			error_a = asset_op_from_string (op_l, op);
+		}
+		if (!error_a)
+		{
+			error_a = asset_id.decode_hex (asset_id_l);
+		}
+		if (!error_a)
+		{
+			error_a = amount.decode_dec (amount_l);
+		}
+		if (!error_a)
+		{
+			error_a = link.decode_account (link_l) && link.decode_hex (link_l);
+		}
+		if (!error_a)
+		{
+			error_a = hex_to_bytes (payload_l, payload);
+		}
+	}
+	catch (std::runtime_error const &)
+	{
+		error_a = true;
+	}
+}
+
+void nano::asset_hashables::hash (blake2b_state & hash_a) const
+{
+	blake2b_update (&hash_a, account.bytes.data (), sizeof (account.bytes));
+	blake2b_update (&hash_a, previous.bytes.data (), sizeof (previous.bytes));
+	blake2b_update (&hash_a, representative.bytes.data (), sizeof (representative.bytes));
+	blake2b_update (&hash_a, balance.bytes.data (), sizeof (balance.bytes));
+	uint8_t const op_byte (static_cast<uint8_t> (op));
+	blake2b_update (&hash_a, &op_byte, sizeof (op_byte));
+	blake2b_update (&hash_a, asset_id.bytes.data (), sizeof (asset_id.bytes));
+	blake2b_update (&hash_a, amount.bytes.data (), sizeof (amount.bytes));
+	blake2b_update (&hash_a, link.bytes.data (), sizeof (link.bytes));
+	if (!payload.empty ())
+	{
+		blake2b_update (&hash_a, payload.data (), payload.size ());
+	}
+}
+
+nano::asset_block::asset_block (nano::account const & account_a, nano::block_hash const & previous_a, nano::account const & representative_a, nano::amount const & balance_a, nano::asset_op op_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a, nano::link const & link_a, std::vector<uint8_t> const & payload_a, nano::raw_key const & prv_a, nano::public_key const & pub_a, uint64_t work_a) :
+	hashables (account_a, previous_a, representative_a, balance_a, op_a, asset_id_a, amount_a, link_a, payload_a),
+	signature (nano::sign_message (prv_a, pub_a, hash ())),
+	work (work_a)
+{
+	debug_assert (account_a != nullptr);
+	debug_assert (representative_a != nullptr);
+	debug_assert (pub_a != nullptr);
+}
+
+nano::asset_block::asset_block (bool & error_a, nano::stream & stream_a) :
+	hashables (error_a, stream_a)
+{
+	if (!error_a)
+	{
+		try
+		{
+			nano::read (stream_a, signature);
+			nano::read (stream_a, work);
+			boost::endian::big_to_native_inplace (work);
+		}
+		catch (std::runtime_error const &)
+		{
+			error_a = true;
+		}
+	}
+}
+
+nano::asset_block::asset_block (bool & error_a, boost::property_tree::ptree const & tree_a) :
+	hashables (error_a, tree_a)
+{
+	if (!error_a)
+	{
+		try
+		{
+			auto type_l (tree_a.get<std::string> ("type"));
+			auto signature_l (tree_a.get<std::string> ("signature"));
+			auto work_l (tree_a.get<std::string> ("work"));
+			error_a = type_l != "asset";
+			if (!error_a)
+			{
+				error_a = nano::from_string_hex (work_l, work);
+				if (!error_a)
+				{
+					error_a = signature.decode_hex (signature_l);
+				}
+			}
+		}
+		catch (std::runtime_error const &)
+		{
+			error_a = true;
+		}
+	}
+}
+
+void nano::asset_block::hash (blake2b_state & hash_a) const
+{
+	// A preamble distinct from every inherited block type's, so an asset block
+	// cannot collide with a state block even given equal field content —
+	// decisions-m2.md §7.
+	nano::uint256_union preamble (static_cast<uint64_t> (nano::block_type::asset));
+	blake2b_update (&hash_a, preamble.bytes.data (), preamble.bytes.size ());
+	hashables.hash (hash_a);
+}
+
+uint64_t nano::asset_block::block_work () const
+{
+	return work;
+}
+
+void nano::asset_block::block_work_set (uint64_t work_a)
+{
+	work = work_a;
+}
+
+nano::block_hash const & nano::asset_block::previous () const
+{
+	return hashables.previous;
+}
+
+nano::account const & nano::asset_block::account () const
+{
+	return hashables.account;
+}
+
+void nano::asset_block::serialize (nano::stream & stream_a) const
+{
+	write (stream_a, hashables.account);
+	write (stream_a, hashables.previous);
+	write (stream_a, hashables.representative);
+	write (stream_a, hashables.balance);
+	write (stream_a, static_cast<uint8_t> (hashables.op));
+	write (stream_a, hashables.asset_id);
+	write (stream_a, hashables.amount);
+	write (stream_a, hashables.link);
+	uint16_t const payload_len (static_cast<uint16_t> (hashables.payload.size ()));
+	write (stream_a, boost::endian::native_to_little (payload_len));
+	write (stream_a, hashables.payload);
+	write (stream_a, signature);
+	write (stream_a, boost::endian::native_to_big (work));
+}
+
+bool nano::asset_block::deserialize (nano::stream & stream_a)
+{
+	auto error (false);
+	try
+	{
+		read (stream_a, hashables.account);
+		read (stream_a, hashables.previous);
+		read (stream_a, hashables.representative);
+		read (stream_a, hashables.balance);
+		uint8_t op_raw{ 0 };
+		read (stream_a, op_raw);
+		hashables.op = static_cast<nano::asset_op> (op_raw);
+		read (stream_a, hashables.asset_id);
+		read (stream_a, hashables.amount);
+		read (stream_a, hashables.link);
+		uint16_t payload_len{ 0 };
+		read (stream_a, payload_len);
+		boost::endian::little_to_native_inplace (payload_len);
+		read (stream_a, hashables.payload, payload_len);
+		read (stream_a, signature);
+		read (stream_a, work);
+		boost::endian::big_to_native_inplace (work);
+	}
+	catch (std::runtime_error const &)
+	{
+		error = true;
+	}
+
+	return error;
+}
+
+void nano::asset_block::serialize_json (std::string & string_a, bool single_line) const
+{
+	boost::property_tree::ptree tree;
+	serialize_json (tree);
+	std::stringstream ostream;
+	boost::property_tree::write_json (ostream, tree, !single_line);
+	string_a = ostream.str ();
+}
+
+void nano::asset_block::serialize_json (boost::property_tree::ptree & tree) const
+{
+	tree.put ("type", "asset");
+	tree.put ("account", hashables.account.to_account ());
+	tree.put ("previous", hashables.previous.to_string ());
+	tree.put ("representative", representative ().to_account ());
+	tree.put ("balance", hashables.balance.to_string_dec ());
+	tree.put ("balance_decimal", convert_raw_to_dec (hashables.balance.to_string_dec ()));
+	tree.put ("op", asset_op_to_string (hashables.op));
+	tree.put ("asset_id", hashables.asset_id.to_string ());
+	tree.put ("amount", hashables.amount.to_string_dec ());
+	tree.put ("link", hashables.link.to_string ());
+	tree.put ("link_as_account", hashables.link.to_account ());
+	tree.put ("payload", bytes_to_hex (hashables.payload));
+	std::string signature_l;
+	signature.encode_hex (signature_l);
+	tree.put ("signature", signature_l);
+	tree.put ("work", nano::to_string_hex (work));
+}
+
+bool nano::asset_block::deserialize_json (boost::property_tree::ptree const & tree_a)
+{
+	auto error (false);
+	try
+	{
+		debug_assert (tree_a.get<std::string> ("type") == "asset");
+		auto account_l (tree_a.get<std::string> ("account"));
+		auto previous_l (tree_a.get<std::string> ("previous"));
+		auto representative_l (tree_a.get<std::string> ("representative"));
+		auto balance_l (tree_a.get<std::string> ("balance"));
+		auto op_l (tree_a.get<std::string> ("op"));
+		auto asset_id_l (tree_a.get<std::string> ("asset_id"));
+		auto amount_l (tree_a.get<std::string> ("amount"));
+		auto link_l (tree_a.get<std::string> ("link"));
+		auto payload_l (tree_a.get<std::string> ("payload", ""));
+		auto work_l (tree_a.get<std::string> ("work"));
+		auto signature_l (tree_a.get<std::string> ("signature"));
+		error = hashables.account.decode_account (account_l);
+		if (!error)
+		{
+			error = hashables.previous.decode_hex (previous_l);
+		}
+		if (!error)
+		{
+			error = hashables.representative.decode_account (representative_l);
+		}
+		if (!error)
+		{
+			error = hashables.balance.decode_dec (balance_l);
+		}
+		if (!error)
+		{
+			error = asset_op_from_string (op_l, hashables.op);
+		}
+		if (!error)
+		{
+			error = hashables.asset_id.decode_hex (asset_id_l);
+		}
+		if (!error)
+		{
+			error = hashables.amount.decode_dec (amount_l);
+		}
+		if (!error)
+		{
+			error = hashables.link.decode_account (link_l) && hashables.link.decode_hex (link_l);
+		}
+		if (!error)
+		{
+			error = hex_to_bytes (payload_l, hashables.payload);
+		}
+		if (!error)
+		{
+			error = nano::from_string_hex (work_l, work);
+		}
+		if (!error)
+		{
+			error = signature.decode_hex (signature_l);
+		}
+	}
+	catch (std::runtime_error const &)
+	{
+		error = true;
+	}
+	return error;
+}
+
+void nano::asset_block::visit (nano::block_visitor & visitor_a) const
+{
+	visitor_a.asset_block (*this);
+}
+
+void nano::asset_block::visit (nano::mutable_block_visitor & visitor_a)
+{
+	visitor_a.asset_block (*this);
+}
+
+nano::block_type nano::asset_block::type () const
+{
+	return nano::block_type::asset;
+}
+
+bool nano::asset_block::operator== (nano::block const & other_a) const
+{
+	return blocks_equal (*this, other_a);
+}
+
+bool nano::asset_block::operator== (nano::asset_block const & other_a) const
+{
+	return hashables.account == other_a.hashables.account && hashables.previous == other_a.hashables.previous && hashables.representative == other_a.hashables.representative && hashables.balance == other_a.hashables.balance && hashables.op == other_a.hashables.op && hashables.asset_id == other_a.hashables.asset_id && hashables.amount == other_a.hashables.amount && hashables.link == other_a.hashables.link && hashables.payload == other_a.hashables.payload && signature == other_a.signature && work == other_a.work;
+}
+
+bool nano::asset_block::valid_predecessor (nano::block const & block_a) const
+{
+	return true;
+}
+
+nano::root const & nano::asset_block::root () const
+{
+	if (!hashables.previous.is_zero ())
+	{
+		return hashables.previous;
+	}
+	else
+	{
+		return hashables.account;
+	}
+}
+
+nano::link const & nano::asset_block::link () const
+{
+	return hashables.link;
+}
+
+nano::account const & nano::asset_block::representative () const
+{
+	return hashables.representative;
+}
+
+nano::amount const & nano::asset_block::balance () const
+{
+	return hashables.balance;
+}
+
+nano::signature const & nano::asset_block::block_signature () const
+{
+	return signature;
+}
+
+void nano::asset_block::signature_set (nano::signature const & signature_a)
+{
+	signature = signature_a;
+}
+
 std::shared_ptr<nano::block> nano::deserialize_block_json (boost::property_tree::ptree const & tree_a, nano::block_uniquer * uniquer_a)
 {
 	std::shared_ptr<nano::block> result;
@@ -1348,6 +1870,10 @@ std::shared_ptr<nano::block> nano::deserialize_block_json (boost::property_tree:
 		else if (type == "state")
 		{
 			obj = std::make_unique<nano::state_block> (error, tree_a);
+		}
+		else if (type == "asset")
+		{
+			obj = std::make_unique<nano::asset_block> (error, tree_a);
 		}
 
 		if (!error)
@@ -1416,6 +1942,11 @@ std::shared_ptr<nano::block> nano::deserialize_block (nano::stream & stream_a, n
 		case nano::block_type::state:
 		{
 			result = ::deserialize_block<nano::state_block> (stream_a);
+			break;
+		}
+		case nano::block_type::asset:
+		{
+			result = ::deserialize_block<nano::asset_block> (stream_a);
 			break;
 		}
 		default:
@@ -1783,7 +2314,7 @@ size_t nano::block_sideband::size (nano::block_type type_a)
 {
 	size_t result (0);
 	result += sizeof (successor);
-	if (type_a != nano::block_type::state && type_a != nano::block_type::open)
+	if (type_a != nano::block_type::state && type_a != nano::block_type::open && type_a != nano::block_type::asset)
 	{
 		result += sizeof (account);
 	}
@@ -1796,7 +2327,7 @@ size_t nano::block_sideband::size (nano::block_type type_a)
 		result += sizeof (balance);
 	}
 	result += sizeof (timestamp);
-	if (type_a == nano::block_type::state)
+	if (type_a == nano::block_type::state || type_a == nano::block_type::asset)
 	{
 		static_assert (sizeof (nano::epoch) == nano::block_details::size (), "block_details is larger than the epoch enum");
 		result += nano::block_details::size () + sizeof (nano::epoch);
@@ -1807,7 +2338,7 @@ size_t nano::block_sideband::size (nano::block_type type_a)
 void nano::block_sideband::serialize (nano::stream & stream_a, nano::block_type type_a) const
 {
 	nano::write (stream_a, successor.bytes);
-	if (type_a != nano::block_type::state && type_a != nano::block_type::open)
+	if (type_a != nano::block_type::state && type_a != nano::block_type::open && type_a != nano::block_type::asset)
 	{
 		nano::write (stream_a, account.bytes);
 	}
@@ -1820,7 +2351,7 @@ void nano::block_sideband::serialize (nano::stream & stream_a, nano::block_type 
 		nano::write (stream_a, balance.bytes);
 	}
 	nano::write (stream_a, boost::endian::native_to_big (timestamp));
-	if (type_a == nano::block_type::state)
+	if (type_a == nano::block_type::state || type_a == nano::block_type::asset)
 	{
 		details.serialize (stream_a);
 		nano::write (stream_a, static_cast<uint8_t> (source_epoch));
@@ -1833,7 +2364,7 @@ bool nano::block_sideband::deserialize (nano::stream & stream_a, nano::block_typ
 	try
 	{
 		nano::read (stream_a, successor.bytes);
-		if (type_a != nano::block_type::state && type_a != nano::block_type::open)
+		if (type_a != nano::block_type::state && type_a != nano::block_type::open && type_a != nano::block_type::asset)
 		{
 			nano::read (stream_a, account.bytes);
 		}
@@ -1852,7 +2383,7 @@ bool nano::block_sideband::deserialize (nano::stream & stream_a, nano::block_typ
 		}
 		nano::read (stream_a, timestamp);
 		boost::endian::big_to_native_inplace (timestamp);
-		if (type_a == nano::block_type::state)
+		if (type_a == nano::block_type::state || type_a == nano::block_type::asset)
 		{
 			result = details.deserialize (stream_a);
 			uint8_t source_epoch_uint8_t{ 0 };

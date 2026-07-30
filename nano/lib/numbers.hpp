@@ -11,9 +11,16 @@ using uint128_t = boost::multiprecision::uint128_t;
 using uint256_t = boost::multiprecision::uint256_t;
 using uint512_t = boost::multiprecision::uint512_t;
 // SI dividers
-nano::uint128_t const MBAN_ratio = nano::uint128_t ("100000000000000000000000000000000000"); // 10^35 = 1 million banano
-nano::uint128_t const BAN_ratio = nano::uint128_t ("100000000000000000000000000000"); // 10^29 = 1 banano
-nano::uint128_t const banoshi_ratio = nano::uint128_t ("1000000000000000000000000000"); // 10^27 = 1 hundredth banano
+//
+// Kei is 18 decimals, fixed by decisions-m2.md §4: 1 Kei = 10^18 raw, so that
+// the 10^12-Kei total supply (10^30 raw) fits a 128-bit balance with headroom.
+// Banano's ratio was 10^29 raw per unit; these constants keep Banano's names
+// and relative spacing (10^6 between the mega and unit tiers, 10^2 between the
+// unit and cent tiers) but carry Kei's values, per decisions-m2.md §4's call to
+// make this a single edit here rather than a sweep of every call site.
+nano::uint128_t const MBAN_ratio = nano::uint128_t ("1000000000000000000000000"); // 10^24 = 1 million Kei
+nano::uint128_t const BAN_ratio = nano::uint128_t ("1000000000000000000"); // 10^18 = 1 Kei
+nano::uint128_t const banoshi_ratio = nano::uint128_t ("10000000000000000"); // 10^16 = 1 hundredth Kei
 nano::uint128_t const RAW_ratio = nano::uint128_t ("1"); // 10^0
 nano::uint128_t const raw_ratio = nano::uint128_t ("1"); // 10^0
 

@@ -2640,6 +2640,27 @@ public:
 			}
 		}
 	}
+	void asset_block (nano::asset_block const & block_a)
+	{
+		// Kei's own RPC surface (kei-transaction/docs/rpc.md) is the real
+		// contract for asset operations; this only keeps the legacy
+		// account_history endpoint from silently dropping asset blocks.
+		if (raw)
+		{
+			tree.put ("type", "asset");
+			tree.put ("representative", block_a.hashables.representative.to_account ());
+			tree.put ("balance", block_a.hashables.balance.to_string_dec ());
+			tree.put ("balance_decimal", convert_raw_to_dec (block_a.hashables.balance.to_string_dec ()));
+			tree.put ("previous", block_a.hashables.previous.to_string ());
+			tree.put ("asset_id", block_a.hashables.asset_id.to_string ());
+			tree.put ("amount", block_a.hashables.amount.to_string_dec ());
+			tree.put ("link", block_a.hashables.link.to_string ());
+		}
+		else
+		{
+			tree.put ("type", "asset");
+		}
+	}
 	bool should_ignore_account (nano::public_key const & account)
 	{
 		bool ignore (false);

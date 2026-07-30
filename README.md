@@ -4,11 +4,17 @@ The Kei node. A fork of [Banano](https://github.com/BananoCoin/banano), itself a
 fork of [Nano](https://github.com/nanocurrency/nano-node), adding a **native
 token primitive** and a Kei genesis.
 
-> **Status: M2, just started.** This is a Banano V25.1 checkout plus
+> **Status: M2, in progress.** This is a Banano V25.1 checkout plus
 > [`docs/decisions-m2.md`](docs/decisions-m2.md), its own build, and its own
-> repository identity. No Kei consensus code has been written yet, and it does
-> not build on the machine it was cloned onto — see [Building](#building).
-> Nothing here holds value.
+> repository identity. The 10^18-raw ratio, `kei_` addresses, and the `asset`
+> block primitive (§7 — hashing, signing, binary and JSON (de)serialization,
+> wired through every `block_visitor`) are in and pushed to CI for a build
+> check. **Ledger validation of the five asset ops is not implemented yet** —
+> `ledger_processor::asset_block` deliberately rejects every asset block for
+> now, so nothing asset-typed is stored; that, the `holdings`/`holders` tables
+> (§9), the real genesis allocation (§5), and the RPC surface are what's left.
+> It still does not build on the machine it was cloned onto — see
+> [Building](#building). Nothing here holds value.
 
 ## Why a fork at all
 

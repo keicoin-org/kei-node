@@ -419,6 +419,7 @@ public:
 	void open_block (nano::open_block const & block_a) override;
 	void change_block (nano::change_block const & block_a) override;
 	void state_block (nano::state_block const & block_a) override;
+	void asset_block (nano::asset_block const & block_a) override;
 	nano::transaction const & transaction;
 	nano::store & store;
 	nano::block_hash current;

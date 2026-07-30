@@ -45,6 +45,13 @@ void nano::representative_visitor::state_block (nano::state_block const & block_
 	result = block_a.hash ();
 }
 
+void nano::representative_visitor::asset_block (nano::asset_block const & block_a)
+{
+	// Carries a representative field unconditionally, same as state_block
+	// (decisions-m2.md §7).
+	result = block_a.hash ();
+}
+
 nano::read_transaction::read_transaction (std::unique_ptr<nano::read_transaction_impl> read_transaction_impl) :
 	impl (std::move (read_transaction_impl))
 {

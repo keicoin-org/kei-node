@@ -606,6 +606,14 @@ public:
 			amount = balance - previous_balance;
 		}
 	}
+	void asset_block (nano::asset_block const & block_a)
+	{
+		// Asset movements don't change the Kei balance shown here (decisions-m2.md
+		// §7); a real GUI treatment of asset ops is out of scope for M2.
+		type = "Asset";
+		amount = 0;
+		account = block_a.hashables.account;
+	}
 	nano::transaction const & transaction;
 	nano::ledger & ledger;
 	std::string type;

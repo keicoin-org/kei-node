@@ -171,6 +171,15 @@ public:
 		}
 		ledger.store.block.del (transaction, hash);
 	}
+	void asset_block (nano::asset_block const & block_a) override
+	{
+		// ledger_processor::asset_block never accepts a block (see the comment
+		// there), so nothing asset-typed is ever stored and this can never be
+		// reached. Full rollback needs the holdings/holders tables (§9) and the
+		// per-op undo rules, and lands with the rest of asset ledger
+		// processing.
+		debug_assert (false && "asset_block rollback is not implemented — asset blocks are never accepted yet");
+	}
 	nano::write_transaction const & transaction;
 	nano::ledger & ledger;
 	std::vector<std::shared_ptr<nano::block>> & list;
@@ -189,6 +198,7 @@ public:
 	void state_block (nano::state_block &) override;
 	void state_block_impl (nano::state_block &);
 	void epoch_block_impl (nano::state_block &);
+	void asset_block (nano::asset_block &) override;
 	nano::ledger & ledger;
 	nano::write_transaction const & transaction;
 	nano::process_return result;
@@ -438,6 +448,26 @@ void ledger_processor::epoch_block_impl (nano::state_block & block_a)
 			}
 		}
 	}
+}
+
+void ledger_processor::asset_block (nano::asset_block & block_a)
+{
+	// The asset_block primitive (decisions-m2.md §7) exists and hashes,
+	// (de)serializes, and signs correctly, but the economic rules that decide
+	// whether one is valid — max-supply caps, the transfer policy, the 1,000
+	// Kei issuance burn (§12), weight exclusion (§6), and the holdings/holders
+	// tables (§9) — are not implemented yet. Rejecting every asset_block here
+	// keeps that honest: nothing asset-typed is stored, so every other
+	// visitor that walks the ledger (rollback, dependent-block resolution,
+	// representative lookup, RPC history) can assume it never has to handle
+	// one that was actually accepted.
+	//
+	// block_position ("this block cannot follow the previous block") is the
+	// closest existing nano::process_result to "not yet supported"; it is
+	// reused rather than adding a dedicated code, since the dedicated
+	// rejection reasons (bad decimals, max supply exceeded, ...) belong with
+	// the real validation this stands in for.
+	result.code = nano::process_result::block_position;
 }
 
 void ledger_processor::change_block (nano::change_block & block_a)
@@ -1197,6 +1227,16 @@ public:
 		if (ledger.is_epoch_link (block_a.hashables.link) || ((block_a.has_sideband () || ledger.store.block.exists (transaction, block_a.hashables.previous)) && ledger.is_send (transaction, block_a)))
 		{
 			result[1].clear ();
+		}
+	}
+	void asset_block (nano::asset_block const & block_a) override
+	{
+		result[0] = block_a.hashables.previous;
+		// link is a counterparty account for issue/mint/burn/transfer, and only
+		// a dependent block hash for asset_receive (decisions-m2.md §7, §10).
+		if (block_a.hashables.op == nano::asset_op::asset_receive)
+		{
+			result[1] = block_a.hashables.link.as_block_hash ();
 		}
 	}
 	nano::ledger const & ledger;

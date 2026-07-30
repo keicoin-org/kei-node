@@ -18,6 +18,7 @@ public:
 	void open_block (nano::open_block const & block_a) override;
 	void change_block (nano::change_block const & block_a) override;
 	void state_block (nano::state_block const & block_a) override;
+	void asset_block (nano::asset_block const & block_a) override;
 	nano::write_transaction const & transaction;
 	nano::rocksdb::block_store & block_store;
 };
@@ -289,6 +290,13 @@ void nano::block_predecessor_rocksdb_set::change_block (nano::change_block const
 	fill_value (block_a);
 }
 void nano::block_predecessor_rocksdb_set::state_block (nano::state_block const & block_a)
+{
+	if (!block_a.previous ().is_zero ())
+	{
+		fill_value (block_a);
+	}
+}
+void nano::block_predecessor_rocksdb_set::asset_block (nano::asset_block const & block_a)
 {
 	if (!block_a.previous ().is_zero ())
 	{
