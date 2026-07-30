@@ -1,0 +1,55 @@
+name: Build
+
+# The Kei node's own build. Replaces the inherited Banano workflows, which
+# built `nanocurrency/nano-node` artifacts and pushed images to the
+# `bananocoin` DockerHub namespace — neither of which is this project.
+#
+# This exists as much for development as for CI: the machine kei-node is
+# written on has no working C++ toolchain and no administrator rights, so
+# until one exists locally, this workflow is where the node actually compiles.
+# See docs/decisions-m2.md §3.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux (gcc, lmdb, dev network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Boost is vendored at submodules/boost as the Boost superproject,
+          # so this is a large recursive checkout and not an optional one:
+          # CMakeLists.txt add_subdirectory()s each Boost library directly.
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DACTIVE_NETWORK=banano_dev_network \
+            -DNANO_GUI=OFF \
+            -DNANO_TEST=ON \
+            -DPORTABLE=1
+
+      # The node executable is `bananode`, not `nano_node` — inherited from
+      # Banano (nano/nano_node/CMakeLists.txt). Renaming it to `keinode` is a
+      # packaging change (systemd unit, CPack, Docker) and is deliberately not
+      # bundled in with the CI setup.
+      - name: Build node
+        run: cmake --build build --target bananode
+
+      - name: Version
+        run: ./build/bananode --version

@@ -81,29 +81,79 @@ The anchors M2 has to touch, located and confirmed:
 Submodules (LMDB, cryptopp, argon2, gtest, flatbuffers, miniupnp) are not yet
 initialised in this checkout.
 
+**"Fork" here means a derivative codebase, not a GitHub fork with a pull request
+pending.** Kei is its own project: it diverges permanently, it never merges back,
+and no change made here is ever proposed to Banano. That distinction is obvious in
+prose and was not obvious in the git configuration, where the checkout had exactly
+one remote — `upstream` → `BananoCoin/banano`, with a push URL — and Kei's work
+sat on a branch named `m2-start` ahead of `upstream/master`. That is
+indistinguishable from a contributor preparing a PR, and a single `git push` would
+have aimed at Banano.
+
+Fixed, and the shape is now the rule:
+
+| | |
+|---|---|
+| `origin` | `keicoin-org/kei-node`, matching the sibling repos. The push default. |
+| `upstream` | `BananoCoin/banano`, **fetch only** — push URL set to `no_push`. |
+| `master` | Kei's trunk, carrying Banano's history as ancestry and tracking nothing. |
+
+Fetching upstream stays valuable for exactly the reason §2 keeps the history —
+rebasing onto a later Banano release rather than hand-porting security fixes.
+Pushing to it is never correct, so the configuration now refuses.
+
+The same confusion was inherited in the repository's furniture, and is removed
+with it: eight Banano CI workflows that built `nanocurrency/nano-node` artifacts
+and deployed to the `bananocoin` DockerHub namespace, and issue templates that
+directed anyone filing a bug on Kei to nano's issue tracker, Discord, and forum.
+They are replaced by one workflow that builds this node (§3).
+
 ## 3. Toolchain — stated plainly, because it currently blocks the build
 
 The fork is cloned and readable, and **it cannot be compiled on this machine as
-it stands.** A nano-family node needs CMake, a C++17 toolchain, and Boost; what
-is present is a MinGW `g++` and nothing else — no `cmake`, no `make`, no `ninja`,
-no Docker, and WSL is installed with no distribution.
+it stands.** This was first written from a quick scan; it has since been checked
+by trying to compile, and both the facts and the recommendation changed.
 
-This is a real dependency, not a detail to discover halfway through the wire
-format, so it is written down first. The options, in the order they are worth
-trying:
+**What is actually here.** MSVC is present — Visual Studio 2022 Build Tools,
+toolset 14.44, `cl.exe` 19.44 — which the first pass missed. It is also
+**unusable**, because no Windows SDK is installed: `C:\Program Files (x86)\
+Windows Kits\10` contains only `UnionMetadata`, no `Include`, `Lib`, or `bin`.
+`cl` starts and then dies on `fatal error C1083: Cannot open include file:
+'stdio.h'`. A MinGW `g++` is present and does compile trivial C++, but a
+nano-family node is not trivial C++ and upstream supports MSVC on Windows, not
+MinGW. There is no `cmake`, `make`, or `ninja`; no Docker; and WSL is installed
+with no distribution.
 
-1. **Docker** (`docker/node/Dockerfile` exists upstream) — reproducible, matches
-   CI, and avoids a Windows-native Boost build, which is the single most
-   time-consuming way to do this.
-2. **WSL2 + Ubuntu** — `wsl --install -d Ubuntu`, then the standard Linux build.
-   Closest to how the node will actually be deployed on Hetzner at M3.
-3. **Windows-native** — CMake + vcpkg + Boost. Works, and upstream CI does it,
-   but it is the slowest path and the least like production.
+**Boost is not a dependency to install.** V25.1 vendors the Boost superproject at
+`submodules/boost` and `add_subdirectory()`s each library it needs
+(`CMakeLists.txt:361`, `:448`). So the expensive part this section originally
+warned about — a Windows-native Boost build via vcpkg — does not exist. It costs
+a large recursive submodule checkout instead, which is bandwidth rather than
+hours of compiling. That removes the main argument against option (3).
 
-Recommendation is (1) or (2); either is a one-time setup that unblocks everything
-after it. **Nothing below this line can be verified until one of them exists**,
+**The binding constraint is not disk or time, it is that this account is not an
+administrator.** Installing a Windows SDK, `wsl --install -d Ubuntu`, and Docker
+Desktop all require elevation. None of the three local options can be set up
+without the machine's owner doing it. Stated in order:
+
+1. **GitHub Actions** — `.github/workflows/build.yml`, added with this change.
+   Ubuntu, gcc, vendored Boost, `NANO_GUI=OFF`, dev network. Needs **no admin and
+   no local install**, and it is the only option available as things stand.
+   Feedback is minutes per iteration rather than seconds, which is bad for
+   iterating on C++ and perfectly adequate for keeping the tree honest.
+2. **WSL2 + Ubuntu** — `wsl --install -d Ubuntu` (needs admin, one reboot).
+   Closest to how the node is actually deployed on Hetzner at M3, and the best
+   local loop once it exists. This is the one to ask for.
+3. **Windows SDK + CMake** — makes the already-installed MSVC work. Cheaper than
+   it looked now that Boost is vendored, but it is still the least production-like
+   path, and it is the environment upstream's Windows CI exercises least.
+4. **Docker Desktop** — reproducible, but the heaviest install of the four and it
+   still needs admin, so it no longer leads.
+
+**Nothing below this line can be verified locally until (2) or (3) exists**,
 which is precisely why the decisions below are written against the mock's
-semantics, which *are* verified.
+semantics, which *are* verified — and why (1) exists, so that "unverified" means
+"not yet run on this machine" rather than "never compiled anywhere".
 
 ## 4. Kei is 10^18 raw, fixed here rather than left provisional
 

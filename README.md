@@ -4,10 +4,11 @@ The Kei node. A fork of [Banano](https://github.com/BananoCoin/banano), itself a
 fork of [Nano](https://github.com/nanocurrency/nano-node), adding a **native
 token primitive** and a Kei genesis.
 
-> **Status: M2, just started.** This is an unmodified Banano V25.1 checkout plus
-> [`docs/decisions-m2.md`](docs/decisions-m2.md). No Kei consensus code has been
-> written yet, and it does not build on the machine it was cloned onto — see
-> [Building](#building). Nothing here holds value.
+> **Status: M2, just started.** This is a Banano V25.1 checkout plus
+> [`docs/decisions-m2.md`](docs/decisions-m2.md), its own build, and its own
+> repository identity. No Kei consensus code has been written yet, and it does
+> not build on the machine it was cloned onto — see [Building](#building).
+> Nothing here holds value.
 
 ## Why a fork at all
 
@@ -66,30 +67,46 @@ changed.** M3 then points the demo game at it, and nothing above the URL moves.
 
 ## Building
 
-Standard Banano/Nano build: CMake, a C++17 toolchain, and Boost, with submodules
-initialised first.
+Standard Banano/Nano build: CMake and a C++ toolchain, with submodules
+initialised first. **Boost is not a dependency you install** — the Boost
+superproject is vendored at `submodules/boost` and built as part of the tree,
+which is why the checkout is large and why there is no vcpkg step.
 
 ```sh
 git submodule update --init --recursive
+
+cmake -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DACTIVE_NETWORK=banano_dev_network \
+  -DNANO_GUI=OFF -DNANO_TEST=ON -DPORTABLE=1
+cmake --build build --target nano_node
 ```
 
 **It does not build on the machine this was cloned onto**, which is worth stating
-rather than discovering: there is a MinGW `g++` and nothing else — no `cmake`, no
-`make`, no `ninja`, no Docker, and WSL is installed with no distribution. In
-rough order of how much time they cost:
+rather than discovering. MSVC 2022 Build Tools is installed but unusable — there
+is no Windows SDK, so `cl` fails on `stdio.h` — and MinGW `g++` compiles trivial
+C++ but is not a toolchain upstream supports. There is no `cmake`, no `ninja`, no
+Docker, and WSL has no distribution. The binding constraint is that the account is
+**not an administrator**, so every local fix needs the machine's owner:
 
-1. **Docker** — `docker/node/Dockerfile` exists upstream, matches CI, and avoids
-   a Windows-native Boost build.
-2. **WSL2 + Ubuntu** — `wsl --install -d Ubuntu`. Closest to how the node is
-   actually deployed at M3.
-3. **Windows-native** — CMake + vcpkg + Boost. Works, and upstream CI does it,
-   but it is the slowest path and the least like production.
+1. **GitHub Actions** — [`.github/workflows/build.yml`](.github/workflows/build.yml).
+   No admin, no local install, and the only option that works today.
+2. **WSL2 + Ubuntu** — `wsl --install -d Ubuntu`. Needs admin. Closest to how the
+   node is actually deployed at M3, and the best local loop. Ask for this one.
+3. **Windows SDK + CMake** — makes the installed MSVC work. Needs admin.
+4. **Docker Desktop** — reproducible, heaviest install, also needs admin.
+
+[`docs/decisions-m2.md`](docs/decisions-m2.md) §3 has the detail.
 
 ## Upstream
 
-`upstream` points at BananoCoin/banano. Full upstream history is kept
-deliberately, so this can be rebased onto a later Banano release rather than
-hand-porting security fixes forever.
+`upstream` points at BananoCoin/banano and is **fetch only** — its push URL is set
+to `no_push`. Full upstream history is kept deliberately, so this can be rebased
+onto a later Banano release rather than hand-porting security fixes forever.
+
+**Nothing here is ever proposed back to Banano.** "Fork" means a derivative
+codebase that diverges permanently, not a GitHub fork with a pull request pending.
+Kei's own remote is `origin` → `keicoin-org/kei-node`, and `master` is Kei's trunk.
 
 Forked at `c1f8405d` — Banano V25.1. Upstream's own README is preserved as
 [`README-banano.md`](README-banano.md).
