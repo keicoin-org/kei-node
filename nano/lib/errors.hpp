@@ -143,6 +143,18 @@ enum class error_process
 	balance_mismatch, // Balance and amount delta don't match
 	block_position, // This block cannot follow the previous block
 	insufficient_work, // Insufficient work for this block, even though it passed the minimal validation
+	no_such_asset,
+	asset_exists,
+	not_issuer,
+	over_max_supply,
+	transfer_not_permitted,
+	insufficient_asset_balance,
+	issuance_burn_mismatch,
+	asset_balance_mismatch,
+	bad_asset_payload,
+	too_many_assets,
+	reserve_representative,
+	reserve_locked,
 	other
 };
 

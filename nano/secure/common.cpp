@@ -933,6 +933,30 @@ nano::stat::detail nano::to_stat_detail (nano::process_result process_result)
 			return nano::stat::detail::block_position;
 		case process_result::insufficient_work:
 			return nano::stat::detail::insufficient_work;
+		case process_result::no_such_asset:
+			return nano::stat::detail::no_such_asset;
+		case process_result::asset_exists:
+			return nano::stat::detail::asset_exists;
+		case process_result::not_issuer:
+			return nano::stat::detail::not_issuer;
+		case process_result::over_max_supply:
+			return nano::stat::detail::over_max_supply;
+		case process_result::transfer_not_permitted:
+			return nano::stat::detail::transfer_not_permitted;
+		case process_result::insufficient_asset_balance:
+			return nano::stat::detail::insufficient_asset_balance;
+		case process_result::issuance_burn_mismatch:
+			return nano::stat::detail::issuance_burn_mismatch;
+		case process_result::asset_balance_mismatch:
+			return nano::stat::detail::asset_balance_mismatch;
+		case process_result::bad_asset_payload:
+			return nano::stat::detail::bad_asset_payload;
+		case process_result::too_many_assets:
+			return nano::stat::detail::too_many_assets;
+		case process_result::reserve_representative:
+			return nano::stat::detail::reserve_representative;
+		case process_result::reserve_locked:
+			return nano::stat::detail::reserve_locked;
 	}
 	debug_assert (false && "There should be always a defined nano::stat::detail that is not _last");
 	return nano::stat::detail::_last;

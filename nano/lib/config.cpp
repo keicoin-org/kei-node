@@ -29,25 +29,29 @@ struct HexTo
 nano::work_thresholds const nano::work_thresholds::publish_full (
 0xfffffe0000000000,
 0xfffffff000000000, // 32x higher than originally
-0x0000000000000000 // remove receive work requirements
+0x0000000000000000, // remove receive work requirements
+0xfffffffe00000000 // tier A: 8x higher than epoch_2
 );
 
 nano::work_thresholds const nano::work_thresholds::publish_beta (
 0xfffff00000000000, // 64x lower than publish_full.epoch_1
 0xfffff00000000000, // same as epoch_1
-0xffffe00000000000 // 2x lower than epoch_1
+0xffffe00000000000, // 2x lower than epoch_1
+0xfffffe0000000000 // tier A: 8x higher than epoch_2
 );
 
 nano::work_thresholds const nano::work_thresholds::publish_dev (
 0xfe00000000000000, // Very low for tests
 0xffc0000000000000, // 8x higher than epoch_1
-0xf000000000000000 // 8x lower than epoch_1
+0xf000000000000000, // 8x lower than epoch_1
+0xfff8000000000000 // tier A: 8x higher than epoch_2
 );
 
 nano::work_thresholds const nano::work_thresholds::publish_test ( // defaults to live network levels
 get_env_threshold_or_default ("NANO_TEST_EPOCH_1", 0xffffffc000000000),
 get_env_threshold_or_default ("NANO_TEST_EPOCH_2", 0xfffffff800000000), // 8x higher than epoch_1
-get_env_threshold_or_default ("NANO_TEST_EPOCH_2_RECV", 0xfffffe0000000000) // 8x lower than epoch_1
+get_env_threshold_or_default ("NANO_TEST_EPOCH_2_RECV", 0xfffffe0000000000), // 8x lower than epoch_1
+get_env_threshold_or_default ("NANO_TEST_TIER_A", 0xffffffff00000000) // tier A: 8x higher than epoch_2
 );
 
 uint64_t nano::work_thresholds::threshold_entry (nano::work_version const version_a, nano::block_type const type_a) const
@@ -107,6 +111,23 @@ uint64_t nano::work_thresholds::threshold (nano::block_details const & details_a
 			debug_assert (false && "Invalid epoch specified to work_v1 ledger work_threshold");
 	}
 	return result;
+}
+
+uint64_t nano::work_thresholds::threshold_asset (nano::asset_op const op_a) const
+{
+	switch (op_a)
+	{
+		case nano::asset_op::issue:
+		case nano::asset_op::mint:
+			return tier_a;
+		case nano::asset_op::transfer:
+			return tier_b ();
+		case nano::asset_op::burn:
+		case nano::asset_op::asset_receive:
+			return tier_c ();
+	}
+	debug_assert (false && "Invalid asset op specified to threshold_asset");
+	return std::numeric_limits<uint64_t>::max ();
 }
 
 uint64_t nano::work_thresholds::threshold (nano::work_version const version_a, nano::block_details const details_a) const

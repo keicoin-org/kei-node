@@ -35,7 +35,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build
+            build-essential cmake ninja-build ccache
+
+      # Vendored Boost and RocksDB dominate the build, and neither changes
+      # between runs, so without this every iteration recompiles both from
+      # scratch. This is the difference between a ~40 minute loop and a ~5
+      # minute one, which matters a great deal when CI is the only compiler
+      # available (§3).
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
 
       - name: Configure
         run: |
@@ -44,14 +57,34 @@ jobs:
             -DACTIVE_NETWORK=banano_dev_network \
             -DNANO_GUI=OFF \
             -DNANO_TEST=ON \
-            -DPORTABLE=1
+            -DPORTABLE=1 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       # The node executable is `bananode`, not `nano_node` — inherited from
       # Banano (nano/nano_node/CMakeLists.txt). Renaming it to `keinode` is a
       # packaging change (systemd unit, CPack, Docker) and is deliberately not
       # bundled in with the CI setup.
+      #
+      # Diagnostics are re-emitted as workflow `::error` commands so they become
+      # check annotations. That puts them on the pull request next to the line
+      # that caused them, and it is also the only way to read a failure without
+      # downloading the log.
       - name: Build node
-        run: cmake --build build --target bananode
+        run: |
+          set -o pipefail
+          if ! cmake --build build --target bananode 2>&1 | tee build.log; then
+            grep -E '^[^ ]+:[0-9]+:[0-9]+: (error|fatal error):' build.log \
+              | sort -u | head -40 \
+              | while IFS= read -r line; do
+                  file=$(echo "$line" | cut -d: -f1)
+                  lineno=$(echo "$line" | cut -d: -f2)
+                  col=$(echo "$line" | cut -d: -f3)
+                  msg=$(echo "$line" | cut -d: -f4-)
+                  echo "::error file=${file},line=${lineno},col=${col}::${msg}"
+                done
+            exit 1
+          fi
 
       - name: Version
         run: ./build/bananode --version

@@ -260,6 +260,30 @@ std::string nano::error_process_messages::message (int ev) const
 			return "This block cannot follow the previous block";
 		case nano::error_process::insufficient_work:
 			return "Block work is insufficient";
+		case nano::error_process::no_such_asset:
+			return "No asset with that id exists on this network";
+		case nano::error_process::asset_exists:
+			return "That issuer has already issued that symbol; asset ids are derived from (issuer, symbol), so read the existing asset instead of re-issuing";
+		case nano::error_process::not_issuer:
+			return "Only an asset's issuer can mint it";
+		case nano::error_process::over_max_supply:
+			return "This would exceed the asset's maximum supply; burn some first, because burning frees headroom";
+		case nano::error_process::transfer_not_permitted:
+			return "The asset's transfer policy does not permit this move";
+		case nano::error_process::insufficient_asset_balance:
+			return "The account does not hold enough of that asset";
+		case nano::error_process::issuance_burn_mismatch:
+			return "Issuing an asset burns exactly 1,000 Kei, and this block's balance does not";
+		case nano::error_process::asset_balance_mismatch:
+			return "An asset block must carry the account's Kei balance unchanged; only issuance changes it";
+		case nano::error_process::bad_asset_payload:
+			return "Malformed issuance parameters";
+		case nano::error_process::too_many_assets:
+			return "The account already holds the maximum of 1,024 distinct assets; burn or transfer something first";
+		case nano::error_process::reserve_representative:
+			return "Reserve accounts must name the null representative, so reserve Kei carries no weight of any kind";
+		case nano::error_process::reserve_locked:
+			return "Reserve Kei can only move through a passed on-chain vote";
 		case nano::error_process::other:
 			return "Error processing block";
 	}

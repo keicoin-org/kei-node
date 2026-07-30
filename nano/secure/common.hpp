@@ -417,7 +417,22 @@ enum class process_result
 	balance_mismatch, // Balance and amount delta don't match
 	representative_mismatch, // Representative is changed when it is not allowed
 	block_position, // This block cannot follow the previous block
-	insufficient_work // Insufficient work for this block, even though it passed the minimal validation
+	insufficient_work, // Insufficient work for this block, even though it passed the minimal validation
+	// Asset operations (decisions-m2.md §7). Each names a distinct thing the
+	// signer did wrong, because "invalid block" is not an answer a game
+	// developer can act on.
+	no_such_asset, // The block names an asset that was never issued
+	asset_exists, // (issuer, symbol) already names an asset; ids are derived, so re-issuing is a no-op
+	not_issuer, // Only the issuer may mint its own asset
+	over_max_supply, // Minting this would exceed the asset's circulating supply cap
+	transfer_not_permitted, // The asset's immutable transfer policy forbids this move
+	insufficient_asset_balance, // The signer does not hold what they tried to move
+	issuance_burn_mismatch, // An issue block must burn exactly 1,000 Kei (SPEC §5.6.5)
+	asset_balance_mismatch, // A non-issue asset block must carry the Kei balance unchanged
+	bad_asset_payload, // Malformed issuance parameters: name, decimals, max supply, policy
+	too_many_assets, // The account already holds the §7 maximum of 1,024 distinct assets
+	reserve_representative, // A reserve account must name the null representative (SPEC §5.7)
+	reserve_locked // Reserve Kei moves only through a passed on-chain vote (SPEC §5.7)
 };
 class process_return final
 {

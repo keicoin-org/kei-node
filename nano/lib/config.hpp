@@ -143,6 +143,7 @@ enum class block_type : uint8_t;
 class root;
 class block;
 class block_details;
+enum class asset_op : uint8_t;
 
 class work_thresholds
 {
@@ -151,15 +152,24 @@ public:
 	uint64_t const epoch_2;
 	uint64_t const epoch_2_receive;
 
+	/**
+	 * Tier A (decisions-m2.md §11): `issue` and `mint`, the two operations that
+	 * create permanent state and are the cheapest to abuse. Tiers B and C are
+	 * not new constants — B is `epoch_2`, the send threshold, and C is
+	 * `epoch_2_receive`, which is what §11 means by "= Banano send" and
+	 * "= Banano receive". Only A had no inherited equivalent.
+	 */
+	uint64_t const tier_a;
+
 	// Automatically calculated. The base threshold is the maximum of all thresholds and is used for all work multiplier calculations
 	uint64_t const base;
 
 	// Automatically calculated. The entry threshold is the minimum of all thresholds and defines the required work to enter the node, but does not guarantee a block is processed
 	uint64_t const entry;
 
-	constexpr work_thresholds (uint64_t epoch_1_a, uint64_t epoch_2_a, uint64_t epoch_2_receive_a) :
-		epoch_1 (epoch_1_a), epoch_2 (epoch_2_a), epoch_2_receive (epoch_2_receive_a),
-		base (std::max ({ epoch_1, epoch_2, epoch_2_receive })),
+	constexpr work_thresholds (uint64_t epoch_1_a, uint64_t epoch_2_a, uint64_t epoch_2_receive_a, uint64_t tier_a_a) :
+		epoch_1 (epoch_1_a), epoch_2 (epoch_2_a), epoch_2_receive (epoch_2_receive_a), tier_a (tier_a_a),
+		base (std::max ({ epoch_1, epoch_2, epoch_2_receive, tier_a })),
 		entry (std::min ({ epoch_1, epoch_2, epoch_2_receive }))
 	{
 	}
@@ -171,6 +181,16 @@ public:
 
 	uint64_t threshold_entry (nano::work_version const, nano::block_type const) const;
 	uint64_t threshold (nano::block_details const &) const;
+	/** The tier an asset operation must reach (decisions-m2.md §11). */
+	uint64_t threshold_asset (nano::asset_op const) const;
+	uint64_t tier_b () const
+	{
+		return epoch_2;
+	}
+	uint64_t tier_c () const
+	{
+		return epoch_2_receive;
+	}
 	// Ledger threshold
 	uint64_t threshold (nano::work_version const, nano::block_details const) const;
 	uint64_t threshold_base (nano::work_version const) const;
