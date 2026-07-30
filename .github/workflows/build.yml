@@ -9,9 +9,11 @@ name: Build
 # until one exists locally, this workflow is where the node actually compiles.
 # See docs/decisions-m2.md §3.
 
+# Every branch, not just master: with no local toolchain this workflow is the
+# only place the tree compiles, so a branch that cannot reach it cannot be
+# worked on at all.
 on:
   push:
-    branches: [master]
   pull_request:
   workflow_dispatch:
 
