@@ -494,9 +494,33 @@ sent, because the name belongs to the contract. Kei receivables and asset
 receivables arrive in one list because they are one event to the SDK — something
 arrived and needs a block of the recipient's own to collect it (SPEC §5.6.3).
 
+**Absent is null, and that one is a divergence.** Looking for more of the same
+turned up two: `account_info` answered `Account not found` and `block_info`
+answered `Block not found`, where `docs/rpc.md` says *"anything absent is `null`
+or an empty array, not an error"*. `HttpNode` raises any `error` as a thrown
+`KeiError`, so a wallet asking its balance before it had ever been paid threw
+where it has to read zero — and every account starts there.
+
+Both now answer `null`, and `block_info` also answers with `block` in the shape
+`process` accepts rather than only Nano's `contents` string. Unlike
+`accounts_receivable` there is no parameter to tell the two callers apart here,
+so this is taken from inherited behaviour rather than added beside it. §5.6.8
+says to stay compatible wherever it costs nothing; here it costs the contract,
+so the contract wins.
+
+**Two shapes are still wrong, and one of them needs a decision rather than
+code.** `account_history` returns Nano's history entries — `type`, `amount`,
+`account` — where the contract wants blocks in the shape `process` accepts,
+under the same `history` key. There is no parameter to dispatch on, so serving
+the contract means Nano's `account_history` stops returning what it returns
+today, and that is a larger break than the two above: it is the endpoint every
+inherited explorer reads. It is left alone deliberately, pending that call.
+`faucet` (testnet only) is not implemented at all, which is consistent with §0
+putting the public testnet in M3.
+
 ## 16. What is not finished, stated plainly
 
-Two things are implemented but not yet demonstrated, and one is not implemented.
+Two things are implemented but not yet demonstrated, and two are not implemented.
 
 **The reserve set is empty.** `ledger_constants::reserve_accounts` is the fixed,
 immutable enumeration §5.7 requires, and `is_reserve` enforces the null
@@ -517,6 +541,10 @@ reserve account can still `issue`, and issuance destroys 1,000 Kei (§12). That 
 a supply change with no vote behind it, which SPEC §5.7 does not permit. The node
 refuses it. The cost is nothing today, because the reserve set is empty until
 the ceremony, and the mock should adopt the same rule.
+
+**`account_history` still answers in Nano's shape**, and `faucet` does not answer
+at all. §15 has both, and the first needs a decision about what inherited
+tooling is owed before it is worth writing.
 
 **The SDK's hash has to move.** §7 settled that `asset` blocks hash as binary
 fields under a preamble, and §14 extends that to every block type. The SDK still
