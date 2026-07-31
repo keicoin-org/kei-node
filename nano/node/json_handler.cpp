@@ -1081,6 +1081,16 @@ void nano::json_handler::accounts_pending ()
 
 void nano::json_handler::accounts_receivable ()
 {
+	// docs/rpc.md asks a different question of this action than Nano does: one
+	// account rather than a list of them, and one flat array that carries
+	// assets alongside Kei. Both shapes answer to the same name because that
+	// name is the contract's, and they are told apart by which parameter the
+	// caller sent — `account` is Kei's, `accounts` is the inherited one.
+	if (!request.count ("accounts"))
+	{
+		kei_receivables ();
+		return;
+	}
 	auto count (count_optional_impl ());
 	auto threshold (threshold_optional_impl ());
 	bool const source = request.get<bool> ("source", false);
@@ -5691,6 +5701,53 @@ void nano::json_handler::asset_holders ()
 			holders.push_back (std::make_pair ("", entry));
 		}
 		nano::json::add_array (response_l, "holders", holders);
+	}
+	response_errors ();
+}
+
+void nano::json_handler::kei_receivables ()
+{
+	auto account (account_impl ());
+	auto const count (count_optional_impl ());
+	if (!ec)
+	{
+		boost::property_tree::ptree receivables;
+		auto transaction (node.store.tx_begin_read ());
+		uint64_t returned (0);
+		auto const kei (nano::uint256_union (0).to_string ());
+		// Kei waiting in `pending` and an asset waiting in `asset_pending` are
+		// the same event to the SDK — something arrived and needs a block of
+		// the recipient's own to collect it (SPEC §5.6.3) — so one list carries
+		// both, and Kei is the zero asset id as it is everywhere else.
+		for (auto i (node.store.pending.begin (transaction, nano::pending_key (account, 0))), n (node.store.pending.end ()); i != n && nano::pending_key (i->first).account == account && returned < count; ++i, ++returned)
+		{
+			nano::pending_key const & key (i->first);
+			nano::pending_info const & info (i->second);
+			boost::property_tree::ptree entry;
+			entry.put ("hash", key.hash.to_string ());
+			entry.put ("from", info.source.to_account ());
+			entry.put ("asset", kei);
+			entry.put ("amount", info.amount.to_string_dec ());
+			receivables.push_back (std::make_pair ("", entry));
+		}
+		for (auto i (node.store.asset.pending_begin (transaction, nano::pending_key (account, 0))), n (node.store.asset.pending_end ()); i != n && nano::pending_key (i->first).account == account && returned < count; ++i, ++returned)
+		{
+			nano::pending_key const & key (i->first);
+			nano::asset_pending_info const & info (i->second);
+			boost::property_tree::ptree entry;
+			entry.put ("hash", key.hash.to_string ());
+			entry.put ("from", info.source.to_account ());
+			entry.put ("asset", info.asset_id.to_string ());
+			entry.put ("amount", info.amount.to_string_dec ());
+			if (!info.memo.empty ())
+			{
+				// Optional in the contract, and an absent memo is not an empty
+				// one — the SDK matches an order against it (decisions-m1 §5).
+				entry.put ("memo", info.memo);
+			}
+			receivables.push_back (std::make_pair ("", entry));
+		}
+		nano::json::add_array (response_l, "receivables", receivables);
 	}
 	response_errors ();
 }
