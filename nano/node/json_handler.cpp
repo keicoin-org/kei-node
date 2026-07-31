@@ -643,6 +643,28 @@ void nano::json_handler::account_info ()
 		node.store.confirmation_height.get (transaction, account, confirmation_height_info);
 		if (!ec)
 		{
+			boost::property_tree::ptree kei_account;
+			kei_account.put ("address", account.to_account ());
+			kei_account.put ("frontier", info.head.to_string ());
+			kei_account.put ("height", std::to_string (info.block_count));
+			kei_account.put ("balance", info.balance.to_string_dec ());
+			kei_account.put ("representative", info.representative.to_account ());
+			// Both kinds of arrival count: Kei waiting in `pending`, and assets
+			// waiting in `asset_pending`. The SDK polls this to decide whether
+			// there is anything to collect, and an asset it could collect but
+			// was not told about is the one answer that would be useless.
+			uint64_t receivable_count (0);
+			for (auto i (node.store.pending.begin (transaction, nano::pending_key (account, 0))), n (node.store.pending.end ()); i != n && nano::pending_key (i->first).account == account; ++i)
+			{
+				++receivable_count;
+			}
+			for (auto i (node.store.asset.pending_begin (transaction, nano::pending_key (account, 0))), n (node.store.asset.pending_end ()); i != n && nano::pending_key (i->first).account == account; ++i)
+			{
+				++receivable_count;
+			}
+			kei_account.put ("receivableCount", std::to_string (receivable_count));
+			response_l.add_child ("account", kei_account);
+
 			response_l.put ("frontier", info.head.to_string ());
 			response_l.put ("open_block", info.open_block.to_string ());
 			response_l.put ("representative_block", node.ledger.representative (transaction, info.head).to_string ());
@@ -3416,7 +3438,12 @@ void nano::json_handler::process ()
 							}
 							case nano::process_result::old:
 							{
-								rpc_l->ec = nano::error_process::old;
+								// Idempotent by contract (kei-transaction/docs/rpc.md):
+								// submitting a block the node already has returns its
+								// hash rather than reporting a fork. A retry after a
+								// dropped response is the common case, and it is not
+								// an error.
+								rpc_l->response_l.put ("hash", block->hash ().to_string ());
 								break;
 							}
 							case nano::process_result::bad_signature:
@@ -5506,6 +5533,186 @@ void construct_json (nano::container_info_component * component, boost::property
 
 // Any RPC handlers which require no arguments (excl default arguments) should go here.
 // This is to prevent large if/else chains which compilers can have limits for (MSVC for instance has 128).
+/*
+ * Kei's asset reads (kei-transaction/docs/rpc.md).
+ *
+ * Field names are the SDK's, because that document is the contract and M2 is
+ * done when its conformance suite passes against this node with only the URL
+ * changed. Amounts are raw decimal strings throughout, as the contract requires.
+ *
+ * One known departure, and it is the response encoding rather than any of these
+ * handlers: boost::property_tree's JSON writer emits every value as a quoted
+ * string, so `decimals`, `height`, and `receivableCount` arrive as "0" rather
+ * than 0, and an absent record as "" rather than null. HttpNode passes the
+ * parsed body straight through without coercing, so this has to be fixed in the
+ * writer before the conformance suite can pass. See docs/decisions-m2.md 14.
+ */
+
+namespace
+{
+void asset_info_to_json (boost::property_tree::ptree & tree_a, nano::uint256_union const & id_a, nano::asset_info const & info_a)
+{
+	tree_a.put ("id", id_a.to_string ());
+	tree_a.put ("issuer", info_a.issuer.to_account ());
+	tree_a.put ("name", info_a.name);
+	tree_a.put ("symbol", info_a.symbol);
+	tree_a.put ("decimals", static_cast<int> (info_a.decimals));
+	// Uncapped is stored as zero and reported as absent, never as "0" — a cap
+	// of zero would mean nothing could ever be minted.
+	tree_a.put ("maxSupply", info_a.uncapped () ? "" : info_a.max_supply.to_string_dec ());
+	tree_a.put ("transfer", nano::transfer_policy_to_string (info_a.transfer));
+	tree_a.put ("swap", nano::swap_policy_to_string (info_a.swap));
+	if (!info_a.description.empty ())
+	{
+		tree_a.put ("description", info_a.description);
+	}
+	if (!info_a.image.empty ())
+	{
+		tree_a.put ("image", info_a.image);
+	}
+	if (info_a.kind != nano::asset_kind::unspecified)
+	{
+		tree_a.put ("kind", nano::asset_kind_to_string (info_a.kind));
+	}
+	tree_a.put ("circulating", info_a.circulating.to_string_dec ());
+}
+}
+
+void nano::json_handler::asset_info ()
+{
+	nano::uint256_union id;
+	if (id.decode_hex (request.get<std::string> ("asset", "")))
+	{
+		ec = nano::error_common::bad_account_number;
+	}
+	if (!ec)
+	{
+		auto transaction (node.store.tx_begin_read ());
+		nano::asset_info info;
+		if (!node.store.asset.get (transaction, id, info))
+		{
+			boost::property_tree::ptree asset;
+			asset_info_to_json (asset, id, info);
+			response_l.add_child ("asset", asset);
+		}
+		else
+		{
+			// An asset that was never issued is absent, not an error.
+			response_l.put ("asset", "");
+		}
+	}
+	response_errors ();
+}
+
+void nano::json_handler::asset_by_symbol ()
+{
+	auto issuer (account_impl (request.get<std::string> ("issuer", "")));
+	if (!ec)
+	{
+		std::string symbol;
+		if (nano::normalize_symbol (request.get<std::string> ("symbol", ""), symbol))
+		{
+			ec = nano::error_common::invalid_amount;
+		}
+		if (!ec)
+		{
+			// Derived, not looked up (SPEC 5.6.1), so nothing can race this.
+			auto const id (nano::derive_asset_id (issuer, symbol));
+			auto transaction (node.store.tx_begin_read ());
+			nano::asset_info info;
+			if (!node.store.asset.get (transaction, id, info))
+			{
+				boost::property_tree::ptree asset;
+				asset_info_to_json (asset, id, info);
+				response_l.add_child ("asset", asset);
+			}
+			else
+			{
+				response_l.put ("asset", "");
+			}
+		}
+	}
+	response_errors ();
+}
+
+void nano::json_handler::account_holdings ()
+{
+	auto account (account_impl ());
+	if (!ec)
+	{
+		boost::property_tree::ptree holdings;
+		auto transaction (node.store.tx_begin_read ());
+		// A prefix scan of one account's range in `holdings`. Zero balances are
+		// absent because the entries are deleted, not kept at zero (SPEC 7).
+		for (auto i (node.store.asset.holdings_begin (transaction, nano::holding_key (account, 0))), n (node.store.asset.holdings_end ()); i != n && i->first.first == account; ++i)
+		{
+			boost::property_tree::ptree entry;
+			entry.put ("asset", i->first.second.to_string ());
+			entry.put ("balance", i->second.to_string_dec ());
+			holdings.push_back (std::make_pair ("", entry));
+		}
+		response_l.add_child ("holdings", holdings);
+	}
+	response_errors ();
+}
+
+void nano::json_handler::asset_balance ()
+{
+	nano::uint256_union id;
+	if (id.decode_hex (request.get<std::string> ("asset", "")))
+	{
+		ec = nano::error_common::bad_account_number;
+	}
+	auto account (account_impl ());
+	if (!ec)
+	{
+		// One lookup in `holders`. This is acceptance criterion 14.3 and the
+		// whole reason the same facts are indexed in both directions.
+		auto transaction (node.store.tx_begin_read ());
+		response_l.put ("balance", node.store.asset.balance (transaction, account, id).to_string_dec ());
+	}
+	response_errors ();
+}
+
+void nano::json_handler::asset_holders ()
+{
+	nano::uint256_union id;
+	if (id.decode_hex (request.get<std::string> ("asset", "")))
+	{
+		ec = nano::error_common::bad_account_number;
+	}
+	auto const count (count_optional_impl ());
+	if (!ec)
+	{
+		boost::property_tree::ptree holders;
+		auto transaction (node.store.tx_begin_read ());
+		uint64_t returned (0);
+		// For a supply-one asset this answers "who owns this item?" in one entry.
+		for (auto i (node.store.asset.holders_begin (transaction, nano::holder_key (id, 0))), n (node.store.asset.holders_end ()); i != n && i->first.first == id && returned < count; ++i, ++returned)
+		{
+			boost::property_tree::ptree entry;
+			entry.put ("account", nano::account (i->first.second).to_account ());
+			entry.put ("balance", i->second.to_string_dec ());
+			holders.push_back (std::make_pair ("", entry));
+		}
+		response_l.add_child ("holders", holders);
+	}
+	response_errors ();
+}
+
+void nano::json_handler::work_thresholds ()
+{
+	// Tiers per SPEC 5.6.4 and decisions-m2.md 11: A is issue/mint, B is
+	// send/transfer, C is receive/asset_receive/burn.
+	auto const & work (node.network_params.work);
+	boost::property_tree::ptree thresholds;
+	thresholds.put ("A", nano::uint128_t (work.tier_a).convert_to<std::string> ());
+	thresholds.put ("B", nano::uint128_t (work.tier_b ()).convert_to<std::string> ());
+	thresholds.put ("C", nano::uint128_t (work.tier_c ()).convert_to<std::string> ());
+	response_l.add_child ("thresholds", thresholds);
+	response_errors ();
+}
+
 ipc_json_handler_no_arg_func_map create_ipc_json_handler_no_arg_func_map ()
 {
 	ipc_json_handler_no_arg_func_map no_arg_funcs;
@@ -5623,6 +5830,12 @@ ipc_json_handler_no_arg_func_map create_ipc_json_handler_no_arg_func_map ()
 	no_arg_funcs.emplace ("work_get", &nano::json_handler::work_get);
 	no_arg_funcs.emplace ("work_set", &nano::json_handler::work_set);
 	no_arg_funcs.emplace ("work_validate", &nano::json_handler::work_validate);
+	no_arg_funcs.emplace ("asset_info", &nano::json_handler::asset_info);
+	no_arg_funcs.emplace ("asset_by_symbol", &nano::json_handler::asset_by_symbol);
+	no_arg_funcs.emplace ("account_holdings", &nano::json_handler::account_holdings);
+	no_arg_funcs.emplace ("asset_balance", &nano::json_handler::asset_balance);
+	no_arg_funcs.emplace ("asset_holders", &nano::json_handler::asset_holders);
+	no_arg_funcs.emplace ("work_thresholds", &nano::json_handler::work_thresholds);
 	no_arg_funcs.emplace ("work_peer_add", &nano::json_handler::work_peer_add);
 	no_arg_funcs.emplace ("work_peers", &nano::json_handler::work_peers);
 	no_arg_funcs.emplace ("work_peers_clear", &nano::json_handler::work_peers_clear);

@@ -32,6 +32,14 @@ public:
 	void account_get ();
 	void account_history ();
 	void account_info ();
+	// Kei's asset reads (kei-transaction/docs/rpc.md). These are additions
+	// rather than replacements: nothing inherited answers them.
+	void asset_info ();
+	void asset_by_symbol ();
+	void account_holdings ();
+	void asset_balance ();
+	void asset_holders ();
+	void work_thresholds ();
 	void account_key ();
 	void account_list ();
 	void account_move ();
