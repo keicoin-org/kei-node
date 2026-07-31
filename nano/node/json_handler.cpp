@@ -5599,7 +5599,7 @@ void nano::json_handler::asset_info ()
 	nano::uint256_union id;
 	if (id.decode_hex (request.get<std::string> ("asset", "")))
 	{
-		ec = nano::error_common::bad_account_number;
+		ec = nano::error_common::bad_asset_id;
 	}
 	if (!ec)
 	{
@@ -5628,7 +5628,7 @@ void nano::json_handler::asset_by_symbol ()
 		std::string symbol;
 		if (nano::normalize_symbol (request.get<std::string> ("symbol", ""), symbol))
 		{
-			ec = nano::error_common::invalid_amount;
+			ec = nano::error_common::bad_symbol;
 		}
 		if (!ec)
 		{
@@ -5677,7 +5677,7 @@ void nano::json_handler::asset_balance ()
 	nano::uint256_union id;
 	if (id.decode_hex (request.get<std::string> ("asset", "")))
 	{
-		ec = nano::error_common::bad_account_number;
+		ec = nano::error_common::bad_asset_id;
 	}
 	auto account (account_impl ());
 	if (!ec)
@@ -5695,7 +5695,7 @@ void nano::json_handler::asset_holders ()
 	nano::uint256_union id;
 	if (id.decode_hex (request.get<std::string> ("asset", "")))
 	{
-		ec = nano::error_common::bad_account_number;
+		ec = nano::error_common::bad_asset_id;
 	}
 	auto const count (count_optional_impl ());
 	if (!ec)

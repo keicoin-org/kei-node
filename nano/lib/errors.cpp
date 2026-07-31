@@ -35,6 +35,8 @@ std::string nano::error_common_messages::message (int ev) const
 			return "Account not found in wallet";
 		case nano::error_common::bad_account_number:
 			return "Bad account number";
+		case nano::error_common::bad_asset_id:
+			return "An asset id is 64 hex characters";
 		case nano::error_common::bad_balance:
 			return "Bad balance";
 		case nano::error_common::bad_link:
@@ -53,6 +55,8 @@ std::string nano::error_common_messages::message (int ev) const
 			return "Bad public key";
 		case nano::error_common::bad_seed:
 			return "Bad seed";
+		case nano::error_common::bad_symbol:
+			return "A symbol is 1-20 characters of A-Z, 0-9 or \"-\", starting with a letter or digit";
 		case nano::error_common::bad_threshold:
 			return "Bad threshold number";
 		case nano::error_common::bad_wallet_number:
