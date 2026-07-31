@@ -655,6 +655,18 @@ a fork actually happens — including the case that is easy to get wrong, where 
 recipient has already collected the mint being rolled back and their
 `asset_receive` has to come off their own chain first.
 
+**It caught one immediately, and the shape of it is the argument for running
+code.** `burn` and `asset_receive` are the only two ops whose canonical payload
+is zero bytes — every other op writes at least a length prefix — and a
+zero-length payload could not be parsed at all. An empty vector's `data ()` is
+null, `nano::bufferstream` is a boost *direct* device, and its first read over a
+null buffer throws `bad_read` rather than reporting end-of-stream. So both block
+types serialised correctly, stored correctly, and then could not be read back:
+unrollable, unbootstrappable, and unservable over RPC. Nothing found it because
+nothing had ever read one back — the round-trip test in `block.cpp` uses an
+`issue` block, whose payload is never empty. `asset_ledger.cpp` now round-trips
+all five ops through the exact record the store writes.
+
 What is still unexecuted after that: the reserve rules, which cannot be executed
 until the reserve set has members (above); `asset_info` and the rest of the asset
 RPC, which have no test of their own; and everything in §15 apart from

@@ -1,4 +1,5 @@
 #include <nano/lib/work.hpp>
+#include <nano/secure/buffer.hpp>
 #include <nano/secure/ledger.hpp>
 #include <nano/secure/store.hpp>
 #include <nano/test_common/ledger.hpp>
@@ -79,6 +80,60 @@ issued_asset issue_one (nano::ledger & ledger_a, nano::store & store_a, nano::wo
 	EXPECT_EQ (nano::process_result::progress, ledger_a.process (transaction, *issued.block).code);
 	return issued;
 }
+}
+
+// Every op has to survive the record the block store writes — a type byte, the
+// block, then its sideband — because that record is the only way a block ever
+// comes back out of the store, and a block that cannot be read cannot be rolled
+// back, bootstrapped, or served over RPC.
+//
+// This is where the empty payload was found. `burn` and `asset_receive` are the
+// only two ops whose canonical payload is zero bytes, every other op writes at
+// least a length prefix, and an empty payload could not be parsed at all: an
+// empty vector's `data ()` is null and boost's direct stream throws over a null
+// buffer instead of reporting end-of-stream. Both serialised fine and then
+// failed to come back, which nothing noticed until a rollback read one.
+TEST (asset_ledger, every_op_survives_the_record_the_store_writes)
+{
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair key;
+
+	for (auto const op : { nano::asset_op::issue, nano::asset_op::mint, nano::asset_op::burn, nano::asset_op::transfer, nano::asset_op::asset_receive })
+	{
+		SCOPED_TRACE (nano::asset_op_to_string (op));
+		nano::asset_payload payload;
+		if (op == nano::asset_op::issue)
+		{
+			payload = issuance ("GEM", nano::transfer_policy::open, 1000);
+		}
+		else if (op == nano::asset_op::mint || op == nano::asset_op::transfer)
+		{
+			payload.memo = "quest reward";
+		}
+		// An asset block can open an account, so one of these has no predecessor
+		// — the shape a player's first collect takes (§10).
+		nano::block_hash const previous (op == nano::asset_op::asset_receive ? 0 : 7);
+		auto block (signed_asset (pool, key, previous, 1000, op, nano::derive_asset_id (key.pub, "GEM"), 5, 9, payload));
+		block->sideband_set (nano::block_sideband (key.pub, 0, 0, 1, nano::seconds_since_epoch (), nano::block_details (nano::epoch::epoch_0, false, false, false), nano::epoch::epoch_0));
+
+		std::vector<uint8_t> record;
+		{
+			nano::vectorstream stream (record);
+			nano::serialize_block (stream, *block);
+			block->sideband ().serialize (stream, block->type ());
+		}
+
+		nano::bufferstream stream (record.data (), record.size ());
+		nano::block_type type{ nano::block_type::invalid };
+		ASSERT_FALSE (nano::try_read (stream, type));
+		ASSERT_EQ (nano::block_type::asset, type);
+		auto parsed (nano::deserialize_block (stream, type));
+		ASSERT_NE (nullptr, parsed);
+		ASSERT_TRUE (*block == *parsed);
+		nano::block_sideband sideband;
+		ASSERT_FALSE (sideband.deserialize (stream, type));
+		ASSERT_TRUE (nano::at_end (stream));
+	}
 }
 
 // SPEC §5.6.5: the nth asset an account issues burns n Kei, and the burn is the
