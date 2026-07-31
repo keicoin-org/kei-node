@@ -1939,7 +1939,7 @@ void nano::asset_hashables::serialize_op_json (boost::property_tree::ptree & op_
 		case nano::asset_op::transfer:
 		{
 			op_a.put ("asset", asset_id.to_string ());
-			op_a.put ("to", nano::account (link).to_account ());
+			op_a.put ("to", link.as_account ().to_account ());
 			op_a.put ("amount", amount.to_string_dec ());
 			if (!payload.memo.empty ())
 			{
@@ -1955,7 +1955,7 @@ void nano::asset_hashables::serialize_op_json (boost::property_tree::ptree & op_
 		}
 		case nano::asset_op::asset_receive:
 		{
-			op_a.put ("link", nano::block_hash (link).to_string ());
+			op_a.put ("link", link.as_block_hash ().to_string ());
 			break;
 		}
 	}
