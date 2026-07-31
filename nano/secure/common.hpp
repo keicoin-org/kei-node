@@ -148,6 +148,14 @@ public:
 };
 
 /**
+ * The per-account ceiling on distinct assets held (SPEC §7). It cannot be
+ * weaponised — §5.6.3 means only the account itself can add to its own
+ * holdings — but unbounded per-account state in consensus code is how nodes run
+ * out of memory.
+ */
+size_t constexpr max_assets_per_account = 1024;
+
+/**
  * A key into one of the two asset tables (decisions-m2.md §9, SPEC §7).
  *
  * The same facts are indexed both ways — `holdings` keyed (account, asset_id)
@@ -478,6 +486,34 @@ public:
 	uint64_t nano_test_final_votes_canary_height;
 	uint64_t final_votes_canary_height;
 	nano::epochs epochs;
+
+	/**
+	 * The reserve accounts, as a fixed and immutable set (SPEC §5.7). Membership
+	 * is a cheap test the node cannot get wrong, which is what SPEC means by
+	 * refusing "a convention wearing a protocol's clothes".
+	 *
+	 * Empty until the mainnet genesis ceremony fills it: the reserve is 90% of
+	 * all Kei, its custody is multisig, and its key is generated offline, so
+	 * what ships in this repository is an address and never a seed
+	 * (decisions-m2.md §5). A node whose reserve set is empty enforces the
+	 * reserve rules vacuously, which is correct — it has no reserve.
+	 */
+	std::vector<nano::account> reserve_accounts;
+	bool is_reserve (nano::account const &) const;
+
+	/**
+	 * SPEC §5.7's allocation, in whole Kei. The four circulating allocations
+	 * must sum to exactly 100,000,000,000 and the whole to 1,000,000,000,000; a
+	 * mismatch is a launch blocker, so `validate_allocation` returns an error
+	 * and the node refuses to start rather than logging a warning.
+	 */
+	static nano::uint128_t const allocation_reserve;
+	static nano::uint128_t const allocation_grants;
+	static nano::uint128_t const allocation_community;
+	static nano::uint128_t const allocation_bounty;
+	static nano::uint128_t const allocation_team;
+	/** Returns true, and fills `message_a`, if the allocation does not add up. */
+	static bool validate_allocation (std::string & message_a);
 };
 
 namespace dev

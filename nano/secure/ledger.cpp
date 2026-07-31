@@ -171,14 +171,106 @@ public:
 		}
 		ledger.store.block.del (transaction, hash);
 	}
+	/**
+	 * Undo one asset block, exactly reversing what ledger_processor did.
+	 *
+	 * Every op is invertible from the block alone, which is why none of them
+	 * needs a journal: a mint's amount is in the block, a burn's amount is in
+	 * the block, and `asset_receive` recovers what it collected by looking the
+	 * source block back up.
+	 */
 	void asset_block (nano::asset_block const & block_a) override
 	{
-		// ledger_processor::asset_block never accepts a block (see the comment
-		// there), so nothing asset-typed is ever stored and this can never be
-		// reached. Full rollback needs the holdings/holders tables (§9) and the
-		// per-op undo rules, and lands with the rest of asset ledger
-		// processing.
-		debug_assert (false && "asset_block rollback is not implemented — asset blocks are never accepted yet");
+		auto const hash (block_a.hash ());
+		nano::account_info info;
+		[[maybe_unused]] auto const error (ledger.store.account.get (transaction, block_a.hashables.account, info));
+		debug_assert (!error);
+
+		auto asset_id (block_a.hashables.asset_id);
+		auto const amount (block_a.hashables.amount.number ());
+		nano::asset_info asset;
+
+		switch (block_a.hashables.op)
+		{
+			case nano::asset_op::issue:
+				// The record was created by this block and nothing can have
+				// been minted against it, because a mint must build on a later
+				// block in the same chain and rollback works backwards.
+				ledger.store.asset.del (transaction, asset_id);
+				break;
+			case nano::asset_op::mint:
+				// The receivable this created has not been collected — if it
+				// had been, the collecting block would be rolled back first.
+				ledger.store.asset.pending_del (transaction, nano::pending_key (block_a.hashables.link.as_account (), hash));
+				if (!ledger.store.asset.get (transaction, asset_id, asset))
+				{
+					asset.circulating = asset.circulating.number () - amount;
+					ledger.store.asset.put (transaction, asset_id, asset);
+				}
+				break;
+			case nano::asset_op::burn:
+				if (!ledger.store.asset.get (transaction, asset_id, asset))
+				{
+					asset.circulating = asset.circulating.number () + amount;
+					ledger.store.asset.put (transaction, asset_id, asset);
+				}
+				restore (block_a.hashables.account, asset_id, amount);
+				break;
+			case nano::asset_op::transfer:
+				ledger.store.asset.pending_del (transaction, nano::pending_key (block_a.hashables.link.as_account (), hash));
+				restore (block_a.hashables.account, asset_id, amount);
+				break;
+			case nano::asset_op::asset_receive:
+			{
+				// Put the receivable back exactly as it was, which means
+				// reading the source block for the source account and the memo.
+				auto const source_hash (block_a.hashables.link.as_block_hash ());
+				auto const source (ledger.store.block.get (transaction, source_hash));
+				release_assert (source != nullptr);
+				auto const source_asset (dynamic_cast<nano::asset_block const *> (source.get ()));
+				release_assert (source_asset != nullptr);
+				asset_id = source_asset->hashables.asset_id;
+				auto const collected (source_asset->hashables.amount.number ());
+				auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
+				debug_assert (held >= collected);
+				if (held == collected)
+				{
+					ledger.store.asset.balance_del (transaction, block_a.hashables.account, asset_id);
+				}
+				else
+				{
+					ledger.store.asset.balance_put (transaction, block_a.hashables.account, asset_id, nano::amount (held - collected));
+				}
+				ledger.store.asset.pending_put (transaction, nano::pending_key (block_a.hashables.account, source_hash), nano::asset_pending_info (source_asset->hashables.account, asset_id, collected, source_asset->hashables.payload.memo));
+				break;
+			}
+		}
+		ledger.stats.inc (nano::stat::type::rollback, nano::stat::detail::asset_block);
+
+		auto const previous_balance (ledger.balance (transaction, block_a.hashables.previous));
+		auto const representative (ledger.representative (transaction, block_a.hashables.previous));
+		ledger.cache.rep_weights.representation_add_dual (block_a.representative (), 0 - block_a.hashables.balance.number (), representative, previous_balance);
+
+		nano::account_info new_info (block_a.hashables.previous, representative, info.open_block, previous_balance, nano::seconds_since_epoch (), info.block_count - 1, info.epoch ());
+		ledger.update_account (transaction, block_a.hashables.account, info, new_info);
+
+		auto const previous (ledger.store.block.get (transaction, block_a.hashables.previous));
+		if (previous != nullptr)
+		{
+			ledger.store.block.successor_clear (transaction, block_a.hashables.previous);
+			if (previous->type () < nano::block_type::state)
+			{
+				ledger.store.frontier.put (transaction, block_a.hashables.previous, block_a.hashables.account);
+			}
+		}
+		ledger.store.block.del (transaction, hash);
+	}
+
+	/** Give an account back what a burn or a transfer took from it. */
+	void restore (nano::account const & account_a, nano::uint256_union const & asset_id_a, nano::uint128_t const & amount_a)
+	{
+		auto const held (ledger.store.asset.balance (transaction, account_a, asset_id_a).number ());
+		ledger.store.asset.balance_put (transaction, account_a, asset_id_a, nano::amount (held + amount_a));
 	}
 	nano::write_transaction const & transaction;
 	nano::ledger & ledger;
@@ -333,6 +425,23 @@ void ledger_processor::state_block_impl (nano::state_block & block_a)
 						}
 					}
 				}
+				if (result.code == nano::process_result::progress && ledger.constants.is_reserve (block_a.hashables.account))
+				{
+					// Reserve Kei carries no weight of any kind and moves only
+					// through a passed on-chain vote (SPEC 5.7,
+					// decisions-m2.md 6). Excluding the reserve from governance
+					// is not enough on its own: representative weight governs
+					// transaction consensus, so a reserve delegation alone
+					// hands over an absolute supermajority with no vote.
+					if (!block_a.hashables.representative.is_zero ())
+					{
+						result.code = nano::process_result::reserve_representative;
+					}
+					else if (is_send)
+					{
+						result.code = nano::process_result::reserve_locked;
+					}
+				}
 				if (result.code == nano::process_result::progress)
 				{
 					nano::block_details block_details (epoch, is_send, is_receive, false);
@@ -450,24 +559,332 @@ void ledger_processor::epoch_block_impl (nano::state_block & block_a)
 	}
 }
 
+/**
+ * Validate and apply one asset block (decisions-m2.md §7, SPEC §5.6).
+ *
+ * The order below is the mock ledger's, deliberately: `MockLedger` in
+ * `@keicoin/core` is the reference implementation for these rules and has a
+ * test suite pinning them, so where this could differ it does not.
+ *
+ * Nothing is written until every check has passed.
+ */
 void ledger_processor::asset_block (nano::asset_block & block_a)
 {
-	// The asset_block primitive (decisions-m2.md §7) exists and hashes,
-	// (de)serializes, and signs correctly, but the economic rules that decide
-	// whether one is valid — max-supply caps, the transfer policy, the 1,000
-	// Kei issuance burn (§12), weight exclusion (§6), and the holdings/holders
-	// tables (§9) — are not implemented yet. Rejecting every asset_block here
-	// keeps that honest: nothing asset-typed is stored, so every other
-	// visitor that walks the ledger (rollback, dependent-block resolution,
-	// representative lookup, RPC history) can assume it never has to handle
-	// one that was actually accepted.
-	//
-	// block_position ("this block cannot follow the previous block") is the
-	// closest existing nano::process_result to "not yet supported"; it is
-	// reused rather than adding a dedicated code, since the dedicated
-	// rejection reasons (bad decimals, max supply exceeded, ...) belong with
-	// the real validation this stands in for.
-	result.code = nano::process_result::block_position;
+	auto const hash (block_a.hash ());
+	result.code = ledger.block_or_pruned_exists (transaction, hash) ? nano::process_result::old : nano::process_result::progress;
+	if (result.code != nano::process_result::progress)
+	{
+		return;
+	}
+	result.code = block_a.hashables.account.is_zero () ? nano::process_result::opened_burn_account : nano::process_result::progress;
+	if (result.code != nano::process_result::progress)
+	{
+		return;
+	}
+	result.code = validate_message (block_a.hashables.account, hash, block_a.signature) ? nano::process_result::bad_signature : nano::process_result::progress;
+	if (result.code != nano::process_result::progress)
+	{
+		return;
+	}
+
+	nano::account_info info;
+	auto const account_error (ledger.store.account.get (transaction, block_a.hashables.account, info));
+	if (!account_error)
+	{
+		result.code = block_a.hashables.previous.is_zero () ? nano::process_result::fork : nano::process_result::progress;
+		if (result.code == nano::process_result::progress)
+		{
+			result.code = ledger.store.block.exists (transaction, block_a.hashables.previous) ? nano::process_result::progress : nano::process_result::gap_previous;
+		}
+		if (result.code == nano::process_result::progress)
+		{
+			result.code = block_a.hashables.previous == info.head ? nano::process_result::progress : nano::process_result::fork;
+		}
+	}
+	else
+	{
+		// An asset block can open an account: a player who has never held Kei
+		// can still be minted a token, and `asset_receive` is how they collect
+		// it (decisions-m2.md §10). Their Kei balance stays zero, which the
+		// balance rule below already requires.
+		result.code = block_a.hashables.previous.is_zero () ? nano::process_result::progress : nano::process_result::gap_previous;
+	}
+	if (result.code != nano::process_result::progress)
+	{
+		return;
+	}
+
+	// Reserve Kei carries no weight of any kind (SPEC §5.7, decisions-m2.md §6).
+	// Excluding the reserve from governance is not enough on its own —
+	// representative weight governs transaction consensus, so a reserve
+	// delegation alone hands over an absolute supermajority with no vote.
+	if (ledger.constants.is_reserve (block_a.hashables.account) && !block_a.hashables.representative.is_zero ())
+	{
+		result.code = nano::process_result::reserve_representative;
+		return;
+	}
+
+	result.code = ledger.constants.work.difficulty (block_a) >= ledger.constants.work.threshold_asset (block_a.hashables.op) ? nano::process_result::progress : nano::process_result::insufficient_work;
+	if (result.code != nano::process_result::progress)
+	{
+		return;
+	}
+
+	auto const previous_balance (info.balance.number ());
+	auto const new_balance (block_a.hashables.balance.number ());
+	if (block_a.hashables.op == nano::asset_op::issue)
+	{
+		// The burn is expressed as the balance decrease itself, with no
+		// corresponding receivable — the Kei is destroyed, not moved (§12).
+		if (previous_balance < nano::issuance_burn || new_balance != previous_balance - nano::issuance_burn)
+		{
+			result.code = nano::process_result::issuance_burn_mismatch;
+			return;
+		}
+	}
+	else if (new_balance != previous_balance)
+	{
+		// §5.6.1's concession to §5.6.8: a Banano-derived explorer that ignores
+		// the asset payload still tracks Kei correctly instead of reporting a
+		// broken balance.
+		result.code = nano::process_result::asset_balance_mismatch;
+		return;
+	}
+
+	// Everything below stages its writes and applies them only once the whole
+	// block is known to be valid.
+	nano::asset_info asset;
+	nano::uint256_union asset_id (block_a.hashables.asset_id);
+	auto const amount (block_a.hashables.amount.number ());
+	bool asset_dirty (false);
+	boost::optional<nano::asset_pending_info> receivable;
+	nano::account receivable_to{};
+	boost::optional<nano::amount> credit;
+	boost::optional<nano::amount> debit;
+	bool collect_receivable (false);
+
+	switch (block_a.hashables.op)
+	{
+		case nano::asset_op::issue:
+		{
+			// Identity is derived, never assigned (SPEC §5.6.1), so a block
+			// that names an id other than H(issuer ‖ symbol) is lying about
+			// which asset it is creating.
+			if (asset_id != nano::derive_asset_id (block_a.hashables.account, block_a.hashables.payload.symbol) || amount != 0 || !block_a.hashables.link.is_zero ())
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			std::string symbol;
+			if (nano::normalize_symbol (block_a.hashables.payload.symbol, symbol) || symbol != block_a.hashables.payload.symbol)
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			if (block_a.hashables.payload.name.empty () || block_a.hashables.payload.name.size () > nano::asset_payload::max_name || block_a.hashables.payload.decimals > 18)
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			if (ledger.store.asset.exists (transaction, asset_id))
+			{
+				result.code = nano::process_result::asset_exists;
+				return;
+			}
+			asset.issuer = block_a.hashables.account;
+			asset.name = block_a.hashables.payload.name;
+			asset.symbol = symbol;
+			asset.decimals = block_a.hashables.payload.decimals;
+			asset.max_supply = block_a.hashables.payload.max_supply;
+			asset.transfer = block_a.hashables.payload.transfer;
+			asset.swap = block_a.hashables.payload.swap;
+			asset.description = block_a.hashables.payload.description;
+			asset.image = block_a.hashables.payload.image;
+			asset.kind = block_a.hashables.payload.kind;
+			asset.circulating = 0;
+			asset_dirty = true;
+			break;
+		}
+		case nano::asset_op::mint:
+		{
+			if (ledger.store.asset.get (transaction, asset_id, asset))
+			{
+				result.code = nano::process_result::no_such_asset;
+				return;
+			}
+			if (asset.issuer != block_a.hashables.account)
+			{
+				result.code = nano::process_result::not_issuer;
+				return;
+			}
+			if (amount == 0 || block_a.hashables.link.is_zero ())
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			// maxSupply caps circulating supply, so burning frees headroom
+			// (SPEC §5.6.6).
+			if (!asset.uncapped () && asset.circulating.number () + amount > asset.max_supply.number ())
+			{
+				result.code = nano::process_result::over_max_supply;
+				return;
+			}
+			asset.circulating = asset.circulating.number () + amount;
+			asset_dirty = true;
+			receivable_to = block_a.hashables.link.as_account ();
+			receivable = nano::asset_pending_info (block_a.hashables.account, asset_id, amount, block_a.hashables.payload.memo);
+			break;
+		}
+		case nano::asset_op::burn:
+		{
+			if (ledger.store.asset.get (transaction, asset_id, asset))
+			{
+				result.code = nano::process_result::no_such_asset;
+				return;
+			}
+			if (amount == 0)
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
+			if (held < amount)
+			{
+				result.code = nano::process_result::insufficient_asset_balance;
+				return;
+			}
+			debit = nano::amount (held - amount);
+			asset.circulating = asset.circulating.number () - amount;
+			asset_dirty = true;
+			break;
+		}
+		case nano::asset_op::transfer:
+		{
+			if (ledger.store.asset.get (transaction, asset_id, asset))
+			{
+				result.code = nano::process_result::no_such_asset;
+				return;
+			}
+			if (amount == 0 || block_a.hashables.link.is_zero ())
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			receivable_to = block_a.hashables.link.as_account ();
+			// The transfer policy is immutable and protocol-enforced; the SDK
+			// does not get to ask for an exception (SPEC §5.4).
+			switch (asset.transfer)
+			{
+				case nano::transfer_policy::open:
+					break;
+				case nano::transfer_policy::issuer_only:
+					if (block_a.hashables.account != asset.issuer && receivable_to != asset.issuer)
+					{
+						result.code = nano::process_result::transfer_not_permitted;
+						return;
+					}
+					break;
+				case nano::transfer_policy::none:
+					// Soulbound: it can only be burned.
+					result.code = nano::process_result::transfer_not_permitted;
+					return;
+			}
+			auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
+			if (held < amount)
+			{
+				result.code = nano::process_result::insufficient_asset_balance;
+				return;
+			}
+			debit = nano::amount (held - amount);
+			receivable = nano::asset_pending_info (block_a.hashables.account, asset_id, amount, block_a.hashables.payload.memo);
+			break;
+		}
+		case nano::asset_op::asset_receive:
+		{
+			nano::pending_key const key (block_a.hashables.account, block_a.hashables.link.as_block_hash ());
+			nano::asset_pending_info pending;
+			if (ledger.store.asset.pending_get (transaction, key, pending))
+			{
+				// Either it was never receivable, or it has already been
+				// collected. Both are unreceivable.
+				result.code = nano::process_result::unreceivable;
+				return;
+			}
+			asset_id = pending.asset_id;
+			if (ledger.store.asset.get (transaction, asset_id, asset))
+			{
+				result.code = nano::process_result::no_such_asset;
+				return;
+			}
+			auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
+			// Unbounded per-account state in consensus code is how nodes run
+			// out of memory (SPEC §7). Only the account itself can add to its
+			// own holdings, so this cannot be weaponised against anyone else.
+			if (held == 0 && ledger.store.asset.holdings_count (transaction, block_a.hashables.account) >= nano::max_assets_per_account)
+			{
+				result.code = nano::process_result::too_many_assets;
+				return;
+			}
+			credit = nano::amount (held + pending.amount.number ());
+			collect_receivable = true;
+			break;
+		}
+	}
+
+	ledger.stats.inc (nano::stat::type::ledger, nano::stat::detail::asset_block);
+
+	// An asset block moves no Kei except at issuance, and is neither a send nor
+	// a receive in the inherited sense — the sideband's flags describe the Kei
+	// side of a block, and on this side of one nothing happens.
+	nano::block_details const block_details (info.epoch (), false, false, false);
+	block_a.sideband_set (nano::block_sideband (block_a.hashables.account /* unused */, 0, 0 /* unused */, info.block_count + 1, nano::seconds_since_epoch (), block_details, nano::epoch::epoch_0 /* unused */));
+	ledger.store.block.put (transaction, hash, block_a);
+
+	if (!info.head.is_zero ())
+	{
+		ledger.cache.rep_weights.representation_add_dual (info.representative, 0 - info.balance.number (), block_a.representative (), new_balance);
+	}
+	else
+	{
+		ledger.cache.rep_weights.representation_add (block_a.representative (), new_balance);
+	}
+
+	if (asset_dirty)
+	{
+		ledger.store.asset.put (transaction, asset_id, asset);
+	}
+	if (debit)
+	{
+		// Zero entries are deleted, not kept at zero, so a player's state
+		// footprint shrinks when they spend (SPEC §7).
+		if (debit->is_zero ())
+		{
+			ledger.store.asset.balance_del (transaction, block_a.hashables.account, asset_id);
+		}
+		else
+		{
+			ledger.store.asset.balance_put (transaction, block_a.hashables.account, asset_id, *debit);
+		}
+	}
+	if (credit)
+	{
+		ledger.store.asset.balance_put (transaction, block_a.hashables.account, asset_id, *credit);
+	}
+	if (receivable)
+	{
+		ledger.store.asset.pending_put (transaction, nano::pending_key (receivable_to, hash), *receivable);
+	}
+	if (collect_receivable)
+	{
+		ledger.store.asset.pending_del (transaction, nano::pending_key (block_a.hashables.account, block_a.hashables.link.as_block_hash ()));
+	}
+
+	nano::account_info new_info (hash, block_a.representative (), info.open_block.is_zero () ? hash : info.open_block, block_a.hashables.balance, nano::seconds_since_epoch (), info.block_count + 1, info.epoch ());
+	ledger.update_account (transaction, block_a.hashables.account, info, new_info);
+	if (!ledger.store.frontier.get (transaction, info.head).is_zero ())
+	{
+		ledger.store.frontier.del (transaction, info.head);
+	}
 }
 
 void ledger_processor::change_block (nano::change_block & block_a)

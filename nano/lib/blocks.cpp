@@ -11,6 +11,7 @@
 #include <boost/property_tree/json_parser.hpp>
 
 #include <bitset>
+#include <cstring>
 
 #include <cryptopp/words.h>
 
@@ -213,8 +214,48 @@ void nano::send_block::visit (nano::mutable_block_visitor & visitor_a)
 	visitor_a.send_block (*this);
 }
 
+/**
+ * Every Kei block hash begins with this, and no Nano or Banano block hash does.
+ *
+ * Without it the two chains are separated only at the transport layer — the
+ * network id in the packet header, and the fact that the peers do not talk to
+ * each other. That is a weaker guarantee than it sounds: the ledger itself
+ * cannot tell a Banano state block from a Kei one, because the bytes hashed are
+ * identical. A distinct genesis makes replay impractical, since no inherited
+ * block chains back to it; this makes it impossible, because an inherited block
+ * does not hash to a value its own signature covers.
+ *
+ * The version suffix is the same device decisions-m0 §2 used for the SDK's
+ * "kei-block-v0" preamble, and for the same reason: a later wire format must be
+ * unable to collide with this one.
+ */
+nano::uint256_union const & nano::kei_block_domain ()
+{
+	static nano::uint256_union const domain = [] () {
+		nano::uint256_union result;
+		blake2b_state hash;
+		auto status (blake2b_init (&hash, sizeof (result.bytes)));
+		debug_assert (status == 0);
+		char const * const label = "kei-block-v1";
+		blake2b_update (&hash, label, std::strlen (label));
+		status = blake2b_final (&hash, result.bytes.data (), sizeof (result.bytes));
+		debug_assert (status == 0);
+		return result;
+	}();
+	return domain;
+}
+
+void nano::hash_preamble (blake2b_state & hash_a, nano::block_type type_a)
+{
+	auto const & domain (nano::kei_block_domain ());
+	blake2b_update (&hash_a, domain.bytes.data (), domain.bytes.size ());
+	nano::uint256_union const type (static_cast<uint64_t> (type_a));
+	blake2b_update (&hash_a, type.bytes.data (), type.bytes.size ());
+}
+
 void nano::send_block::hash (blake2b_state & hash_a) const
 {
+	nano::hash_preamble (hash_a, nano::block_type::send);
 	hashables.hash (hash_a);
 }
 
@@ -596,6 +637,7 @@ nano::open_block::open_block (bool & error_a, boost::property_tree::ptree const 
 
 void nano::open_block::hash (blake2b_state & hash_a) const
 {
+	nano::hash_preamble (hash_a, nano::block_type::open);
 	hashables.hash (hash_a);
 }
 
@@ -853,6 +895,7 @@ nano::change_block::change_block (bool & error_a, boost::property_tree::ptree co
 
 void nano::change_block::hash (blake2b_state & hash_a) const
 {
+	nano::hash_preamble (hash_a, nano::block_type::change);
 	hashables.hash (hash_a);
 }
 
@@ -1136,8 +1179,7 @@ nano::state_block::state_block (bool & error_a, boost::property_tree::ptree cons
 
 void nano::state_block::hash (blake2b_state & hash_a) const
 {
-	nano::uint256_union preamble (static_cast<uint64_t> (nano::block_type::state));
-	blake2b_update (&hash_a, preamble.bytes.data (), preamble.bytes.size ());
+	nano::hash_preamble (hash_a, nano::block_type::state);
 	hashables.hash (hash_a);
 }
 
@@ -2002,8 +2044,7 @@ void nano::asset_block::hash (blake2b_state & hash_a) const
 	// A preamble distinct from every inherited block type's, so an asset block
 	// cannot collide with a state block even given equal field content —
 	// decisions-m2.md §7.
-	nano::uint256_union preamble (static_cast<uint64_t> (nano::block_type::asset));
-	blake2b_update (&hash_a, preamble.bytes.data (), preamble.bytes.size ());
+	nano::hash_preamble (hash_a, nano::block_type::asset);
 	hashables.hash (hash_a);
 }
 
@@ -2473,6 +2514,7 @@ nano::receive_block::receive_block (bool & error_a, boost::property_tree::ptree 
 
 void nano::receive_block::hash (blake2b_state & hash_a) const
 {
+	nano::hash_preamble (hash_a, nano::block_type::receive);
 	hashables.hash (hash_a);
 }
 

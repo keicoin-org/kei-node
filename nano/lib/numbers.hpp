@@ -24,6 +24,16 @@ nano::uint128_t const banoshi_ratio = nano::uint128_t ("10000000000000000"); // 
 nano::uint128_t const RAW_ratio = nano::uint128_t ("1"); // 10^0
 nano::uint128_t const raw_ratio = nano::uint128_t ("1"); // 10^0
 
+/**
+ * Total supply: 10^12 Kei = 10^30 raw, created once in genesis and never again
+ * (decisions-m2.md §5). A Nano-family ledger creates no value outside genesis
+ * because every receive must name a matching send, so SPEC §5.7's requirement
+ * that new Kei be structurally impossible is inherited rather than enforced.
+ */
+nano::uint128_t const kei_total_supply = nano::uint128_t ("1000000000000000000000000000000"); // 10^30
+/** Issuing an asset burns 1,000 Kei (SPEC §5.6.5, decisions-m2.md §12). */
+nano::uint128_t const issuance_burn = nano::uint128_t ("1000000000000000000000"); // 1,000 * 10^18
+
 class uint128_union
 {
 public:

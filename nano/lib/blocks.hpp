@@ -43,6 +43,15 @@ enum class asset_op : uint8_t
 	transfer = 3,
 	asset_receive = 4
 };
+/**
+ * The domain separator every Kei block hash begins with, so that no Nano or
+ * Banano block can ever be a valid Kei block or the reverse. See the definition
+ * for why transport-layer separation alone is not enough.
+ */
+nano::uint256_union const & kei_block_domain ();
+/** Writes the Kei domain followed by the block type, in that order. */
+void hash_preamble (blake2b_state &, nano::block_type);
+
 bool asset_op_valid (uint8_t);
 char const * asset_op_to_string (nano::asset_op);
 bool asset_op_from_string (std::string const &, nano::asset_op &);

@@ -9,6 +9,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/variant/get.hpp>
 
+#include <algorithm>
 #include <limits>
 #include <queue>
 
@@ -25,46 +26,56 @@ nano::networks nano::network_constants::active_network = nano::networks::ACTIVE_
 
 namespace
 {
-char const * dev_private_key_data = "34F0A37AAD20F4A260F0A5B3CB3D7FB50673212263E58A380BC10474BB039CE4";
-char const * dev_public_key_data = "B0311EA55708D6A53C75CDBF88300259C6D018522FE3D4D0A242E431F9E8B6D0"; // kei_3e3j5tkog48pnny9dmfzj1r16pg8t1e76dz5tmac6iq689wyjfpiij4txtdo
-char const * beta_public_key_data = "259A43ABDB779E97452E188BA3EB951B41C961D3318CA6B925380F4D99F0577A"; // kei_1betagoxpxwykx4kw86dnhosc8t3s7ix8eeentwkcg1hbpez1outjrcyg4n1
-char const * live_public_key_data = "2514452A978F08D1CF76BB40B6AD064183CF275D3CC5D3E0515DC96E2112AD4E"; // kei_1bananobh5rat99qfgt1ptpieie5swmoth87thi74qgbfrij7dcgjiij94xr
-std::string const test_public_key_data = nano::get_env_or_default ("NANO_TEST_GENESIS_PUB", "45C6FF9D1706D61F0821327752671BDA9F9ED2DA40326B01935AB566FB9E08ED"); // nano_1jg8zygjg3pp5w644emqcbmjqpnzmubfni3kfe1s8pooeuxsw49fdq1mco9j
+// Kei's dev genesis, and Kei's alone.
+//
+// The tree inherited Banano's genesis blocks, re-prefixed to kei_ — which meant
+// Kei's live network would have launched on Banano's genesis, under Banano's
+// key, handing every Kei in existence to whoever holds it. Nothing about that
+// was intended; it is simply what a fork starts out as, and it is fixed here.
+//
+// The dev private key is derived from a published phrase rather than from
+// randomness, so anyone can regenerate it with
+// blake2b-256("kei-dev-genesis") and confirm this block is what it claims to
+// be. It is a test key by construction and it holds nothing of value.
+char const * dev_private_key_data = "42E7F3D46B98144DB9B8F6E41A296E280B47652B21C9534D7B9A9439038828D9";
+char const * dev_public_key_data = "A811B68CA7360920F753564C1CFA96D2F62B4DE59F6A59D96774354BF9862FF6"; // kei_3c1jpt8cgfib65uo8oke5mxbfnqp7f8yd9ucd9epgx3obhwredzps1ff9jus
+
+// The beta and live genesis blocks do not exist yet, and a placeholder is the
+// honest representation of that. The reserve holds 90% of all Kei, its custody
+// is multisig, and its key is generated offline (SPEC 5.7, decisions-m2.md 5),
+// so the real blocks come out of a genesis ceremony and are pasted in here —
+// they cannot be produced from anything in this repository, and a seed must
+// never appear in it.
+//
+// Until then ledger_constants refuses to construct on those networks, so the
+// node cannot be started against a genesis nobody generated. An all-zero open
+// block parses, which is all these need to do.
+char const * placeholder_public_key_data = "0000000000000000000000000000000000000000000000000000000000000000";
+char const * placeholder_genesis_data = R"%%%({
+	"type": "open",
+	"source": "0000000000000000000000000000000000000000000000000000000000000000",
+	"representative": "kei_1111111111111111111111111111111111111111111111111111hifc8npp",
+	"account": "kei_1111111111111111111111111111111111111111111111111111hifc8npp",
+	"work": "0000000000000000",
+	"signature": "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    })%%%";
+
+char const * beta_public_key_data = placeholder_public_key_data;
+char const * live_public_key_data = placeholder_public_key_data;
+std::string const test_public_key_data = nano::get_env_or_default ("NANO_TEST_GENESIS_PUB", placeholder_public_key_data);
+
 char const * dev_genesis_data = R"%%%({
 	"type": "open",
-	"source": "B0311EA55708D6A53C75CDBF88300259C6D018522FE3D4D0A242E431F9E8B6D0",
-	"representative": "kei_3e3j5tkog48pnny9dmfzj1r16pg8t1e76dz5tmac6iq689wyjfpiij4txtdo",
-	"account": "kei_3e3j5tkog48pnny9dmfzj1r16pg8t1e76dz5tmac6iq689wyjfpiij4txtdo",
-	"work": "7b42a00ee91d5810",
-	"signature": "ECDA914373A2F0CA1296475BAEE40500A7F0A7AD72A5A80C81D7FAB7F6C802B2CC7DB50F5DD0FB25B2EF11761FA7344A158DD5A700B21BD47DE5BD0F63153A02"
+	"source": "A811B68CA7360920F753564C1CFA96D2F62B4DE59F6A59D96774354BF9862FF6",
+	"representative": "kei_3c1jpt8cgfib65uo8oke5mxbfnqp7f8yd9ucd9epgx3obhwredzps1ff9jus",
+	"account": "kei_3c1jpt8cgfib65uo8oke5mxbfnqp7f8yd9ucd9epgx3obhwredzps1ff9jus",
+	"work": "7326f9346047908d",
+	"signature": "F7CD3895E89FDF82BED141FFF69075AE3D511507E7754FE6369BC158E4B0F321596C0761B7E224A705F077C1B9CED35B252DED7A8607F6AC6219BE8AC327B609"
     })%%%";
 
-char const * beta_genesis_data = R"%%%({
-	"type": "open",
-	"source": "259A43ABDB779E97452E188BA3EB951B41C961D3318CA6B925380F4D99F0577A",
-	"representative": "kei_1betagoxpxwykx4kw86dnhosc8t3s7ix8eeentwkcg1hbpez1outjrcyg4n1",
-	"account": "kei_1betagoxpxwykx4kw86dnhosc8t3s7ix8eeentwkcg1hbpez1outjrcyg4n1",
-	"work": "79d4e27dc873c6f2",
-	"signature": "4BD7F96F9ED2721BCEE5EAED400EA50AD00524C629AE55E9AFF11220D2C1B00C3D4B3BB770BF67D4F8658023B677F91110193B6C101C2666931F57046A6DB806"
-    })%%%";
-
-char const * live_genesis_data = R"%%%({
-	"type": "open",
-	"source": "2514452A978F08D1CF76BB40B6AD064183CF275D3CC5D3E0515DC96E2112AD4E",
-	"representative": "kei_1bananobh5rat99qfgt1ptpieie5swmoth87thi74qgbfrij7dcgjiij94xr",
-	"account": "kei_1bananobh5rat99qfgt1ptpieie5swmoth87thi74qgbfrij7dcgjiij94xr",
-	"work": "fa055f79fa56abcf",
-	"signature": "533DCAB343547B93C4128E779848DEA5877D3278CB5EA948BB3A9AA1AE0DB293DE6D9DA4F69E8D1DDFA385F9B4C5E4F38DFA42C00D7B183560435D07AFA18900"
-    })%%%";
-
-std::string const test_genesis_data = nano::get_env_or_default ("NANO_TEST_GENESIS_BLOCK", R"%%%({
-	"type": "open",
-	"source": "45C6FF9D1706D61F0821327752671BDA9F9ED2DA40326B01935AB566FB9E08ED",
-	"representative": "kei_1jg8zygjg3pp5w644emqcbmjqpnzmubfni3kfe1s8pooeuxsw49fdq1mco9j",
-	"account": "kei_1jg8zygjg3pp5w644emqcbmjqpnzmubfni3kfe1s8pooeuxsw49fdq1mco9j",
-	"work": "bc1ef279c1a34eb1",
-	"signature": "15049467CAEE3EC768639E8E35792399B6078DA763DA4EBA8ECAD33B0EDC4AF2E7403893A5A602EB89B978DABEF1D6606BB00F3C0EE11449232B143B6E07170E"
-    })%%%");
+char const * beta_genesis_data = placeholder_genesis_data;
+char const * live_genesis_data = placeholder_genesis_data;
+std::string const test_genesis_data = nano::get_env_or_default ("NANO_TEST_GENESIS_BLOCK", placeholder_genesis_data);
 
 std::shared_ptr<nano::block> parse_block_from_genesis_data (std::string const & genesis_data_a)
 {
@@ -113,7 +124,9 @@ nano::ledger_constants::ledger_constants (nano::work_thresholds & work, nano::ne
 	genesis (network_a == nano::networks::banano_dev_network ? nano_dev_genesis : network_a == nano::networks::banano_beta_network ? nano_beta_genesis
 	: network_a == nano::networks::banano_test_network                                                                             ? nano_test_genesis
 																																   : nano_live_genesis),
-	genesis_amount{ std::numeric_limits<nano::uint128_t>::max () },
+	// 10^30 raw, not uint128 max: Kei's supply is a stated quantity rather than
+	// "as much as the type holds" (decisions-m2.md §5).
+	genesis_amount{ nano::kei_total_supply },
 	burn_account{},
 	nano_dev_final_votes_canary_account (dev_public_key_data),
 	nano_beta_final_votes_canary_account (beta_canary_public_key_data),
@@ -130,10 +143,10 @@ nano::ledger_constants::ledger_constants (nano::work_thresholds & work, nano::ne
 	: network_a == nano::networks::banano_test_network                                                                                                                 ? nano_test_final_votes_canary_height
 																																									   : nano_live_final_votes_canary_height)
 {
-	nano_beta_genesis->sideband_set (nano::block_sideband (nano_beta_genesis->account (), 0, std::numeric_limits<nano::uint128_t>::max (), 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
-	nano_dev_genesis->sideband_set (nano::block_sideband (nano_dev_genesis->account (), 0, std::numeric_limits<nano::uint128_t>::max (), 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
-	nano_live_genesis->sideband_set (nano::block_sideband (nano_live_genesis->account (), 0, std::numeric_limits<nano::uint128_t>::max (), 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
-	nano_test_genesis->sideband_set (nano::block_sideband (nano_test_genesis->account (), 0, std::numeric_limits<nano::uint128_t>::max (), 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
+	nano_beta_genesis->sideband_set (nano::block_sideband (nano_beta_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
+	nano_dev_genesis->sideband_set (nano::block_sideband (nano_dev_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
+	nano_live_genesis->sideband_set (nano::block_sideband (nano_live_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
+	nano_test_genesis->sideband_set (nano::block_sideband (nano_test_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
 
 	nano::link epoch_link_v1;
 	char const * epoch_message_v1 ("epoch v1 block");
@@ -150,6 +163,46 @@ nano::ledger_constants::ledger_constants (nano::work_thresholds & work, nano::ne
 	char const * epoch_message_v2 ("epoch v2 block");
 	strncpy ((char *)epoch_link_v2.bytes.data (), epoch_message_v2, epoch_link_v2.bytes.size ());
 	epochs.add (nano::epoch::epoch_2, epoch_v2_signer, epoch_link_v2);
+
+	// SPEC 5.7 calls an allocation mismatch a launch blocker, so this refuses
+	// to run rather than logging a warning. ledger_constants is built during
+	// startup on every path, so there is nowhere to reach past it.
+	std::string allocation_error;
+	release_assert (!validate_allocation (allocation_error), allocation_error.c_str ());
+
+	// A placeholder genesis is not a genesis. Beta and live have none until the
+	// SPEC 5.7 ceremony produces one, and starting against a placeholder would
+	// mean running a chain whose entire supply is signed by nobody — which is
+	// strictly worse than refusing to start.
+	release_assert (!genesis->account ().is_zero (), "This network has no genesis block. The SPEC 5.7 genesis ceremony has not been run and its output is not in nano/secure/common.cpp, so only the dev network can be started today.");
+}
+
+nano::uint128_t const nano::ledger_constants::allocation_reserve{ nano::uint128_t ("900000000000") * nano::BAN_ratio };
+nano::uint128_t const nano::ledger_constants::allocation_grants{ nano::uint128_t ("37000000000") * nano::BAN_ratio };
+nano::uint128_t const nano::ledger_constants::allocation_community{ nano::uint128_t ("28000000000") * nano::BAN_ratio };
+nano::uint128_t const nano::ledger_constants::allocation_bounty{ nano::uint128_t ("18000000000") * nano::BAN_ratio };
+nano::uint128_t const nano::ledger_constants::allocation_team{ nano::uint128_t ("17000000000") * nano::BAN_ratio };
+
+bool nano::ledger_constants::validate_allocation (std::string & message_a)
+{
+	auto const circulating (allocation_grants + allocation_community + allocation_bounty + allocation_team);
+	auto const expected_circulating (nano::uint128_t ("100000000000") * nano::BAN_ratio);
+	if (circulating != expected_circulating)
+	{
+		message_a = "The four circulating allocations must sum to exactly 100,000,000,000 Kei (SPEC 5.7). This is a launch blocker.";
+		return true;
+	}
+	if (circulating + allocation_reserve != nano::kei_total_supply)
+	{
+		message_a = "Genesis must produce exactly 1,000,000,000,000 Kei (SPEC 5.7). This is a launch blocker.";
+		return true;
+	}
+	return false;
+}
+
+bool nano::ledger_constants::is_reserve (nano::account const & account_a) const
+{
+	return std::find (reserve_accounts.begin (), reserve_accounts.end (), account_a) != reserve_accounts.end ();
 }
 
 nano::hardened_constants & nano::hardened_constants::get ()

@@ -345,7 +345,7 @@ int main (int argc, char * const * argv)
 								  << "Public: " << rep.pub.to_string () << "\n"
 								  << "Account: " << rep.pub.to_account () << "\n";
 					}
-					nano::uint128_t balance (std::numeric_limits<nano::uint128_t>::max ());
+					nano::uint128_t balance (nano::dev::constants.genesis_amount);
 					nano::open_block genesis_block (reinterpret_cast<nano::block_hash const &> (genesis.pub), genesis.pub, genesis.pub, genesis.prv, genesis.pub, *work.generate (nano::work_version::work_1, genesis.pub, network_params.work.epoch_1));
 					std::cout << genesis_block.to_json ();
 					std::cout.flush ();
@@ -908,7 +908,7 @@ int main (int argc, char * const * argv)
 			auto node = inactive_node.node;
 
 			nano::block_hash genesis_latest (node->latest (nano::dev::genesis_key.pub));
-			nano::uint128_t genesis_balance (std::numeric_limits<nano::uint128_t>::max ());
+			nano::uint128_t genesis_balance (nano::dev::constants.genesis_amount);
 			// Generating keys
 			std::vector<nano::keypair> keys (num_accounts);
 			std::vector<nano::root> frontiers (num_accounts);
@@ -1023,7 +1023,7 @@ int main (int argc, char * const * argv)
 			auto node = node_wrapper.node;
 
 			nano::block_hash genesis_latest (node->latest (nano::dev::genesis_key.pub));
-			nano::uint128_t genesis_balance (std::numeric_limits<nano::uint128_t>::max ());
+			nano::uint128_t genesis_balance (nano::dev::constants.genesis_amount);
 			// Generating keys
 			std::vector<nano::keypair> keys (num_representatives);
 			nano::uint128_t balance ((node->config.online_weight_minimum.number () / num_representatives) + 1);
@@ -1161,7 +1161,7 @@ int main (int argc, char * const * argv)
 			flags.disable_bootstrap_listener = true;
 			auto node1 (std::make_shared<nano::node> (io_ctx1, path1, config1, work, flags, 0));
 			nano::block_hash genesis_latest (node1->latest (nano::dev::genesis_key.pub));
-			nano::uint128_t genesis_balance (std::numeric_limits<nano::uint128_t>::max ());
+			nano::uint128_t genesis_balance (nano::dev::constants.genesis_amount);
 			// Generating blocks
 			std::deque<std::shared_ptr<nano::block>> blocks;
 			for (auto i (0); i != count; ++i)
