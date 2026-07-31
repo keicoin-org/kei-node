@@ -113,6 +113,8 @@ enum class error_rpc
 	invalid_offset,
 	invalid_missing_type,
 	invalid_root,
+	invalid_shape,
+	invalid_shape_account_filter,
 	invalid_sources,
 	invalid_subtype,
 	invalid_subtype_balance,

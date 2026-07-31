@@ -555,19 +555,73 @@ so this is taken from inherited behaviour rather than added beside it. §5.6.8
 says to stay compatible wherever it costs nothing; here it costs the contract,
 so the contract wins.
 
-**Two shapes are still wrong, and one of them needs a decision rather than
-code.** `account_history` returns Nano's history entries — `type`, `amount`,
-`account` — where the contract wants blocks in the shape `process` accepts,
-under the same `history` key. There is no parameter to dispatch on, so serving
-the contract means Nano's `account_history` stops returning what it returns
-today, and that is a larger break than the two above: it is the endpoint every
-inherited explorer reads. It is left alone deliberately, pending that call.
-`faucet` (testnet only) is not implemented at all, which is consistent with §0
-putting the public testnet in M3.
+**`account_history` dispatches on a parameter that did not exist, which is the
+general form of what `accounts_receivable` did by luck.** It returns Nano's
+history entries — `type`, `amount`, `account` — where the contract wants blocks
+in the shape `process` accepts, under the same `history` key. Neither of the two
+devices above works on it:
+
+- **It cannot be replaced the way `block_info`'s error was.** Nano's entries are
+  not a worse rendering of the block, they carry information the block does not:
+  `amount` and the counterparty `account` are derived by differencing against the
+  previous block's balance. An explorer handed raw blocks does not get a new
+  shape, it loses fields it would need one extra lookup per entry to rebuild.
+  This is also the endpoint inherited tooling reads most, so the §5.6.8 trade is
+  at its worst here.
+- **It cannot be served beside the inherited answer the way `block_info` serves
+  `block` next to `contents`.** That worked because those are two top-level keys.
+  Here the collision is *inside* each array element and there is no superset
+  entry: `type` is Nano's subtype where a block's is `"state"`, and `account` is
+  the counterparty where a block's is the signer. Both keys, both shapes,
+  different meanings. Raw mode already resolves the first (`type: "state"` plus
+  `subtype`) and does not resolve the second.
+
+So it dispatches, on `shape`: absent is Nano's answer and `shape=block` is the
+contract's. The honest difference from `accounts_receivable` is that `account`
+versus `accounts` was already there to be read, and this discriminator is
+manufactured — which is affordable only because both ends are ours, and costs a
+line of `HttpNode` and a line of `rpc.md`. What it buys is that no inherited
+caller moves at all, which is the one thing neither alternative could offer.
+
+Four details, each of which could have gone quietly wrong:
+
+**The blocks come from `block->serialize_json`,** the same producer `block_info`
+already uses, rather than from a second copy grown inside `history_visitor`. The
+visitor is further from the contract than it looks — it emits no `op` for an
+asset block and no signer for a state one — so the copy would have been written
+from scratch and would then have had to be kept in step with a shape `process`
+also parses.
+
+**Except for `subtype`, which the block does not carry.** `process` takes a state
+block's subtype *beside* the block rather than within it, so `serialize_json`
+has none; `rpc.md`'s entries show one and the SDK's `StateBlockBody` requires
+one. The sideband already knows it, so it costs no lookup. One mismatch in
+vocabulary is worth naming: an account's first block is an `open` to the SDK
+where the sideband says only receive, and epoch blocks have no SDK spelling at
+all.
+
+**Every block on the chain appears.** The visitor drops what it cannot derive an
+entry for — a change block without `raw`, most visibly — and a history with
+holes in it is not something a caller can rebuild state from.
+
+**`account_filter` is refused rather than ignored.** It selects by counterparty,
+which only the visitor derives, so block shape cannot honour it. Silently not
+applying it would return more than was asked for while looking correct, which is
+this section's whole subject.
+
+**The mock requires the parameter it could infer.** `mockRpcHandler` has only
+the contract's shape and could serve it unasked, but then an SDK that forgot to
+send `shape` would pass against the mock and read Nano's entries as blocks
+against this node — entries that parse cleanly and describe a different block.
+Holding callers to it at the reference implementation is the only check
+available until definition-of-done (6) can run.
+
+`faucet` (testnet only) is still not implemented at all, which is consistent
+with §0 putting the public testnet in M3.
 
 ## 16. What is not finished, stated plainly
 
-Two things are implemented but not yet demonstrated, and three are not implemented.
+Two things are implemented but not yet demonstrated, and two are not implemented.
 
 **The reserve set is empty.** `ledger_constants::reserve_accounts` is the fixed,
 immutable enumeration §5.7 requires, and `is_reserve` enforces the null
@@ -576,10 +630,24 @@ genesis ceremony produces them, so on dev those rules currently hold vacuously.
 The four circulating allocations and the reserve total are asserted at startup
 today; the *blocks* that distribute them are part of the same ceremony.
 
-**Nothing has been executed.** Per §3 there is still no toolchain on this
-machine, so everything here is checked by compiling in CI and by having been
-written against the mock's semantics. "Compiles" is not "works", and no assertion
-in this document should be read as though it were.
+**Almost nothing has been executed, and the exception is worth being precise
+about.** Per §3 there is still no toolchain on this machine, so nearly everything
+here is checked by compiling in CI and by having been written against the mock's
+semantics. "Compiles" is not "works", and no assertion in this document should be
+read as though it were.
+
+The exception, as of the `account_history` work in §15: `rpc_test` is now built
+in CI and one case runs there. It stands up a node through `nano::test::system`,
+processes a change, a send and a receive through `ledger.cpp` and the store, and
+reads them back from a live RPC server. So the ledger and store paths are no
+longer entirely untried — a chain is built and queried on every run.
+
+What that does *not* cover is most of what this document decides. No asset block
+has been through `ledger_processor`; the `holdings`, `holders` and `issued`
+tables are written by no test; rollback (§12) is unexecuted, and rollback is the
+code whose bugs stay invisible until a fork actually happens. One green test
+proves the harness works, which is mainly valuable because it means the next
+ones are cheap.
 
 **One deliberate divergence from the mock.** §1 makes `MockLedger` the reference
 and says that where this node could differ it does not. It differs in exactly
@@ -589,15 +657,36 @@ a supply change with no vote behind it, which SPEC §5.7 does not permit. The no
 refuses it. The cost is nothing today, because the reserve set is empty until
 the ceremony, and the mock should adopt the same rule.
 
-**`account_history` still answers in Nano's shape**, and `faucet` does not answer
-at all. §15 has both, and the first needs a decision about what inherited
-tooling is owed before it is worth writing.
+**`account_history` answers in both shapes, and this one has actually been
+run.** §15 records the decision and what it turns on. Both halves are executed
+rather than argued:
 
-**The SDK does not know about the escalating burn.** §12 changed issuance from a
-flat 1,000 Kei to n Kei for an account's nth asset, and added `issuedCount` to
-`account_info` so a signer can compute it. `MockLedger` still charges the flat
-rate and `rpc.md` does not carry the field, so the two disagree about whether a
-given `issue` block is valid. Both sides are small; neither is done.
+- The SDK half — `mockRpcHandler` requires `shape`, `HttpNode` sends it, and the
+  conformance suite now covers `account_history`, which it did not before. That
+  absence is why the shape being wrong went unnoticed in the first place.
+- The node half — `rpc.account_history_block_shape` builds a chain, asks for it
+  in both shapes, and checks the things that distinguish them: that `type` is
+  the block type and not the subtype, that `account` is the signer and not the
+  counterparty, that `previous` and `signature` are present where the inherited
+  entry has neither, that the change block the inherited shape drops is there,
+  and that an unknown `shape` and a `shape` + `account_filter` combination are
+  refused rather than answered.
+
+Getting there needed `rpc_test` built in CI at all, which it never had been —
+so the §15 shapes that shipped before this one (`accounts_receivable`,
+`block_info`, `account_info`) had their tests read rather than compiled. They
+now at least compile; none of them has a test of its own yet, and each is worth
+one.
+
+`faucet` (testnet only) is the one action still not implemented at all.
+
+**The SDK now knows about the escalating burn.** §12 changed issuance from a flat
+1,000 Kei to n Kei for an account's nth asset, and added `issuedCount` to
+`account_info` so a signer can compute it. `MockLedger` charges
+`issuanceBurn(ordinal - 1)` and `rpc.md` carries the field, so the two agree
+about whether a given `issue` block is valid. What remains unchecked is that
+they agree *with each other* rather than separately with this document, and only
+definition-of-done (6) can settle that.
 
 **The SDK's hash has to move.** §7 settled that `asset` blocks hash as binary
 fields under a preamble, and §14 extends that to every block type. The SDK still
