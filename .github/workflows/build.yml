@@ -56,8 +56,14 @@ jobs:
       # scratch. This is the difference between a ~40 minute loop and a ~5
       # minute one, which matters a great deal when CI is the only compiler
       # available (§3).
+      # Split restore from save so the save can run on a failed build. With the
+      # combined action the post step is skipped when a step fails, which is
+      # exactly backwards: a run that failed to compile is the one whose next
+      # attempt most needs a warm cache, and without this every iteration
+      # rebuilds vendored Boost and RocksDB from scratch.
       - name: Restore compiler cache
-        uses: actions/cache@v4
+        id: ccache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.ccache
           key: ccache-${{ runner.os }}-${{ github.sha }}
@@ -91,6 +97,13 @@ jobs:
             bash ci/annotate-build-failure.sh build.log
             exit 1
           fi
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
 
       - name: Version
         run: ./build/bananode --version
