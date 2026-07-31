@@ -1,5 +1,6 @@
 #include <nano/lib/work.hpp>
 #include <nano/secure/ledger.hpp>
+#include <nano/secure/store.hpp>
 #include <nano/test_common/ledger.hpp>
 #include <nano/test_common/testutil.hpp>
 
