@@ -954,6 +954,53 @@ void nano::generate_cache::enable_all ()
 	account_count = true;
 }
 
+nano::error_process nano::to_error_process (nano::process_result process_result)
+{
+	switch (process_result)
+	{
+		case process_result::no_such_asset:
+			return nano::error_process::no_such_asset;
+		case process_result::asset_exists:
+			return nano::error_process::asset_exists;
+		case process_result::not_issuer:
+			return nano::error_process::not_issuer;
+		case process_result::over_max_supply:
+			return nano::error_process::over_max_supply;
+		case process_result::transfer_not_permitted:
+			return nano::error_process::transfer_not_permitted;
+		case process_result::insufficient_asset_balance:
+			return nano::error_process::insufficient_asset_balance;
+		case process_result::issuance_burn_mismatch:
+			return nano::error_process::issuance_burn_mismatch;
+		case process_result::asset_balance_mismatch:
+			return nano::error_process::asset_balance_mismatch;
+		case process_result::bad_asset_payload:
+			return nano::error_process::bad_asset_payload;
+		case process_result::too_many_assets:
+			return nano::error_process::too_many_assets;
+		case process_result::reserve_representative:
+			return nano::error_process::reserve_representative;
+		case process_result::reserve_locked:
+			return nano::error_process::reserve_locked;
+		case process_result::progress:
+		case process_result::bad_signature:
+		case process_result::old:
+		case process_result::negative_spend:
+		case process_result::fork:
+		case process_result::unreceivable:
+		case process_result::gap_previous:
+		case process_result::gap_source:
+		case process_result::gap_epoch_open_pending:
+		case process_result::opened_burn_account:
+		case process_result::balance_mismatch:
+		case process_result::representative_mismatch:
+		case process_result::block_position:
+		case process_result::insufficient_work:
+			break;
+	}
+	return nano::error_process::other;
+}
+
 nano::stat::detail nano::to_stat_detail (nano::process_result process_result)
 {
 	switch (process_result)

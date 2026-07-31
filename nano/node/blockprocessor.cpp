@@ -449,6 +449,27 @@ nano::process_return nano::block_processor::process_one (nano::write_transaction
 			}
 			break;
 		}
+		case nano::process_result::no_such_asset:
+		case nano::process_result::asset_exists:
+		case nano::process_result::not_issuer:
+		case nano::process_result::over_max_supply:
+		case nano::process_result::transfer_not_permitted:
+		case nano::process_result::insufficient_asset_balance:
+		case nano::process_result::issuance_burn_mismatch:
+		case nano::process_result::asset_balance_mismatch:
+		case nano::process_result::bad_asset_payload:
+		case nano::process_result::too_many_assets:
+		case nano::process_result::reserve_representative:
+		case nano::process_result::reserve_locked:
+		{
+			// The asset rejections carry a message naming what the signer did
+			// wrong, so log that rather than restating the code.
+			if (node.config.logging.ledger_logging ())
+			{
+				node.logger.try_log (boost::str (boost::format ("Rejected asset block %1%: %2%") % hash.to_string () % std::error_code (nano::to_error_process (result.code)).message ()));
+			}
+			break;
+		}
 	}
 
 	node.stats.inc (nano::stat::type::blockprocessor, nano::to_stat_detail (result.code));

@@ -455,6 +455,12 @@ enum class tally_result
 };
 
 nano::stat::detail to_stat_detail (process_result);
+/**
+ * The RPC error a rejection maps to. Each asset code carries a message naming
+ * what the signer did wrong, which is the whole point of having twelve of them
+ * rather than one.
+ */
+nano::error_process to_error_process (process_result);
 
 class network_params;
 

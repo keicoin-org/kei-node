@@ -3500,6 +3500,22 @@ void nano::json_handler::process ()
 							case nano::process_result::opened_burn_account:
 								rpc_l->ec = nano::error_process::opened_burn_account;
 								break;
+							case nano::process_result::no_such_asset:
+							case nano::process_result::asset_exists:
+							case nano::process_result::not_issuer:
+							case nano::process_result::over_max_supply:
+							case nano::process_result::transfer_not_permitted:
+							case nano::process_result::insufficient_asset_balance:
+							case nano::process_result::issuance_burn_mismatch:
+							case nano::process_result::asset_balance_mismatch:
+							case nano::process_result::bad_asset_payload:
+							case nano::process_result::too_many_assets:
+							case nano::process_result::reserve_representative:
+							case nano::process_result::reserve_locked:
+							{
+								rpc_l->ec = nano::to_error_process (result.code);
+								break;
+							}
 							default:
 							{
 								rpc_l->ec = nano::error_process::other;
@@ -5559,7 +5575,7 @@ void asset_info_to_json (boost::property_tree::ptree & tree_a, nano::uint256_uni
 	tree_a.put ("decimals", static_cast<int> (info_a.decimals));
 	// Uncapped is stored as zero and reported as absent, never as "0" — a cap
 	// of zero would mean nothing could ever be minted.
-	tree_a.put ("maxSupply", info_a.uncapped () ? "" : info_a.max_supply.to_string_dec ());
+	tree_a.put ("maxSupply", info_a.uncapped () ? std::string{} : info_a.max_supply.to_string_dec ());
 	tree_a.put ("transfer", nano::transfer_policy_to_string (info_a.transfer));
 	tree_a.put ("swap", nano::swap_policy_to_string (info_a.swap));
 	if (!info_a.description.empty ())
@@ -5691,7 +5707,7 @@ void nano::json_handler::asset_holders ()
 		for (auto i (node.store.asset.holders_begin (transaction, nano::holder_key (id, 0))), n (node.store.asset.holders_end ()); i != n && i->first.first == id && returned < count; ++i, ++returned)
 		{
 			boost::property_tree::ptree entry;
-			entry.put ("account", nano::account (i->first.second).to_account ());
+			entry.put ("account", nano::account (i->first.second.number ()).to_account ());
 			entry.put ("balance", i->second.to_string_dec ());
 			holders.push_back (std::make_pair ("", entry));
 		}
