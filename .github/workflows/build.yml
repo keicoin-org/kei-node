@@ -131,3 +131,28 @@ jobs:
       # its own job, and pretending otherwise here would only hide this signal.
       - name: Run Kei tests
         run: ./build/core_test --gtest_filter='asset_block.*:asset_payload.*:asset_id.*:block.kei_hash_domain:json_response.*:issuance_burn.*'
+
+      # `rpc_test` is a separate target, so until this step existed the RPC
+      # changes shipped without anything compiling their tests — the shapes in
+      # §15 were checked by reading. That is the weakest claim in the tree and
+      # this is the cheap half of fixing it.
+      - name: Build RPC tests
+        run: |
+          set -o pipefail
+          if ! cmake --build build --target rpc_test -- -k 0 2>&1 | tee rpc-test-build.log; then
+            bash ci/annotate-build-failure.sh rpc-test-build.log
+            exit 1
+          fi
+
+      # And the expensive half, which is the point: every test above is a unit
+      # test over serialisation, hashing, the response encoder, or the burn
+      # arithmetic, and not one of them constructs a ledger. This one stands up
+      # a node, processes blocks through `ledger.cpp` and the store, and asks
+      # the running RPC server for them — so §16's "nothing has been executed"
+      # stops being true of the ledger path, for one action.
+      #
+      # Filtered to the Kei case for the same reason the core_test filter is:
+      # the inherited RPC suite is red on genesis balances §14 changed on
+      # purpose, and widening this before that is fixed would bury the signal.
+      - name: Run Kei RPC tests
+        run: ./build/rpc_test --gtest_filter='rpc.account_history_block_shape'
