@@ -1045,3 +1045,90 @@ TEST (asset_block, issue_json_derives_its_own_id)
 	ASSERT_EQ (id, block2.hashables.asset_id);
 	ASSERT_EQ (block1.hash (), block2.hash ());
 }
+
+// decisions-m2.md §7 and §14, pinned to literals rather than to agreement.
+//
+// The SDK computes these same hashes in TypeScript, and nothing in either
+// codebase could check that the two match — which is what definition-of-done (6)
+// turns on, because a signature is over the hash. `util/keihash.py` states the
+// layout a third time and prints these values; `packages/core/test/wire.test.ts`
+// in kei-transaction asserts the same literals. Both implementations are held to
+// the bytes instead of to each other.
+//
+// A failure here means the wire layout moved. That is a consensus change: fix
+// the SDK and the generator in the same breath, or put the layout back.
+namespace
+{
+nano::public_key vector_account ()
+{
+	// The inherited dev genesis public key, which util/keigen.py reproduces from
+	// its private key — a real key rather than a pattern that could hide a
+	// byte-order mistake.
+	nano::public_key account;
+	(void)account.decode_hex ("B0311EA55708D6A53C75CDBF88300259C6D018522FE3D4D0A242E431F9E8B6D0");
+	return account;
+}
+
+nano::block_hash vector_previous ()
+{
+	nano::block_hash previous;
+	(void)previous.decode_hex ("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF");
+	return previous;
+}
+
+nano::public_key vector_destination ()
+{
+	nano::public_key destination;
+	(void)destination.decode_hex ("F5C6E4A1B2938475869708172635445362718293A4B5C6D7E8F901234567890A");
+	return destination;
+}
+
+nano::amount vector_balance ()
+{
+	nano::amount balance;
+	(void)balance.decode_dec ("1234567890123456789012345678");
+	return balance;
+}
+
+nano::asset_payload vector_issue_payload ()
+{
+	nano::asset_payload payload;
+	payload.name = "Test Gem";
+	payload.symbol = "GEM";
+	payload.decimals = 2;
+	payload.max_supply = 1000000;
+	payload.transfer = nano::transfer_policy::issuer_only;
+	payload.swap = nano::swap_policy::two_way;
+	payload.description = "A gem for testing";
+	payload.image = "QmTestCid";
+	payload.kind = nano::asset_kind::item;
+	return payload;
+}
+}
+
+TEST (block, kei_hash_vectors)
+{
+	nano::keypair signer;
+	auto const account (vector_account ());
+	auto const previous (vector_previous ());
+	auto const destination (vector_destination ());
+	auto const balance (vector_balance ());
+
+	// The signature is irrelevant to the hash, so a throwaway key signs these.
+	nano::state_block send (account, previous, account, balance, destination, signer.prv, signer.pub, 6);
+	ASSERT_EQ ("44949CB72CF14C61DC6843982B7476722257A65A7B61AAD9C912C78A73BA8649", send.hash ().to_string ());
+
+	auto const payload (vector_issue_payload ());
+	auto const id (nano::derive_asset_id (account, payload.symbol));
+	ASSERT_EQ ("3EB956658F4BA3BEF3BFDBC3545121BA1D35CA7DD0C398DFA8FC480641E4BF04", id.to_string ());
+
+	nano::asset_block issue (account, previous, account, balance, nano::asset_op::issue, id, 0, 0, payload, signer.prv, signer.pub, 6);
+	ASSERT_EQ ("1F583FFE5EFC7A342901481A2B152AA7D67A89484F0F6E1509C8579D7DCD742F", issue.hash ().to_string ());
+
+	nano::amount amount;
+	ASSERT_FALSE (amount.decode_dec ("42000000000000000000"));
+	nano::asset_payload transfer_payload;
+	transfer_payload.memo = "thanks";
+	nano::asset_block transfer (account, previous, account, balance, nano::asset_op::transfer, id, amount, destination, transfer_payload, signer.prv, signer.pub, 6);
+	ASSERT_EQ ("05D77C0F64906C2FC5571B3982223A51A2B376F9D9F6AA259AC438181DBA2345", transfer.hash ().to_string ());
+}
