@@ -682,7 +682,7 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			// reserve-locked only on a `send` and would let a reserve account
 			// burn its way through the reserve one issuance at a time. It costs
 			// nothing today because the reserve set is empty until the genesis
-			// ceremony (§15), and the mock should adopt it.
+			// ceremony (§16), and the mock should adopt it.
 			result.code = nano::process_result::reserve_locked;
 			return;
 		}

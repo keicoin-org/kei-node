@@ -447,9 +447,56 @@ Tools that read hashes from the node are unaffected. That is a real compatibilit
 loss, taken deliberately, because the alternative is two chains that differ only
 by agreement.
 
-## 15. What is not finished, stated plainly
+## 15. The response encoder, and why one action serves two shapes
 
-Three things are implemented but not yet demonstrated, and one is not implemented.
+§16 used to carry the untyped JSON as the last thing standing between the asset
+RPC and the conformance suite. Fixing it turned up a second gap that was quieter
+and worse, and both are recorded here because the reasoning generalises past
+either one.
+
+**The type has to ride on the key.** `boost::property_tree` stores every value as
+a `std::string`, so its writer has nothing to go on and quotes all of them.
+`docs/rpc.md` wants `decimals`, `height`, and `receivableCount` as numbers, an
+absent record as `null`, and an empty result as `[]`; `HttpNode` parses the body
+and passes it through without coercing, so every one of those arrived wrong.
+
+The obvious fix — a marker byte on the *value*, stripped by the writer — is
+unsafe here, and the reason is worth stating because it is not obvious. Values
+include an asset's `name` and a transfer's `memo`, which are chosen by whoever
+signed the block and are length-capped but not otherwise constrained (§7). An
+issuer could therefore name a token so that the node emitted it as raw JSON.
+Keys carry no such risk: every key in a response is a literal in this source.
+So `nano::json` marks the key, and `nano/lib/json_response.hpp` encodes the
+response itself.
+
+A tree with no marked keys encodes exactly as boost encoded it, which a test
+asserts against `write_json` directly, so no inherited endpoint moves. One
+difference is deliberate: bytes at or above `0x80` pass through rather than
+being escaped one at a time, because boost's escaper turns a UTF-8 sequence into
+a run of `\u00XX` that no longer decodes to the character it came from — and
+asset names and memos are user text that has to survive the trip.
+
+**`accounts_receivable` answers two different questions.** Nano's takes an
+`accounts` array and answers per account under `blocks`. Kei's takes one
+`account` and answers with a flat `receivables` array carrying assets alongside
+Kei. The tree served only the first, so `HttpNode.receivables()` found no
+`receivables` key and read every account as having nothing to collect.
+
+That is the failure mode to watch for in the rest of this work: **an empty list
+rather than an error.** A wrong shape that raises is found the first time it is
+called; a wrong shape that returns nothing looks exactly like a correct node with
+an idle account, and the receive path would have looked merely slow. It survived
+because §1's conformance suite is the thing that would have caught it and the
+suite cannot run yet.
+
+Both shapes now answer to the same name, told apart by which parameter the caller
+sent, because the name belongs to the contract. Kei receivables and asset
+receivables arrive in one list because they are one event to the SDK — something
+arrived and needs a block of the recipient's own to collect it (SPEC §5.6.3).
+
+## 16. What is not finished, stated plainly
+
+Two things are implemented but not yet demonstrated, and one is not implemented.
 
 **The reserve set is empty.** `ledger_constants::reserve_accounts` is the fixed,
 immutable enumeration §5.7 requires, and `is_reserve` enforces the null
@@ -462,13 +509,6 @@ today; the *blocks* that distribute them are part of the same ceremony.
 machine, so everything here is checked by compiling in CI and by having been
 written against the mock's semantics. "Compiles" is not "works", and no assertion
 in this document should be read as though it were.
-
-**The RPC's JSON is untyped.** `boost::property_tree`'s writer emits every value
-as a quoted string, so `decimals` and `height` arrive as `"0"` rather than `0`,
-and an absent record as `""` rather than `null`. `HttpNode` passes the parsed
-body through without coercing, so the writer must be fixed before the
-conformance suite can pass. This is a response-encoding problem, not a problem
-with any handler.
 
 **One deliberate divergence from the mock.** §1 makes `MockLedger` the reference
 and says that where this node could differ it does not. It differs in exactly

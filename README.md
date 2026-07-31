@@ -10,14 +10,15 @@ token primitive** and a Kei genesis.
 > block primitive (§7), the `holdings`/`holders` tables (§9), ledger validation
 > and rollback for all five asset operations, per-operation work tiers (§11),
 > Kei's own genesis and a hash domain that separates this chain from Banano's
-> structurally rather than by convention (§14), and the asset half of the RPC.
+> structurally rather than by convention (§14), the asset half of the RPC, and a
+> response encoder that emits the contract's numbers, nulls, and empty arrays
+> instead of quoting everything (§15).
 >
-> **Not finished** (§15): the reserve set is empty until the SPEC §5.7 genesis
-> ceremony fills it, so the reserve rules currently hold vacuously; the RPC's
-> JSON is emitted untyped, so numbers arrive as strings; and the SDK still
-> hashes blocks the M0 way, so signatures do not verify across the two until it
-> follows §7. **Nothing here has been executed** — it compiles in CI, which is
-> not the same claim. It still does not build on the machine it was cloned onto,
+> **Not finished** (§16): the reserve set is empty until the SPEC §5.7 genesis
+> ceremony fills it, so the reserve rules currently hold vacuously, and the SDK
+> still hashes blocks the M0 way, so signatures do not verify across the two
+> until it follows §7. **Nothing here has been executed** — it compiles in CI,
+> which is not the same claim. It still does not build on the machine it was cloned onto,
 > see [Building](#building). Nothing here holds value.
 
 ## Why a fork at all
