@@ -470,6 +470,14 @@ body through without coercing, so the writer must be fixed before the
 conformance suite can pass. This is a response-encoding problem, not a problem
 with any handler.
 
+**One deliberate divergence from the mock.** §1 makes `MockLedger` the reference
+and says that where this node could differ it does not. It differs in exactly
+one place, on purpose: the mock checks reserve-locked only on a `send`, so a
+reserve account can still `issue`, and issuance destroys 1,000 Kei (§12). That is
+a supply change with no vote behind it, which SPEC §5.7 does not permit. The node
+refuses it. The cost is nothing today, because the reserve set is empty until
+the ceremony, and the mock should adopt the same rule.
+
 **The SDK's hash has to move.** §7 settled that `asset` blocks hash as binary
 fields under a preamble, and §14 extends that to every block type. The SDK still
 hashes canonical JSON under `"kei-block-v0"`, so the two disagree and signatures

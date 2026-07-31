@@ -665,10 +665,27 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 	// Excluding the reserve from governance is not enough on its own —
 	// representative weight governs transaction consensus, so a reserve
 	// delegation alone hands over an absolute supermajority with no vote.
-	if (ledger.constants.is_reserve (block_a.hashables.account) && !block_a.hashables.representative.is_zero ())
+	if (ledger.constants.is_reserve (block_a.hashables.account))
 	{
-		result.code = nano::process_result::reserve_representative;
-		return;
+		if (!block_a.hashables.representative.is_zero ())
+		{
+			result.code = nano::process_result::reserve_representative;
+			return;
+		}
+		if (block_a.hashables.op == nano::asset_op::issue)
+		{
+			// Issuance destroys 1,000 Kei (§12). From a reserve account that is
+			// a supply change with no vote behind it, which SPEC §5.7 does not
+			// permit — so the reserve cannot issue.
+			//
+			// This is a deliberate divergence from MockLedger, which checks
+			// reserve-locked only on a `send` and would let a reserve account
+			// burn its way through the reserve one issuance at a time. It costs
+			// nothing today because the reserve set is empty until the genesis
+			// ceremony (§15), and the mock should adopt it.
+			result.code = nano::process_result::reserve_locked;
+			return;
+		}
 	}
 
 	result.code = ledger.constants.work.difficulty (block_a) >= ledger.constants.work.threshold_asset (block_a.hashables.op) ? nano::process_result::progress : nano::process_result::insufficient_work;
