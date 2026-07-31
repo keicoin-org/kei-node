@@ -1079,6 +1079,9 @@ boost::optional<nano::mdb_val> nano::lmdb::store::block_raw_get_by_type_v18 (nan
 		}
 		case nano::block_type::invalid:
 		case nano::block_type::not_a_block:
+		// A v14 or v18 database predates asset blocks, so this is unreachable
+		// rather than unhandled.
+		case nano::block_type::asset:
 		{
 			break;
 		}
@@ -1188,6 +1191,9 @@ boost::optional<nano::mdb_val> nano::lmdb::store::block_raw_get_by_type_v14 (nan
 		}
 		case nano::block_type::invalid:
 		case nano::block_type::not_a_block:
+		// A v14 or v18 database predates asset blocks, so this is unreachable
+		// rather than unhandled.
+		case nano::block_type::asset:
 		{
 			break;
 		}

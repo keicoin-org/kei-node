@@ -249,9 +249,29 @@ public:
 		}
 		ledger.stats.inc (nano::stat::type::rollback, nano::stat::detail::asset_block);
 
+		// ledger.representative () answers with the representative *block's*
+		// hash, so the account comes from loading that block — the same two
+		// steps the state rollback above takes.
+		nano::block_hash rep_block_hash (0);
+		if (!block_a.hashables.previous.is_zero ())
+		{
+			rep_block_hash = ledger.representative (transaction, block_a.hashables.previous);
+		}
 		auto const previous_balance (ledger.balance (transaction, block_a.hashables.previous));
-		auto const representative (ledger.representative (transaction, block_a.hashables.previous));
-		ledger.cache.rep_weights.representation_add_dual (block_a.representative (), 0 - block_a.hashables.balance.number (), representative, previous_balance);
+		nano::account representative{};
+		if (!rep_block_hash.is_zero ())
+		{
+			auto const rep_block (ledger.store.block.get (transaction, rep_block_hash));
+			debug_assert (rep_block != nullptr);
+			representative = rep_block->representative ();
+			ledger.cache.rep_weights.representation_add_dual (representative, previous_balance, block_a.representative (), 0 - block_a.hashables.balance.number ());
+		}
+		else
+		{
+			// The asset block opened this account, so there is no predecessor
+			// weight to give back.
+			ledger.cache.rep_weights.representation_add (block_a.representative (), 0 - block_a.hashables.balance.number ());
+		}
 
 		nano::account_info new_info (block_a.hashables.previous, representative, info.open_block, previous_balance, nano::seconds_since_epoch (), info.block_count - 1, info.epoch ());
 		ledger.update_account (transaction, block_a.hashables.account, info, new_info);
