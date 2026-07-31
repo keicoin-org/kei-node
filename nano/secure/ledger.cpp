@@ -185,8 +185,10 @@ public:
 	{
 		auto const hash (block_a.hash ());
 		nano::account_info info;
-		[[maybe_unused]] auto const error (ledger.store.account.get (transaction, block_a.hashables.account, info));
-		debug_assert (!error);
+		// Not named `error`: that is the visitor's own member, which
+		// take_back_receivable below both reads and sets.
+		[[maybe_unused]] auto const account_error (ledger.store.account.get (transaction, block_a.hashables.account, info));
+		debug_assert (!account_error);
 
 		auto asset_id (block_a.hashables.asset_id);
 		auto const amount (block_a.hashables.amount.number ());
@@ -201,9 +203,7 @@ public:
 				ledger.store.asset.del (transaction, asset_id);
 				break;
 			case nano::asset_op::mint:
-				// The receivable this created has not been collected — if it
-				// had been, the collecting block would be rolled back first.
-				ledger.store.asset.pending_del (transaction, nano::pending_key (block_a.hashables.link.as_account (), hash));
+				take_back_receivable (block_a, hash);
 				if (!ledger.store.asset.get (transaction, asset_id, asset))
 				{
 					asset.circulating = asset.circulating.number () - amount;
@@ -219,7 +219,7 @@ public:
 				restore (block_a.hashables.account, asset_id, amount);
 				break;
 			case nano::asset_op::transfer:
-				ledger.store.asset.pending_del (transaction, nano::pending_key (block_a.hashables.link.as_account (), hash));
+				take_back_receivable (block_a, hash);
 				restore (block_a.hashables.account, asset_id, amount);
 				break;
 			case nano::asset_op::asset_receive:
@@ -286,6 +286,31 @@ public:
 			}
 		}
 		ledger.store.block.del (transaction, hash);
+	}
+
+	/**
+	 * Withdraw the receivable a mint or a transfer created.
+	 *
+	 * The recipient may already have collected it, in which case their
+	 * `asset_receive` has to come off their chain first — and that is not
+	 * something this rollback can assume happened, because the two accounts are
+	 * separate chains with no ordering between them. This is the same loop the
+	 * state rollback above runs for an uncollected send, and without it a
+	 * rollback of a collected mint deletes a key that is not there and takes the
+	 * node down on the release assert.
+	 */
+	void take_back_receivable (nano::asset_block const & block_a, nano::block_hash const & hash_a)
+	{
+		auto const recipient (block_a.hashables.link.as_account ());
+		nano::pending_key const key (recipient, hash_a);
+		while (!error && !ledger.store.asset.pending_exists (transaction, key))
+		{
+			error = ledger.rollback (transaction, ledger.latest (transaction, recipient), list);
+		}
+		if (!error)
+		{
+			ledger.store.asset.pending_del (transaction, key);
+		}
 	}
 
 	/** Give an account back what a burn or a transfer took from it. */
