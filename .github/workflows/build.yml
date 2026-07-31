@@ -130,7 +130,7 @@ jobs:
       # red for reasons that are not regressions. Bringing it back to green is
       # its own job, and pretending otherwise here would only hide this signal.
       - name: Run Kei tests
-        run: ./build/core_test --gtest_filter='asset_block.*:asset_payload.*:asset_id.*:block.kei_hash_domain:json_response.*:issuance_burn.*'
+        run: ./build/core_test --gtest_filter='asset_block.*:asset_payload.*:asset_id.*:block.kei_hash_domain:block.kei_hash_vectors:json_response.*:issuance_burn.*'
 
       # `rpc_test` is a separate target, so until this step existed the RPC
       # changes shipped without anything compiling their tests — the shapes in
