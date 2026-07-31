@@ -1,6 +1,7 @@
 #include <nano/lib/config.hpp>
 #include <nano/lib/convert.hpp>
 #include <nano/lib/json_error_response.hpp>
+#include <nano/lib/json_response.hpp>
 #include <nano/lib/timer.hpp>
 #include <nano/node/bootstrap/bootstrap_lazy.hpp>
 #include <nano/node/bootstrap_ascending/service.hpp>
@@ -182,13 +183,13 @@ void nano::json_handler::response_errors ()
 		boost::property_tree::ptree response_error;
 		response_error.put ("error", ec.message ());
 		std::stringstream ostream;
-		boost::property_tree::write_json (ostream, response_error);
+		nano::json::write (ostream, response_error);
 		response (ostream.str ());
 	}
 	else
 	{
 		std::stringstream ostream;
-		boost::property_tree::write_json (ostream, response_l);
+		nano::json::write (ostream, response_l);
 		response (ostream.str ());
 	}
 }
@@ -640,6 +641,19 @@ void nano::json_handler::account_info ()
 		bool const include_confirmed = request.get<bool> ("include_confirmed", false);
 		auto transaction (node.store.tx_begin_read ());
 		auto info (account_info_impl (transaction, account));
+		if (ec == nano::error_common::account_not_found)
+		{
+			// docs/rpc.md: an account with no chain yet is `{ "account": null }`,
+			// not an error. HttpNode raises any `error` as a thrown KeiError, so
+			// a wallet asking its balance before it has ever been paid would
+			// throw where it has to read zero — and every account starts there.
+			// The lazy bootstrap account_info_impl kicked off has already been
+			// requested, which is the part of Nano's answer worth keeping.
+			ec = {};
+			nano::json::put_null (response_l, "account");
+			response_errors ();
+			return;
+		}
 		nano::confirmation_height_info confirmation_height_info;
 		node.store.confirmation_height.get (transaction, account, confirmation_height_info);
 		if (!ec)
@@ -647,7 +661,7 @@ void nano::json_handler::account_info ()
 			boost::property_tree::ptree kei_account;
 			kei_account.put ("address", account.to_account ());
 			kei_account.put ("frontier", info.head.to_string ());
-			kei_account.put ("height", std::to_string (info.block_count));
+			nano::json::put_number (kei_account, "height", info.block_count);
 			kei_account.put ("balance", info.balance.to_string_dec ());
 			kei_account.put ("representative", info.representative.to_account ());
 			// Both kinds of arrival count: Kei waiting in `pending`, and assets
@@ -663,7 +677,7 @@ void nano::json_handler::account_info ()
 			{
 				++receivable_count;
 			}
-			kei_account.put ("receivableCount", std::to_string (receivable_count));
+			nano::json::put_number (kei_account, "receivableCount", receivable_count);
 			response_l.add_child ("account", kei_account);
 
 			response_l.put ("frontier", info.head.to_string ());
@@ -911,7 +925,7 @@ void nano::json_handler::account_representative_set ()
 					{
 						response_data->put ("block", block->hash ().to_string ());
 						std::stringstream ostream;
-						boost::property_tree::write_json (ostream, *response_data);
+						nano::json::write (ostream, *response_data);
 						response_a (ostream.str ());
 					}
 					else
@@ -1080,6 +1094,16 @@ void nano::json_handler::accounts_pending ()
 
 void nano::json_handler::accounts_receivable ()
 {
+	// docs/rpc.md asks a different question of this action than Nano does: one
+	// account rather than a list of them, and one flat array that carries
+	// assets alongside Kei. Both shapes answer to the same name because that
+	// name is the contract's, and they are told apart by which parameter the
+	// caller sent — `account` is Kei's, `accounts` is the inherited one.
+	if (!request.count ("accounts"))
+	{
+		kei_receivables ();
+		return;
+	}
 	auto count (count_optional_impl ());
 	auto threshold (threshold_optional_impl ());
 	bool const source = request.get<bool> ("source", false);
@@ -1230,6 +1254,13 @@ void nano::json_handler::block_info ()
 				block->serialize_json (contents);
 				response_l.put ("contents", contents);
 			}
+			// docs/rpc.md answers this action with `block`, in the shape
+			// `process` accepts, and does not have Nano's `json_block` switch:
+			// the SDK reads a block, not a string holding one. `contents` stays
+			// beside it, so nothing inherited loses its answer.
+			boost::property_tree::ptree kei_block;
+			block->serialize_json (kei_block);
+			response_l.add_child ("block", kei_block);
 			if (block->type () == nano::block_type::state)
 			{
 				auto subtype (nano::state_subtype (block->sideband ().details));
@@ -1238,7 +1269,9 @@ void nano::json_handler::block_info ()
 		}
 		else
 		{
-			ec = nano::error_blocks::not_found;
+			// Absent, not an error — the same rule `asset_info` and
+			// `account_info` follow.
+			nano::json::put_null (response_l, "block");
 		}
 	}
 	response_errors ();
@@ -1665,7 +1698,7 @@ void nano::json_handler::block_create ()
 				response_l.put ("block", contents);
 			}
 			std::stringstream ostream;
-			boost::property_tree::write_json (ostream, response_l);
+			nano::json::write (ostream, response_l);
 			rpc_l->response (ostream.str ());
 		};
 		// Wrapper from argument to lambda capture, to extend the block's scope
@@ -2803,7 +2836,7 @@ void nano::json_handler::account_history ()
 			hash = reverse ? node.store.block.successor (transaction, hash) : block->previous ();
 			block = node.store.block.get (transaction, hash);
 		}
-		response_l.add_child ("history", history);
+		nano::json::add_array (response_l, "history", history);
 		if (!hash.is_zero ())
 		{
 			response_l.put (reverse ? "next" : "previous", hash.to_string ());
@@ -3627,7 +3660,7 @@ void nano::json_handler::receive ()
 								boost::property_tree::ptree response_l;
 								response_l.put ("block", block_a->hash ().to_string ());
 								std::stringstream ostream;
-								boost::property_tree::write_json (ostream, response_l);
+								nano::json::write (ostream, response_l);
 								response_a (ostream.str ());
 							}
 							else
@@ -4021,7 +4054,7 @@ void nano::json_handler::send ()
 				{
 					response_data->put ("block", block_a->hash ().to_string ());
 					std::stringstream ostream;
-					boost::property_tree::write_json (ostream, *response_data);
+					nano::json::write (ostream, *response_data);
 					response_a (ostream.str ());
 				}
 				else
@@ -4176,7 +4209,7 @@ void nano::json_handler::stats ()
 		auto stat_tree_l (*static_cast<boost::property_tree::ptree *> (sink->to_object ()));
 		stat_tree_l.put ("stat_duration_seconds", node.stats.last_reset ().count ());
 		std::stringstream ostream;
-		boost::property_tree::write_json (ostream, stat_tree_l);
+		nano::json::write (ostream, stat_tree_l);
 		response (ostream.str ());
 	}
 	else
@@ -4190,7 +4223,7 @@ void nano::json_handler::stats_clear ()
 	node.stats.clear ();
 	response_l.put ("success", "");
 	std::stringstream ostream;
-	boost::property_tree::write_json (ostream, response_l);
+	nano::json::write (ostream, response_l);
 	response (ostream.str ());
 }
 
@@ -5291,7 +5324,7 @@ void nano::json_handler::work_generate ()
 					response_l.put ("difficulty", nano::to_string_hex (result_difficulty));
 					auto result_multiplier = nano::difficulty::to_multiplier (result_difficulty, node.default_difficulty (work_version));
 					response_l.put ("multiplier", nano::to_string (result_multiplier));
-					boost::property_tree::write_json (ostream, response_l);
+					nano::json::write (ostream, response_l);
 					rpc_l->response (ostream.str ());
 				}
 				else
@@ -5529,12 +5562,10 @@ void nano::inprocess_rpc_handler::process_request_v2 (rpc_handler_request_params
  * done when its conformance suite passes against this node with only the URL
  * changed. Amounts are raw decimal strings throughout, as the contract requires.
  *
- * One known departure, and it is the response encoding rather than any of these
- * handlers: boost::property_tree's JSON writer emits every value as a quoted
- * string, so `decimals`, `height`, and `receivableCount` arrive as "0" rather
- * than 0, and an absent record as "" rather than null. HttpNode passes the
- * parsed body straight through without coercing, so this has to be fixed in the
- * writer before the conformance suite can pass. See docs/decisions-m2.md 14.
+ * `decimals`, `height`, and `receivableCount` are numbers and an absent record
+ * is null, which boost::property_tree cannot express because it stores every
+ * value as a string. nano::json carries the type on the key instead and encodes
+ * the response itself; see nano/lib/json_response.hpp.
  */
 
 namespace
@@ -5545,10 +5576,17 @@ void asset_info_to_json (boost::property_tree::ptree & tree_a, nano::uint256_uni
 	tree_a.put ("issuer", info_a.issuer.to_account ());
 	tree_a.put ("name", info_a.name);
 	tree_a.put ("symbol", info_a.symbol);
-	tree_a.put ("decimals", static_cast<int> (info_a.decimals));
-	// Uncapped is stored as zero and reported as absent, never as "0" — a cap
-	// of zero would mean nothing could ever be minted.
-	tree_a.put ("maxSupply", info_a.uncapped () ? std::string{} : info_a.max_supply.to_string_dec ());
+	nano::json::put_number (tree_a, "decimals", info_a.decimals);
+	// Uncapped is stored as zero and reported as null, never as "0" — a cap of
+	// zero would mean nothing could ever be minted.
+	if (info_a.uncapped ())
+	{
+		nano::json::put_null (tree_a, "maxSupply");
+	}
+	else
+	{
+		tree_a.put ("maxSupply", info_a.max_supply.to_string_dec ());
+	}
 	tree_a.put ("transfer", nano::transfer_policy_to_string (info_a.transfer));
 	tree_a.put ("swap", nano::swap_policy_to_string (info_a.swap));
 	if (!info_a.description.empty ())
@@ -5587,7 +5625,7 @@ void nano::json_handler::asset_info ()
 		else
 		{
 			// An asset that was never issued is absent, not an error.
-			response_l.put ("asset", "");
+			nano::json::put_null (response_l, "asset");
 		}
 	}
 	response_errors ();
@@ -5617,7 +5655,7 @@ void nano::json_handler::asset_by_symbol ()
 			}
 			else
 			{
-				response_l.put ("asset", "");
+				nano::json::put_null (response_l, "asset");
 			}
 		}
 	}
@@ -5640,7 +5678,7 @@ void nano::json_handler::account_holdings ()
 			entry.put ("balance", i->second.to_string_dec ());
 			holdings.push_back (std::make_pair ("", entry));
 		}
-		response_l.add_child ("holdings", holdings);
+		nano::json::add_array (response_l, "holdings", holdings);
 	}
 	response_errors ();
 }
@@ -5684,7 +5722,54 @@ void nano::json_handler::asset_holders ()
 			entry.put ("balance", i->second.to_string_dec ());
 			holders.push_back (std::make_pair ("", entry));
 		}
-		response_l.add_child ("holders", holders);
+		nano::json::add_array (response_l, "holders", holders);
+	}
+	response_errors ();
+}
+
+void nano::json_handler::kei_receivables ()
+{
+	auto account (account_impl ());
+	auto const count (count_optional_impl ());
+	if (!ec)
+	{
+		boost::property_tree::ptree receivables;
+		auto transaction (node.store.tx_begin_read ());
+		uint64_t returned (0);
+		auto const kei (nano::uint256_union (0).to_string ());
+		// Kei waiting in `pending` and an asset waiting in `asset_pending` are
+		// the same event to the SDK — something arrived and needs a block of
+		// the recipient's own to collect it (SPEC §5.6.3) — so one list carries
+		// both, and Kei is the zero asset id as it is everywhere else.
+		for (auto i (node.store.pending.begin (transaction, nano::pending_key (account, 0))), n (node.store.pending.end ()); i != n && nano::pending_key (i->first).account == account && returned < count; ++i, ++returned)
+		{
+			nano::pending_key const & key (i->first);
+			nano::pending_info const & info (i->second);
+			boost::property_tree::ptree entry;
+			entry.put ("hash", key.hash.to_string ());
+			entry.put ("from", info.source.to_account ());
+			entry.put ("asset", kei);
+			entry.put ("amount", info.amount.to_string_dec ());
+			receivables.push_back (std::make_pair ("", entry));
+		}
+		for (auto i (node.store.asset.pending_begin (transaction, nano::pending_key (account, 0))), n (node.store.asset.pending_end ()); i != n && nano::pending_key (i->first).account == account && returned < count; ++i, ++returned)
+		{
+			nano::pending_key const & key (i->first);
+			nano::asset_pending_info const & info (i->second);
+			boost::property_tree::ptree entry;
+			entry.put ("hash", key.hash.to_string ());
+			entry.put ("from", info.source.to_account ());
+			entry.put ("asset", info.asset_id.to_string ());
+			entry.put ("amount", info.amount.to_string_dec ());
+			if (!info.memo.empty ())
+			{
+				// Optional in the contract, and an absent memo is not an empty
+				// one — the SDK matches an order against it (decisions-m1 §5).
+				entry.put ("memo", info.memo);
+			}
+			receivables.push_back (std::make_pair ("", entry));
+		}
+		nano::json::add_array (response_l, "receivables", receivables);
 	}
 	response_errors ();
 }

@@ -24,6 +24,7 @@ add_executable(
   frontiers_confirmation.cpp
   gap_cache.cpp
   ipc.cpp
+  json_response.cpp
   ledger.cpp
   ledger_walker.cpp
   locks.cpp

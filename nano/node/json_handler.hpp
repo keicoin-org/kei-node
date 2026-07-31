@@ -39,6 +39,8 @@ public:
 	void account_holdings ();
 	void asset_balance ();
 	void asset_holders ();
+	/** The one-account, Kei-and-assets shape of `accounts_receivable`. */
+	void kei_receivables ();
 	void work_thresholds ();
 	void account_key ();
 	void account_list ();

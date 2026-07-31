@@ -1,7 +1,11 @@
 #pragma once
 
-#include <boost/property_tree/json_parser.hpp>
+#include <nano/lib/json_response.hpp>
+
 #include <boost/property_tree/ptree.hpp>
+
+#include <functional>
+#include <string>
 
 namespace nano
 {
@@ -9,8 +13,6 @@ inline void json_error_response (std::function<void (std::string const &)> respo
 {
 	boost::property_tree::ptree response_l;
 	response_l.put ("error", message_a);
-	std::stringstream ostream;
-	boost::property_tree::write_json (ostream, response_l);
-	response_a (ostream.str ());
+	response_a (nano::json::to_string (response_l));
 }
 }
