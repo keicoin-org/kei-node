@@ -621,7 +621,7 @@ with §0 putting the public testnet in M3.
 
 ## 16. What is not finished, stated plainly
 
-Two things are implemented but not yet demonstrated, and two are not implemented.
+Two things are not implemented, and what is implemented is unevenly demonstrated.
 
 **The reserve set is empty.** `ledger_constants::reserve_accounts` is the fixed,
 immutable enumeration §5.7 requires, and `is_reserve` enforces the null
@@ -630,24 +630,36 @@ genesis ceremony produces them, so on dev those rules currently hold vacuously.
 The four circulating allocations and the reserve total are asserted at startup
 today; the *blocks* that distribute them are part of the same ceremony.
 
-**Almost nothing has been executed, and the exception is worth being precise
-about.** Per §3 there is still no toolchain on this machine, so nearly everything
-here is checked by compiling in CI and by having been written against the mock's
-semantics. "Compiles" is not "works", and no assertion in this document should be
-read as though it were.
+**What has been executed, and what has only been compiled.** Per §3 there is no
+toolchain on this machine, so anything not named below is checked by compiling in
+CI and by having been written against the mock's semantics. "Compiles" is not
+"works", and no assertion in this document should be read as though it were.
 
-The exception, as of the `account_history` work in §15: `rpc_test` is now built
+The first exception, from the `account_history` work in §15: `rpc_test` is built
 in CI and one case runs there. It stands up a node through `nano::test::system`,
 processes a change, a send and a receive through `ledger.cpp` and the store, and
 reads them back from a live RPC server. So the ledger and store paths are no
 longer entirely untried — a chain is built and queried on every run.
 
-What that does *not* cover is most of what this document decides. No asset block
-has been through `ledger_processor`; the `holdings`, `holders` and `issued`
-tables are written by no test; rollback (§12) is unexecuted, and rollback is the
-code whose bugs stay invisible until a fork actually happens. One green test
-proves the harness works, which is mainly valuable because it means the next
-ones are cheap.
+That harness being cheap is what `core_test/asset_ledger.cpp` spends. **All five
+asset operations now go through `ledger_processor` and back out through
+`ledger::rollback` on every CI run**, against a real store: the escalating burn
+and the issuance count it prices from, a mint arriving as a receivable and the
+`asset_receive` that collects it, the `holdings` and `holders` entries that
+collect writes and the deletion of both when a balance reaches zero, the max
+supply cap and the headroom a burn frees (§5.6.6), and both transfer policies
+that can refuse a move.
+
+Rollback is covered because rollback is the code whose bugs stay invisible until
+a fork actually happens — including the case that is easy to get wrong, where the
+recipient has already collected the mint being rolled back and their
+`asset_receive` has to come off their own chain first.
+
+What is still unexecuted after that: the reserve rules, which cannot be executed
+until the reserve set has members (above); `asset_info` and the rest of the asset
+RPC, which have no test of their own; and everything in §15 apart from
+`account_history`. A ledger test is also not a running node — definition-of-done
+(1) and (6) still need a toolchain (§3).
 
 **One deliberate divergence from the mock.** §1 makes `MockLedger` the reference
 and says that where this node could differ it does not. It differs in exactly
@@ -688,12 +700,14 @@ about whether a given `issue` block is valid. What remains unchecked is that
 they agree *with each other* rather than separately with this document, and only
 definition-of-done (6) can settle that.
 
-**The SDK's hash has to move.** §7 settled that `asset` blocks hash as binary
-fields under a preamble, and §14 extends that to every block type. The SDK still
-hashes canonical JSON under `"kei-block-v0"`, so the two disagree and signatures
-will not verify across them. §7 already noted this lands as one change on the SDK
-side; it has not been made, and until it is, definition-of-done (6) cannot pass
-no matter what this node does.
+**The SDK's hash has moved, and both sides are pinned to the same vectors.** §7
+settled that `asset` blocks hash as binary fields under a preamble and §14
+extended that to every block type, which left the SDK hashing canonical JSON
+under `"kei-block-v0"` and the two disagreeing about every signature. The SDK
+now hashes as this node does. What makes that more than two implementations
+agreeing with this document separately: `block.kei_hash_vectors` here and the
+SDK's own vector test assert the same hashes for the same blocks, so a change to
+either side that moves a hash fails on both.
 
 ---
 

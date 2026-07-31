@@ -15,11 +15,12 @@ token primitive** and a Kei genesis.
 > instead of quoting everything (§15).
 >
 > **Not finished** (§16): the reserve set is empty until the SPEC §5.7 genesis
-> ceremony fills it, so the reserve rules currently hold vacuously, and the SDK
-> still hashes blocks the M0 way, so signatures do not verify across the two
-> until it follows §7. **Nothing here has been executed** — it compiles in CI,
-> which is not the same claim. It still does not build on the machine it was cloned onto,
-> see [Building](#building). Nothing here holds value.
+> ceremony fills it, so the reserve rules currently hold vacuously, and `faucet`
+> is not implemented. The five asset operations now run through the ledger and
+> back out through rollback on every CI run; most of the RPC half is still
+> checked only by compiling, which is not the same claim. It still does not build
+> on the machine it was cloned onto, see [Building](#building). Nothing here holds
+> value.
 
 ## Why a fork at all
 
