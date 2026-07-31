@@ -18,6 +18,7 @@
 #include <chrono>
 #include <vector>
 
+
 namespace
 {
 void construct_json (nano::container_info_component * component, boost::property_tree::ptree & parent);
@@ -5521,34 +5522,6 @@ void nano::inprocess_rpc_handler::process_request_v2 (rpc_handler_request_params
 	handler->process_json (reinterpret_cast<uint8_t const *> (body_l.data ()), body_l.size (), response_a);
 }
 
-namespace
-{
-void construct_json (nano::container_info_component * component, boost::property_tree::ptree & parent)
-{
-	// We are a leaf node, print name and exit
-	if (!component->is_composite ())
-	{
-		auto & leaf_info = static_cast<nano::container_info_leaf *> (component)->get_info ();
-		boost::property_tree::ptree child;
-		child.put ("count", leaf_info.count);
-		child.put ("size", leaf_info.count * leaf_info.sizeof_element);
-		parent.add_child (leaf_info.name, child);
-		return;
-	}
-
-	auto composite = static_cast<nano::container_info_composite *> (component);
-
-	boost::property_tree::ptree current;
-	for (auto & child : composite->get_children ())
-	{
-		construct_json (child.get (), current);
-	}
-
-	parent.add_child (composite->get_name (), current);
-}
-
-// Any RPC handlers which require no arguments (excl default arguments) should go here.
-// This is to prevent large if/else chains which compilers can have limits for (MSVC for instance has 128).
 /*
  * Kei's asset reads (kei-transaction/docs/rpc.md).
  *
@@ -5728,6 +5701,35 @@ void nano::json_handler::work_thresholds ()
 	response_l.add_child ("thresholds", thresholds);
 	response_errors ();
 }
+
+namespace
+{
+void construct_json (nano::container_info_component * component, boost::property_tree::ptree & parent)
+{
+	// We are a leaf node, print name and exit
+	if (!component->is_composite ())
+	{
+		auto & leaf_info = static_cast<nano::container_info_leaf *> (component)->get_info ();
+		boost::property_tree::ptree child;
+		child.put ("count", leaf_info.count);
+		child.put ("size", leaf_info.count * leaf_info.sizeof_element);
+		parent.add_child (leaf_info.name, child);
+		return;
+	}
+
+	auto composite = static_cast<nano::container_info_composite *> (component);
+
+	boost::property_tree::ptree current;
+	for (auto & child : composite->get_children ())
+	{
+		construct_json (child.get (), current);
+	}
+
+	parent.add_child (composite->get_name (), current);
+}
+
+// Any RPC handlers which require no arguments (excl default arguments) should go here.
+// This is to prevent large if/else chains which compilers can have limits for (MSVC for instance has 128).
 
 ipc_json_handler_no_arg_func_map create_ipc_json_handler_no_arg_func_map ()
 {

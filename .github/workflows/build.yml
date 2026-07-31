@@ -88,3 +88,28 @@ jobs:
 
       - name: Version
         run: ./build/bananode --version
+
+      # "It compiles" is a weaker claim than "it works", and until this step
+      # existed it was the only claim this workflow could support. The filter is
+      # deliberate: the inherited suite has hashes and genesis balances baked in
+      # that decisions-m2.md §14 changed on purpose, so it is red for reasons
+      # that are not regressions. Bringing it back to green is its own job.
+      - name: Build tests
+        run: |
+          set -o pipefail
+          if ! cmake --build build --target core_test -- -k 0 2>&1 | tee test-build.log; then
+            grep -E '^[^ ]+:[0-9]+:[0-9]+: (error|fatal error):' test-build.log \
+              | sort -u | head -40 \
+              | while IFS= read -r line; do
+                  file=$(echo "$line" | cut -d: -f1)
+                  lineno=$(echo "$line" | cut -d: -f2)
+                  col=$(echo "$line" | cut -d: -f3)
+                  msg=$(echo "$line" | cut -d: -f4-)
+                  echo "::error file=${file},line=${lineno},col=${col}::${msg}"
+                done
+            exit 1
+          fi
+
+      - name: Run Kei tests
+        run: |
+          ./build/core_test --gtest_filter='asset_block.*:asset_payload.*:asset_id.*:block.kei_hash_domain'

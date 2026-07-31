@@ -878,10 +878,29 @@ TEST (block_builder, receive)
 // decisions-m2.md §7 — Kei's native token primitive. No block_builder support
 // yet, so these construct nano::asset_block directly, mirroring the
 // send/receive direct-construction tests above.
+namespace
+{
+/** An issuance payload with every field populated, so nothing is round-tripped by accident. */
+nano::asset_payload issue_payload ()
+{
+	nano::asset_payload payload;
+	payload.name = "Gems";
+	payload.symbol = "GEM";
+	payload.decimals = 0;
+	payload.max_supply = 1000000;
+	payload.transfer = nano::transfer_policy::issuer_only;
+	payload.swap = nano::swap_policy::one_way;
+	payload.description = "The shop currency";
+	payload.image = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+	payload.kind = nano::asset_kind::token;
+	return payload;
+}
+}
+
 TEST (asset_block, sign)
 {
 	nano::keypair key1;
-	nano::asset_block block (key1.pub, 0, key1.pub, 1000, nano::asset_op::transfer, 7, 5, 9, std::vector<uint8_t>{}, key1.prv, key1.pub, 6);
+	nano::asset_block block (key1.pub, 0, key1.pub, 1000, nano::asset_op::transfer, 7, 5, 9, nano::asset_payload{}, key1.prv, key1.pub, 6);
 	ASSERT_FALSE (nano::validate_message (key1.pub, block.hash (), block.signature));
 	block.signature.bytes[32] ^= 0x1;
 	ASSERT_TRUE (nano::validate_message (key1.pub, block.hash (), block.signature));
@@ -890,7 +909,7 @@ TEST (asset_block, sign)
 TEST (asset_block, type_and_preamble)
 {
 	nano::keypair key1;
-	nano::asset_block asset (key1.pub, 0, key1.pub, 1000, nano::asset_op::transfer, 7, 5, 9, std::vector<uint8_t>{}, key1.prv, key1.pub, 6);
+	nano::asset_block asset (key1.pub, 0, key1.pub, 1000, nano::asset_op::transfer, 7, 5, 9, nano::asset_payload{}, key1.prv, key1.pub, 6);
 	ASSERT_EQ (nano::block_type::asset, asset.type ());
 	// Same account/previous/representative/balance/link as a state block with
 	// a zero link, but the distinct preamble (decisions-m2.md §7) must still
@@ -899,11 +918,33 @@ TEST (asset_block, type_and_preamble)
 	ASSERT_NE (asset.hash (), state.hash ());
 }
 
+// decisions-m2.md §14: a Kei block hashes under a domain no Nano or Banano
+// block hashes under, so the two chains cannot be confused at the ledger.
+TEST (block, kei_hash_domain)
+{
+	nano::keypair key1;
+	nano::state_block state (key1.pub, 0, key1.pub, 1000, 0, key1.prv, key1.pub, 6);
+
+	// What the inherited hash would have been: the bare type preamble, with no
+	// Kei domain in front of it.
+	nano::block_hash inherited;
+	blake2b_state hash;
+	ASSERT_EQ (0, blake2b_init (&hash, sizeof (inherited.bytes)));
+	nano::uint256_union const preamble (static_cast<uint64_t> (nano::block_type::state));
+	blake2b_update (&hash, preamble.bytes.data (), preamble.bytes.size ());
+	state.hashables.hash (hash);
+	ASSERT_EQ (0, blake2b_final (&hash, inherited.bytes.data (), sizeof (inherited.bytes)));
+
+	ASSERT_NE (state.hash (), inherited);
+	ASSERT_FALSE (nano::kei_block_domain ().is_zero ());
+}
+
 TEST (asset_block, serialize)
 {
 	nano::keypair key1;
-	std::vector<uint8_t> payload{ 0x01, 0x02, 0x03 };
-	nano::asset_block block1 (key1.pub, 0, key1.pub, 1000, nano::asset_op::issue, 7, 0, 9, payload, key1.prv, key1.pub, 6);
+	auto const payload (issue_payload ());
+	auto const id (nano::derive_asset_id (key1.pub, payload.symbol));
+	nano::asset_block block1 (key1.pub, 0, key1.pub, 1000, nano::asset_op::issue, id, 0, 0, payload, key1.prv, key1.pub, 6);
 	std::vector<uint8_t> bytes;
 	{
 		nano::vectorstream stream1 (bytes);
@@ -914,14 +955,61 @@ TEST (asset_block, serialize)
 	nano::asset_block block2 (error, stream2);
 	ASSERT_FALSE (error);
 	ASSERT_EQ (block1, block2);
-	ASSERT_EQ (payload, block2.hashables.payload);
+	ASSERT_EQ (payload.name, block2.hashables.payload.name);
+	ASSERT_EQ (payload.image, block2.hashables.payload.image);
+	ASSERT_EQ (nano::transfer_policy::issuer_only, block2.hashables.payload.transfer);
+}
+
+// The payload encoding is canonical, so trailing bytes are a second encoding of
+// the same block rather than data to ignore.
+TEST (asset_payload, rejects_trailing_bytes)
+{
+	auto payload (issue_payload ());
+	auto bytes (payload.to_bytes (nano::asset_op::issue));
+	bytes.push_back (0x00);
+	nano::bufferstream stream (bytes.data (), bytes.size ());
+	nano::asset_payload parsed;
+	ASSERT_TRUE (parsed.deserialize (stream, nano::asset_op::issue, bytes.size ()));
+}
+
+TEST (asset_payload, memo_round_trips_on_transfer)
+{
+	nano::asset_payload payload;
+	payload.memo = "Sword of a Thousand Truths";
+	auto const bytes (payload.to_bytes (nano::asset_op::transfer));
+	nano::bufferstream stream (bytes.data (), bytes.size ());
+	nano::asset_payload parsed;
+	ASSERT_FALSE (parsed.deserialize (stream, nano::asset_op::transfer, bytes.size ()));
+	ASSERT_EQ (payload.memo, parsed.memo);
+}
+
+// Identity is derived, not assigned (SPEC §5.6.1), and the symbol is normalised
+// first, so "gem" and " GEM " name the same asset.
+TEST (asset_id, derived_from_issuer_and_symbol)
+{
+	nano::keypair key1;
+	nano::keypair key2;
+	std::string symbol;
+	ASSERT_FALSE (nano::normalize_symbol (" gem ", symbol));
+	ASSERT_EQ ("GEM", symbol);
+	ASSERT_EQ (nano::derive_asset_id (key1.pub, "GEM"), nano::derive_asset_id (key1.pub, symbol));
+	ASSERT_NE (nano::derive_asset_id (key1.pub, "GEM"), nano::derive_asset_id (key2.pub, "GEM"));
+	ASSERT_NE (nano::derive_asset_id (key1.pub, "GEM"), nano::derive_asset_id (key1.pub, "GOLD"));
+
+	std::string rejected;
+	ASSERT_TRUE (nano::normalize_symbol ("", rejected));
+	ASSERT_TRUE (nano::normalize_symbol ("-GEM", rejected));
+	ASSERT_TRUE (nano::normalize_symbol ("GEM!", rejected));
+	ASSERT_TRUE (nano::normalize_symbol ("THIS-SYMBOL-IS-FAR-TOO-LONG", rejected));
 }
 
 TEST (asset_block, serialize_json)
 {
 	nano::keypair key1;
-	std::vector<uint8_t> payload{ 0xab, 0xcd };
-	nano::asset_block block1 (key1.pub, 0, key1.pub, 999, nano::asset_op::mint, 42, 100, 9, payload, key1.prv, key1.pub, 6);
+	nano::keypair recipient;
+	nano::asset_payload payload;
+	payload.memo = "order-4417";
+	nano::asset_block block1 (key1.pub, 0, key1.pub, 999, nano::asset_op::mint, 42, 100, recipient.pub, payload, key1.prv, key1.pub, 6);
 	std::string string1;
 	block1.serialize_json (string1);
 	ASSERT_NE (0, string1.size ());
@@ -932,4 +1020,28 @@ TEST (asset_block, serialize_json)
 	nano::asset_block block2 (error, tree1);
 	ASSERT_FALSE (error);
 	ASSERT_EQ (block1, block2);
+	// The shape is the SDK's: `op` is a nested object keyed by `kind`.
+	ASSERT_EQ ("mint", tree1.get_child ("op").get<std::string> ("kind"));
+	ASSERT_EQ (recipient.pub.to_account (), tree1.get_child ("op").get<std::string> ("to"));
+	ASSERT_EQ ("order-4417", tree1.get_child ("op").get<std::string> ("memo"));
+}
+
+// An `issue` names no asset id in JSON, because the id is H(issuer ‖ symbol) —
+// so the round trip has to derive the same one back.
+TEST (asset_block, issue_json_derives_its_own_id)
+{
+	nano::keypair key1;
+	auto const payload (issue_payload ());
+	auto const id (nano::derive_asset_id (key1.pub, payload.symbol));
+	nano::asset_block block1 (key1.pub, 0, key1.pub, 1000, nano::asset_op::issue, id, 0, 0, payload, key1.prv, key1.pub, 6);
+	std::string string1;
+	block1.serialize_json (string1);
+	boost::property_tree::ptree tree1;
+	std::stringstream istream (string1);
+	boost::property_tree::read_json (istream, tree1);
+	bool error (false);
+	nano::asset_block block2 (error, tree1);
+	ASSERT_FALSE (error);
+	ASSERT_EQ (id, block2.hashables.asset_id);
+	ASSERT_EQ (block1.hash (), block2.hash ());
 }
