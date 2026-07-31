@@ -198,7 +198,8 @@ std::unordered_map<char const *, nano::tables> nano::rocksdb::store::create_cf_n
 		{ "assets", tables::assets },
 		{ "holdings", tables::holdings },
 		{ "holders", tables::holders },
-		{ "asset_pending", tables::asset_pending } };
+		{ "asset_pending", tables::asset_pending },
+		{ "issued", tables::issued } };
 
 	debug_assert (map.size () == all_tables ().size () + 1);
 	return map;
@@ -418,10 +419,11 @@ rocksdb::ColumnFamilyOptions nano::rocksdb::store::get_cf_options (std::string c
 		std::shared_ptr<::rocksdb::TableFactory> table_factory (::rocksdb::NewBlockBasedTableFactory (get_active_table_options (block_cache_size_bytes * 2)));
 		cf_options = get_active_cf_options (table_factory, memtable_size_bytes);
 	}
-	else if (cf_name_a == "assets")
+	else if (cf_name_a == "assets" || cf_name_a == "issued")
 	{
-		// One entry per token ever issued, and issuance burns 1,000 Kei, so this
-		// stays small and is never deleted from in the normal case.
+		// One entry per token ever issued, and per account that has issued one.
+		// The escalating burn (SPEC 5.6.5) is what keeps both small, and neither
+		// is deleted from in the normal case.
 		cf_options = get_small_cf_options (small_table_factory);
 	}
 	else if (cf_name_a == "holdings" || cf_name_a == "holders" || cf_name_a == "asset_pending")
@@ -572,6 +574,8 @@ rocksdb::ColumnFamilyHandle * nano::rocksdb::store::table_to_column_family (tabl
 			return get_column_family ("holders");
 		case tables::asset_pending:
 			return get_column_family ("asset_pending");
+		case tables::issued:
+			return get_column_family ("issued");
 		default:
 			release_assert (false);
 			return get_column_family ("");
@@ -913,7 +917,7 @@ void nano::rocksdb::store::on_flush (::rocksdb::FlushJobInfo const & flush_job_i
 
 std::vector<nano::tables> nano::rocksdb::store::all_tables () const
 {
-	return std::vector<nano::tables>{ tables::accounts, tables::asset_pending, tables::assets, tables::blocks, tables::confirmation_height, tables::final_votes, tables::frontiers, tables::holders, tables::holdings, tables::meta, tables::online_weight, tables::peers, tables::pending, tables::pruned, tables::vote };
+	return std::vector<nano::tables>{ tables::accounts, tables::asset_pending, tables::assets, tables::blocks, tables::confirmation_height, tables::final_votes, tables::frontiers, tables::holders, tables::holdings, tables::issued, tables::meta, tables::online_weight, tables::peers, tables::pending, tables::pruned, tables::vote };
 }
 
 bool nano::rocksdb::store::copy_db (boost::filesystem::path const & destination_path)

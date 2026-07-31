@@ -678,6 +678,13 @@ void nano::json_handler::account_info ()
 				++receivable_count;
 			}
 			nano::json::put_number (kei_account, "receivableCount", receivable_count);
+			// What the account's next asset will burn is n+1 Kei for this n
+			// (§12), and a client cannot construct a valid `issue` block
+			// without it — the burn is a balance decrease the block has to
+			// state exactly. Counting its own issue blocks from history would
+			// work and is a chain walk to answer a question the node has in
+			// one lookup.
+			nano::json::put_number (kei_account, "issuedCount", node.store.asset.issued_count (transaction, account));
 			response_l.add_child ("account", kei_account);
 
 			response_l.put ("frontier", info.head.to_string ());

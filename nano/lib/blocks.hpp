@@ -514,7 +514,7 @@ public:
 	// Carried, so an asset block never silently changes delegation.
 	nano::account representative;
 	// The account's Kei balance, unchanged from its predecessor — except on
-	// `issue`, which burns 1,000 Kei (decisions-m2.md §7, §12), and where this
+	// `issue`, which burns Kei (decisions-m2.md §7, §12), and where this
 	// field is how the burn is expressed.
 	nano::amount balance;
 	// issue | mint | burn | transfer | asset_receive

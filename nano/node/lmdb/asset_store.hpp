@@ -37,6 +37,9 @@ namespace lmdb
 		nano::store_iterator<nano::asset_key, nano::amount> holders_begin (nano::transaction const &) const override;
 		nano::store_iterator<nano::asset_key, nano::amount> holders_end () const override;
 
+		uint64_t issued_count (nano::transaction const &, nano::account const &) override;
+		void issued_put (nano::write_transaction const &, nano::account const &, uint64_t) override;
+
 		void pending_put (nano::write_transaction const &, nano::pending_key const &, nano::asset_pending_info const &) override;
 		bool pending_get (nano::transaction const &, nano::pending_key const &, nano::asset_pending_info &) override;
 		void pending_del (nano::write_transaction const &, nano::pending_key const &) override;
@@ -68,6 +71,13 @@ namespace lmdb
 		 * nano::pending_key -> nano::asset_pending_info
 		 */
 		MDB_dbi asset_pending_handle{ 0 };
+
+		/**
+		 * Maps an account to how many assets it has issued, which is what
+		 * prices its next one (SPEC 5.6.5).
+		 * nano::account -> uint64_t
+		 */
+		MDB_dbi issued_handle{ 0 };
 	};
 }
 }

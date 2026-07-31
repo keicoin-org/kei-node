@@ -130,6 +130,34 @@ nano::store_iterator<nano::asset_key, nano::amount> nano::rocksdb::asset_store::
 	return nano::store_iterator<nano::asset_key, nano::amount> (nullptr);
 }
 
+uint64_t nano::rocksdb::asset_store::issued_count (nano::transaction const & transaction, nano::account const & account)
+{
+	nano::rocksdb_val value;
+	auto status = store.get (transaction, tables::issued, account, value);
+	release_assert (store.success (status) || store.not_found (status));
+	if (!store.success (status))
+	{
+		// An account that has never issued has no entry, so its next asset is
+		// its first and costs 1 Kei.
+		return 0;
+	}
+	return static_cast<uint64_t> (value);
+}
+
+void nano::rocksdb::asset_store::issued_put (nano::write_transaction const & transaction, nano::account const & account, uint64_t count)
+{
+	if (count == 0)
+	{
+		// Zero is absence, the same rule the holdings tables follow (§9): a
+		// rolled-back first issuance leaves the account as it was found.
+		auto status = store.del (transaction, tables::issued, account);
+		release_assert (store.success (status) || store.not_found (status));
+		return;
+	}
+	auto status = store.put (transaction, tables::issued, account, count);
+	store.release_assert_success (status);
+}
+
 void nano::rocksdb::asset_store::pending_put (nano::write_transaction const & transaction, nano::pending_key const & key, nano::asset_pending_info const & info)
 {
 	auto status = store.put (transaction, tables::asset_pending, key, info);

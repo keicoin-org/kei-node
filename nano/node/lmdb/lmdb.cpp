@@ -226,6 +226,7 @@ void nano::lmdb::store::open_databases (bool & error_a, nano::transaction const 
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "holdings", flags, &asset_store.holdings_handle) != 0;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "holders", flags, &asset_store.holders_handle) != 0;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "asset_pending", flags, &asset_store.asset_pending_handle) != 0;
+	error_a |= mdb_dbi_open (env.tx (transaction_a), "issued", flags, &asset_store.issued_handle) != 0;
 
 	auto version_l = version.get (transaction_a);
 	if (version_l < 19)
@@ -799,6 +800,7 @@ void nano::lmdb::store::upgrade_v22_to_v23 (nano::write_transaction const & tran
 	release_assert (!mdb_dbi_open (env.tx (transaction_a), "holdings", MDB_CREATE, &asset_store.holdings_handle));
 	release_assert (!mdb_dbi_open (env.tx (transaction_a), "holders", MDB_CREATE, &asset_store.holders_handle));
 	release_assert (!mdb_dbi_open (env.tx (transaction_a), "asset_pending", MDB_CREATE, &asset_store.asset_pending_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "issued", MDB_CREATE, &asset_store.issued_handle));
 	version.put (transaction_a, 23);
 	logger.always_log ("Finished creating the asset tables");
 }
@@ -910,6 +912,8 @@ MDB_dbi nano::lmdb::store::table_to_dbi (tables table_a) const
 			return asset_store.holders_handle;
 		case tables::asset_pending:
 			return asset_store.asset_pending_handle;
+		case tables::issued:
+			return asset_store.issued_handle;
 		case tables::online_weight:
 			return online_weight_store.online_weight_handle;
 		case tables::meta:
