@@ -205,6 +205,11 @@ set (§5.7). Membership is then a cheap test the node cannot get wrong, rather
 than a list maintained somewhere else — which SPEC correctly calls *"a convention
 wearing a protocol's clothes."*
 
+**The reserve seed is never a literal in this repository, and neither is the
+genesis it signs.** The tree inherited Banano's genesis blocks and would have
+launched on them; §14 is where that is fixed and where the placeholder that now
+stands in for beta and live is described.
+
 **The reserve seed is never a literal in this repository.** decisions-m0 §13 used
 fixed public seeds (`'1'.repeat(64)` and friends) because a mock needs a funded
 faucet and nothing is at stake. That property does not survive contact with a
@@ -277,6 +282,23 @@ that side.
 > from the mock's field set, and it has not yet been validated against
 > `nano::block` serialisation, the sideband, or the bootstrap path. Expect the
 > field *order* to move for alignment reasons; the field *set* is settled.
+
+Two amendments, made while implementing it:
+
+**The payload is op-keyed, not issuance-only.** The table above says
+`payload_len` is zero for everything but `issue`. It is not: §8 puts memos on the
+asset block, and a `transfer` is where a memo earns its keep. The payload
+therefore carries issuance metadata for `issue`, a memo for `mint` and
+`transfer`, and nothing for `burn` and `asset_receive`.
+
+**The payload is structured, not opaque bytes.** It is stored parsed and
+serialised canonically, and that canonical encoding is what the hash covers.
+Keeping a byte blob alongside a parsed copy would mean two representations that
+have to agree, and `asset_info` has to read those fields anyway.
+
+**The preamble is the Kei domain, not the block type alone.** §14 replaced the
+bare `uint256(block_type::asset)` preamble with the Kei domain followed by the
+block type, applied to every block type rather than this one.
 
 ## 8. Memos ride on the asset send — decisions-m0 §4, option (a)
 
@@ -376,6 +398,84 @@ tooling ports with a constant change rather than a rewrite. `nano/lib/numbers.cp
 is where `ban_` is decoded and where `kei_` replaces it — and note the inherited
 length check, since `ban_` and `kei_` are both four characters and a 64-character
 address, which is the property that keeps the change constant-sized.
+
+## 14. The chains are separated structurally, not by convention
+
+A fork starts out as a copy, and the copy included Banano's genesis blocks. They
+had been re-prefixed to `kei_`, which made them look Kei-shaped while remaining
+Banano's: **Kei's live network would have launched on Banano's genesis, under
+Banano's key**, and every Kei in existence would have belonged to whoever holds
+it. Nothing about that was intended and nothing about it was visible from the
+address, because `kei_1bananobh5rat…` decodes to the same public key either way.
+
+That also made the separation between the two chains weaker than it looked. Two
+Nano-family chains are normally kept apart by their genesis and by the network id
+in the packet header. Kei had the second but not the first, so the protection was
+coming entirely from the transport layer — and *"the two networks happen not to
+talk to each other"* is a much weaker statement than *"these are structurally
+different chains."* The ledger could not tell a Banano state block from a Kei one,
+because the bytes being hashed were identical.
+
+Both are fixed, and the fix has two halves.
+
+**Kei's own genesis.** Dev gets a real one, from a key derived from the published
+phrase `blake2b-256("kei-dev-genesis")` so that anyone can regenerate it and
+confirm the block is what it claims to be — it is a test key by construction and
+holds nothing. Beta and live carry an explicit placeholder, and `ledger_constants`
+refuses to construct against one, so the node cannot be started on a chain whose
+supply is signed by nobody. Their real blocks come out of the SPEC §5.7 ceremony;
+§5 already says the reserve seed is never a literal in this repository, and that
+is exactly why they cannot be generated here.
+
+`util/keigen.py` is the generator. It reproduces the *inherited* dev genesis
+public key, signature, and address from its known private key before generating
+anything, which is the only reason to trust its output.
+
+**A Kei hash domain.** Every block type now hashes under
+`blake2b-256("kei-block-v1")` followed by the block type, where the inherited
+types hashed their fields directly and only `state` carried a type preamble. An
+inherited block therefore does not hash to a value its own signature covers, so
+it cannot be replayed onto Kei in any state of the ledger — not merely in the
+states a distinct genesis makes unreachable. This is the same device
+decisions-m0 §2 chose for the SDK's `"kei-block-v0"` preamble, and it is what
+makes §7's separate `asset` preamble a special case of a general rule rather
+than a one-off.
+
+The cost is the one §5.6.8 warns about and it is worth naming: a Banano-derived
+tool that computes block hashes itself will compute the wrong ones for Kei.
+Tools that read hashes from the node are unaffected. That is a real compatibility
+loss, taken deliberately, because the alternative is two chains that differ only
+by agreement.
+
+## 15. What is not finished, stated plainly
+
+Three things are implemented but not yet demonstrated, and one is not implemented.
+
+**The reserve set is empty.** `ledger_constants::reserve_accounts` is the fixed,
+immutable enumeration §5.7 requires, and `is_reserve` enforces the null
+representative and the send lock against it — but it has no members until the
+genesis ceremony produces them, so on dev those rules currently hold vacuously.
+The four circulating allocations and the reserve total are asserted at startup
+today; the *blocks* that distribute them are part of the same ceremony.
+
+**Nothing has been executed.** Per §3 there is still no toolchain on this
+machine, so everything here is checked by compiling in CI and by having been
+written against the mock's semantics. "Compiles" is not "works", and no assertion
+in this document should be read as though it were.
+
+**The RPC's JSON is untyped.** `boost::property_tree`'s writer emits every value
+as a quoted string, so `decimals` and `height` arrive as `"0"` rather than `0`,
+and an absent record as `""` rather than `null`. `HttpNode` passes the parsed
+body through without coercing, so the writer must be fixed before the
+conformance suite can pass. This is a response-encoding problem, not a problem
+with any handler.
+
+**The SDK's hash has to move.** §7 settled that `asset` blocks hash as binary
+fields under a preamble, and §14 extends that to every block type. The SDK still
+hashes canonical JSON under `"kei-block-v0"`, so the two disagree and signatures
+will not verify across them. §7 already noted this lands as one change on the SDK
+side; it has not been made, and until it is, definition-of-done (6) cannot pass
+no matter what this node does.
 
 ---
 
