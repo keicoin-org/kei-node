@@ -43,6 +43,8 @@ add_library(
   ipc_client.hpp
   ipc_client.cpp
   json_error_response.hpp
+  json_response.hpp
+  json_response.cpp
   jsonconfig.hpp
   jsonconfig.cpp
   lmdbconfig.hpp

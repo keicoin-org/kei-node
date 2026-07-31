@@ -1,6 +1,7 @@
 #include <nano/lib/config.hpp>
 #include <nano/lib/convert.hpp>
 #include <nano/lib/json_error_response.hpp>
+#include <nano/lib/json_response.hpp>
 #include <nano/lib/timer.hpp>
 #include <nano/node/bootstrap/bootstrap_lazy.hpp>
 #include <nano/node/bootstrap_ascending/service.hpp>
@@ -182,13 +183,13 @@ void nano::json_handler::response_errors ()
 		boost::property_tree::ptree response_error;
 		response_error.put ("error", ec.message ());
 		std::stringstream ostream;
-		boost::property_tree::write_json (ostream, response_error);
+		nano::json::write (ostream, response_error);
 		response (ostream.str ());
 	}
 	else
 	{
 		std::stringstream ostream;
-		boost::property_tree::write_json (ostream, response_l);
+		nano::json::write (ostream, response_l);
 		response (ostream.str ());
 	}
 }
@@ -647,7 +648,7 @@ void nano::json_handler::account_info ()
 			boost::property_tree::ptree kei_account;
 			kei_account.put ("address", account.to_account ());
 			kei_account.put ("frontier", info.head.to_string ());
-			kei_account.put ("height", std::to_string (info.block_count));
+			nano::json::put_number (kei_account, "height", info.block_count);
 			kei_account.put ("balance", info.balance.to_string_dec ());
 			kei_account.put ("representative", info.representative.to_account ());
 			// Both kinds of arrival count: Kei waiting in `pending`, and assets
@@ -663,7 +664,7 @@ void nano::json_handler::account_info ()
 			{
 				++receivable_count;
 			}
-			kei_account.put ("receivableCount", std::to_string (receivable_count));
+			nano::json::put_number (kei_account, "receivableCount", receivable_count);
 			response_l.add_child ("account", kei_account);
 
 			response_l.put ("frontier", info.head.to_string ());
@@ -911,7 +912,7 @@ void nano::json_handler::account_representative_set ()
 					{
 						response_data->put ("block", block->hash ().to_string ());
 						std::stringstream ostream;
-						boost::property_tree::write_json (ostream, *response_data);
+						nano::json::write (ostream, *response_data);
 						response_a (ostream.str ());
 					}
 					else
@@ -1665,7 +1666,7 @@ void nano::json_handler::block_create ()
 				response_l.put ("block", contents);
 			}
 			std::stringstream ostream;
-			boost::property_tree::write_json (ostream, response_l);
+			nano::json::write (ostream, response_l);
 			rpc_l->response (ostream.str ());
 		};
 		// Wrapper from argument to lambda capture, to extend the block's scope
@@ -2803,7 +2804,7 @@ void nano::json_handler::account_history ()
 			hash = reverse ? node.store.block.successor (transaction, hash) : block->previous ();
 			block = node.store.block.get (transaction, hash);
 		}
-		response_l.add_child ("history", history);
+		nano::json::add_array (response_l, "history", history);
 		if (!hash.is_zero ())
 		{
 			response_l.put (reverse ? "next" : "previous", hash.to_string ());
@@ -3627,7 +3628,7 @@ void nano::json_handler::receive ()
 								boost::property_tree::ptree response_l;
 								response_l.put ("block", block_a->hash ().to_string ());
 								std::stringstream ostream;
-								boost::property_tree::write_json (ostream, response_l);
+								nano::json::write (ostream, response_l);
 								response_a (ostream.str ());
 							}
 							else
@@ -4021,7 +4022,7 @@ void nano::json_handler::send ()
 				{
 					response_data->put ("block", block_a->hash ().to_string ());
 					std::stringstream ostream;
-					boost::property_tree::write_json (ostream, *response_data);
+					nano::json::write (ostream, *response_data);
 					response_a (ostream.str ());
 				}
 				else
@@ -4176,7 +4177,7 @@ void nano::json_handler::stats ()
 		auto stat_tree_l (*static_cast<boost::property_tree::ptree *> (sink->to_object ()));
 		stat_tree_l.put ("stat_duration_seconds", node.stats.last_reset ().count ());
 		std::stringstream ostream;
-		boost::property_tree::write_json (ostream, stat_tree_l);
+		nano::json::write (ostream, stat_tree_l);
 		response (ostream.str ());
 	}
 	else
@@ -4190,7 +4191,7 @@ void nano::json_handler::stats_clear ()
 	node.stats.clear ();
 	response_l.put ("success", "");
 	std::stringstream ostream;
-	boost::property_tree::write_json (ostream, response_l);
+	nano::json::write (ostream, response_l);
 	response (ostream.str ());
 }
 
@@ -5291,7 +5292,7 @@ void nano::json_handler::work_generate ()
 					response_l.put ("difficulty", nano::to_string_hex (result_difficulty));
 					auto result_multiplier = nano::difficulty::to_multiplier (result_difficulty, node.default_difficulty (work_version));
 					response_l.put ("multiplier", nano::to_string (result_multiplier));
-					boost::property_tree::write_json (ostream, response_l);
+					nano::json::write (ostream, response_l);
 					rpc_l->response (ostream.str ());
 				}
 				else
@@ -5529,12 +5530,10 @@ void nano::inprocess_rpc_handler::process_request_v2 (rpc_handler_request_params
  * done when its conformance suite passes against this node with only the URL
  * changed. Amounts are raw decimal strings throughout, as the contract requires.
  *
- * One known departure, and it is the response encoding rather than any of these
- * handlers: boost::property_tree's JSON writer emits every value as a quoted
- * string, so `decimals`, `height`, and `receivableCount` arrive as "0" rather
- * than 0, and an absent record as "" rather than null. HttpNode passes the
- * parsed body straight through without coercing, so this has to be fixed in the
- * writer before the conformance suite can pass. See docs/decisions-m2.md 14.
+ * `decimals`, `height`, and `receivableCount` are numbers and an absent record
+ * is null, which boost::property_tree cannot express because it stores every
+ * value as a string. nano::json carries the type on the key instead and encodes
+ * the response itself; see nano/lib/json_response.hpp.
  */
 
 namespace
@@ -5545,10 +5544,17 @@ void asset_info_to_json (boost::property_tree::ptree & tree_a, nano::uint256_uni
 	tree_a.put ("issuer", info_a.issuer.to_account ());
 	tree_a.put ("name", info_a.name);
 	tree_a.put ("symbol", info_a.symbol);
-	tree_a.put ("decimals", static_cast<int> (info_a.decimals));
-	// Uncapped is stored as zero and reported as absent, never as "0" — a cap
-	// of zero would mean nothing could ever be minted.
-	tree_a.put ("maxSupply", info_a.uncapped () ? std::string{} : info_a.max_supply.to_string_dec ());
+	nano::json::put_number (tree_a, "decimals", info_a.decimals);
+	// Uncapped is stored as zero and reported as null, never as "0" — a cap of
+	// zero would mean nothing could ever be minted.
+	if (info_a.uncapped ())
+	{
+		nano::json::put_null (tree_a, "maxSupply");
+	}
+	else
+	{
+		tree_a.put ("maxSupply", info_a.max_supply.to_string_dec ());
+	}
 	tree_a.put ("transfer", nano::transfer_policy_to_string (info_a.transfer));
 	tree_a.put ("swap", nano::swap_policy_to_string (info_a.swap));
 	if (!info_a.description.empty ())
@@ -5587,7 +5593,7 @@ void nano::json_handler::asset_info ()
 		else
 		{
 			// An asset that was never issued is absent, not an error.
-			response_l.put ("asset", "");
+			nano::json::put_null (response_l, "asset");
 		}
 	}
 	response_errors ();
@@ -5617,7 +5623,7 @@ void nano::json_handler::asset_by_symbol ()
 			}
 			else
 			{
-				response_l.put ("asset", "");
+				nano::json::put_null (response_l, "asset");
 			}
 		}
 	}
@@ -5640,7 +5646,7 @@ void nano::json_handler::account_holdings ()
 			entry.put ("balance", i->second.to_string_dec ());
 			holdings.push_back (std::make_pair ("", entry));
 		}
-		response_l.add_child ("holdings", holdings);
+		nano::json::add_array (response_l, "holdings", holdings);
 	}
 	response_errors ();
 }
@@ -5684,7 +5690,7 @@ void nano::json_handler::asset_holders ()
 			entry.put ("balance", i->second.to_string_dec ());
 			holders.push_back (std::make_pair ("", entry));
 		}
-		response_l.add_child ("holders", holders);
+		nano::json::add_array (response_l, "holders", holders);
 	}
 	response_errors ();
 }
