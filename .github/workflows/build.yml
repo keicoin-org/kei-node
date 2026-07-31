@@ -49,7 +49,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build ccache gcc-12 g++-12
+            build-essential cmake ninja-build ccache gcc-12 g++-12 gdb
 
       # Vendored Boost and RocksDB dominate the build, and neither changes
       # between runs, so without this every iteration recompiles both from
@@ -90,11 +90,18 @@ jobs:
       #
       # -k 0 keeps going after the first failure, so one run reports every
       # error in the tree rather than only the first translation unit's.
+      #
+      # This target can also fail without anything being wrong with the build:
+      # CMake attaches a POST_BUILD step that runs the binary to generate the
+      # sample configs, so a node that crashes on startup fails here too, under
+      # a printed link command that makes it look like a link error. The second
+      # script tells those two apart and gets a backtrace for the second.
       - name: Build node
         run: |
           set -o pipefail
           if ! cmake --build build --target bananode -- -k 0 2>&1 | tee build.log; then
             bash ci/annotate-build-failure.sh build.log
+            bash ci/annotate-startup-crash.sh build/bananode
             exit 1
           fi
 

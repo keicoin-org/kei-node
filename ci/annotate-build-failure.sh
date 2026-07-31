@@ -56,7 +56,16 @@ fi
 while IFS= read -r line; do
 	[ "${emitted}" -ge "${limit}" ] && break
 	say "${line}"
-done < <(grep -E 'undefined reference|undefined symbol|ld returned|collect2:|internal compiler error|cannot find -l|No space left|virtual memory exhausted|Killed|ninja: build stopped' "${log}" | sort -u | head -15)
+done < <(grep -E 'undefined reference|undefined symbol|ld returned|collect2:|internal compiler error|cannot find -l|No space left|virtual memory exhausted|Killed|Segmentation fault|Bus error|Aborted|core dumped|ninja: build stopped' "${log}" | sort -u | head -15)
+
+# A ninja edge is a shell command, not necessarily a compiler invocation, so an
+# edge can die on a signal without the toolchain having done anything wrong. The
+# bananode edge links and then runs the binary to generate the sample configs
+# (nano/nano_node/CMakeLists.txt:24), and when that run crashes ninja prints the
+# link command line above it — which reads as a link failure and is not one.
+if grep -qE 'FAILED: \[code=(13[0-9]|1[4-9][0-9])\]|Segmentation fault|Bus error|core dumped' "${log}"; then
+	say "An edge died on a signal rather than reporting a diagnostic. If the command shown above links and then runs the binary, the link succeeded and the node crashed on startup — see the backtrace annotations that follow."
+fi
 
 # Nothing recognised: the tail is still better than silence, even though under
 # -k 0 it is usually just the edges that succeeded after the failure.
