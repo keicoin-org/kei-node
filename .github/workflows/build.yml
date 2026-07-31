@@ -38,11 +38,18 @@ jobs:
           # CMakeLists.txt add_subdirectory()s each Boost library directly.
           submodules: recursive
 
+      # gcc-12 rather than whatever ubuntu-latest ships. RocksDB 7.8.3 is
+      # vendored at submodules/rocksdb and predates GCC 13's removal of the
+      # transitive <cstdint> include, so on a current image it fails with
+      # "'uint32_t' was not declared in this scope" — in the submodule, with
+      # nothing to do with this tree. Pinning the compiler is a smaller change
+      # than pinning the whole runner image, and it fails visibly if gcc-12
+      # ever stops being available.
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build ccache
+            build-essential cmake ninja-build ccache gcc-12 g++-12
 
       # Vendored Boost and RocksDB dominate the build, and neither changes
       # between runs, so without this every iteration recompiles both from
@@ -65,6 +72,8 @@ jobs:
             -DNANO_GUI=OFF \
             -DNANO_TEST=ON \
             -DPORTABLE=1 \
+            -DCMAKE_C_COMPILER=gcc-12 \
+            -DCMAKE_CXX_COMPILER=g++-12 \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
