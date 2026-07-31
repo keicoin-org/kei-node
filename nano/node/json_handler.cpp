@@ -1,3 +1,4 @@
+#include <nano/lib/blocks.hpp>
 #include <nano/lib/config.hpp>
 #include <nano/lib/convert.hpp>
 #include <nano/lib/json_error_response.hpp>
@@ -2764,6 +2765,40 @@ void nano::json_handler::account_history ()
 			}
 		}
 	}
+	// docs/rpc.md asks for the blocks themselves under `history`, in the shape
+	// `process` accepts, where Nano answers with entries it derives from them.
+	// The two cannot be merged and cannot sit beside each other the way
+	// `block_info` puts `block` next to `contents` (§15), because the collision
+	// is inside each entry rather than between two top-level keys: `type` is
+	// Nano's subtype where a block's is "state", and `account` is the
+	// counterparty where a block's is the signer. So this dispatches, on the
+	// same principle as `accounts_receivable` — the name belongs to the
+	// contract and the parameter tells the callers apart. The difference is
+	// that `account` vs `accounts` was already there to be read and `shape` is
+	// introduced here, which costs a line of the SDK and a line of rpc.md, both
+	// of which are ours. Absent is Nano's answer, so nothing inherited moves.
+	bool kei_shape (false);
+	auto const shape (request.get_optional<std::string> ("shape"));
+	if (shape.is_initialized ())
+	{
+		if (*shape == "block")
+		{
+			kei_shape = true;
+		}
+		else
+		{
+			ec = nano::error_rpc::invalid_shape;
+		}
+	}
+	// `account_filter` selects entries by counterparty, and only the visitor
+	// derives one. Block shape does not run it, so the filter cannot be
+	// honoured — and honouring it silently by not applying it is exactly the
+	// failure §15 names, an answer that looks right while covering more than
+	// was asked for.
+	if (!ec && kei_shape && accounts_filter_node.is_initialized ())
+	{
+		ec = nano::error_rpc::invalid_shape_account_filter;
+	}
 	nano::account account;
 	nano::block_hash hash;
 	bool reverse (request.get_optional<bool> ("reverse") == true);
@@ -2819,6 +2854,38 @@ void nano::json_handler::account_history ()
 			if (offset > 0)
 			{
 				--offset;
+			}
+			else if (kei_shape)
+			{
+				boost::property_tree::ptree entry;
+				// One producer of "the shape `process` accepts", shared with
+				// `block_info`, rather than a second copy maintained in
+				// history_visitor — which emits neither an asset block's `op`
+				// nor a state block's signer.
+				block->serialize_json (entry);
+				// `process` takes a state block's subtype beside the block
+				// rather than within it, so serialize_json carries none.
+				// rpc.md's history entries do carry one, and the SDK's
+				// StateBlockBody requires it. The sideband already knows, so
+				// deriving it costs no lookup. The one place the two
+				// vocabularies differ: an account's first block is an `open`
+				// to the SDK, where the sideband says only receive.
+				if (block->type () == nano::block_type::state)
+				{
+					auto subtype (nano::state_subtype (block->sideband ().details));
+					if (subtype == "receive" && block->previous ().is_zero ())
+					{
+						subtype = "open";
+					}
+					entry.put ("subtype", subtype);
+				}
+				// Every block on the chain appears, where the visitor drops the
+				// ones it has no derived entry for — a change block without
+				// `raw`, most visibly. The contract asks for the account's
+				// blocks, and a chain with holes in it is not something a
+				// caller can rebuild state from.
+				history.push_back (std::make_pair ("", entry));
+				--count;
 			}
 			else
 			{

@@ -201,6 +201,10 @@ std::string nano::error_rpc_messages::message (int ev) const
 			return "Invalid or missing type argument";
 		case nano::error_rpc::invalid_root:
 			return "Invalid root hash";
+		case nano::error_rpc::invalid_shape:
+			return "Invalid shape argument";
+		case nano::error_rpc::invalid_shape_account_filter:
+			return "Shape \"block\" cannot be combined with account_filter";
 		case nano::error_rpc::invalid_sources:
 			return "Invalid sources number";
 		case nano::error_rpc::invalid_subtype:
