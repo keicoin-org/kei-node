@@ -128,6 +128,6 @@ TEST (json_response, reparses)
 	std::stringstream stream (nano::json::to_string (tree));
 	boost::property_tree::ptree parsed;
 	ASSERT_NO_THROW (boost::property_tree::read_json (stream, parsed));
-	ASSERT_EQ (12, parsed.get<uint64_t> ("account.height"));
+	ASSERT_EQ (uint64_t (12), parsed.get<uint64_t> ("account.height"));
 	ASSERT_EQ ("kei_3abc", parsed.get<std::string> ("account.address"));
 }

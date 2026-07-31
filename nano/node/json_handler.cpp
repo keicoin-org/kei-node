@@ -641,6 +641,19 @@ void nano::json_handler::account_info ()
 		bool const include_confirmed = request.get<bool> ("include_confirmed", false);
 		auto transaction (node.store.tx_begin_read ());
 		auto info (account_info_impl (transaction, account));
+		if (ec == nano::error_common::account_not_found)
+		{
+			// docs/rpc.md: an account with no chain yet is `{ "account": null }`,
+			// not an error. HttpNode raises any `error` as a thrown KeiError, so
+			// a wallet asking its balance before it has ever been paid would
+			// throw where it has to read zero — and every account starts there.
+			// The lazy bootstrap account_info_impl kicked off has already been
+			// requested, which is the part of Nano's answer worth keeping.
+			ec = {};
+			nano::json::put_null (response_l, "account");
+			response_errors ();
+			return;
+		}
 		nano::confirmation_height_info confirmation_height_info;
 		node.store.confirmation_height.get (transaction, account, confirmation_height_info);
 		if (!ec)
@@ -1241,6 +1254,13 @@ void nano::json_handler::block_info ()
 				block->serialize_json (contents);
 				response_l.put ("contents", contents);
 			}
+			// docs/rpc.md answers this action with `block`, in the shape
+			// `process` accepts, and does not have Nano's `json_block` switch:
+			// the SDK reads a block, not a string holding one. `contents` stays
+			// beside it, so nothing inherited loses its answer.
+			boost::property_tree::ptree kei_block;
+			block->serialize_json (kei_block);
+			response_l.add_child ("block", kei_block);
 			if (block->type () == nano::block_type::state)
 			{
 				auto subtype (nano::state_subtype (block->sideband ().details));
@@ -1249,7 +1269,9 @@ void nano::json_handler::block_info ()
 		}
 		else
 		{
-			ec = nano::error_blocks::not_found;
+			// Absent, not an error — the same rule `asset_info` and
+			// `account_info` follow.
+			nano::json::put_null (response_l, "block");
 		}
 	}
 	response_errors ();
