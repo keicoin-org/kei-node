@@ -77,12 +77,20 @@ char const * beta_genesis_data = placeholder_genesis_data;
 char const * live_genesis_data = placeholder_genesis_data;
 std::string const test_genesis_data = nano::get_env_or_default ("NANO_TEST_GENESIS_BLOCK", placeholder_genesis_data);
 
-std::shared_ptr<nano::block> parse_block_from_genesis_data (std::string const & genesis_data_a)
+std::shared_ptr<nano::block> parse_block_from_genesis_data (std::string const & genesis_data_a, char const * network_a)
 {
 	boost::property_tree::ptree tree;
 	std::stringstream istream (genesis_data_a);
 	boost::property_tree::read_json (istream, tree);
-	return nano::deserialize_block_json (tree);
+	auto block (nano::deserialize_block_json (tree));
+	// deserialize_block_json reports a malformed block by returning null, and
+	// ledger_constants dereferences all four of these to set their sidebands
+	// before main runs. debug_assert is compiled out under NDEBUG, so on a
+	// release build a genesis block that does not parse is a null dereference
+	// during static initialisation — the node dies with a bare "Segmentation
+	// fault" and nothing to say the genesis data was at fault. Name it instead.
+	release_assert (block != nullptr, std::string ("The ") + network_a + " genesis block in nano/secure/common.cpp did not parse.");
+	return block;
 }
 
 char const * beta_canary_public_key_data = "B61453D27E843EB30B8288E37D5E7C64447F9202E589AB9E573DA4460DF7B21B"; // kei_3finchb9x33ype7r7495hoh9rs46hyb17sebogh7ghf6ar8zheiucm87mfha
@@ -117,10 +125,10 @@ nano::ledger_constants::ledger_constants (nano::work_thresholds & work, nano::ne
 	nano_beta_account (beta_public_key_data),
 	nano_live_account (live_public_key_data),
 	nano_test_account (test_public_key_data),
-	nano_dev_genesis (parse_block_from_genesis_data (dev_genesis_data)),
-	nano_beta_genesis (parse_block_from_genesis_data (beta_genesis_data)),
-	nano_live_genesis (parse_block_from_genesis_data (live_genesis_data)),
-	nano_test_genesis (parse_block_from_genesis_data (test_genesis_data)),
+	nano_dev_genesis (parse_block_from_genesis_data (dev_genesis_data, "dev")),
+	nano_beta_genesis (parse_block_from_genesis_data (beta_genesis_data, "beta")),
+	nano_live_genesis (parse_block_from_genesis_data (live_genesis_data, "live")),
+	nano_test_genesis (parse_block_from_genesis_data (test_genesis_data, "test")),
 	genesis (network_a == nano::networks::banano_dev_network ? nano_dev_genesis : network_a == nano::networks::banano_beta_network ? nano_beta_genesis
 	: network_a == nano::networks::banano_test_network                                                                             ? nano_test_genesis
 																																   : nano_live_genesis),
