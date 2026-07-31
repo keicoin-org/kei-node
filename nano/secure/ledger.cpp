@@ -197,11 +197,21 @@ public:
 		switch (block_a.hashables.op)
 		{
 			case nano::asset_op::issue:
+			{
 				// The record was created by this block and nothing can have
 				// been minted against it, because a mint must build on a later
 				// block in the same chain and rollback works backwards.
 				ledger.store.asset.del (transaction, asset_id);
+				// The issuance count has to come back down with it, or the
+				// account's next asset would be priced as though this one still
+				// existed. Rollback is backwards along one chain, so this block
+				// is the account's most recent issuance and the count is its
+				// ordinal.
+				auto const issued (ledger.store.asset.issued_count (transaction, block_a.hashables.account));
+				debug_assert (issued > 0);
+				ledger.store.asset.issued_put (transaction, block_a.hashables.account, issued - 1);
 				break;
+			}
 			case nano::asset_op::mint:
 				take_back_receivable (block_a, hash);
 				if (!ledger.store.asset.get (transaction, asset_id, asset))
@@ -674,7 +684,7 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 		}
 		if (block_a.hashables.op == nano::asset_op::issue)
 		{
-			// Issuance destroys 1,000 Kei (§12). From a reserve account that is
+			// Issuance destroys Kei (§12). From a reserve account that is
 			// a supply change with no vote behind it, which SPEC §5.7 does not
 			// permit — so the reserve cannot issue.
 			//
@@ -696,11 +706,17 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 
 	auto const previous_balance (info.balance.number ());
 	auto const new_balance (block_a.hashables.balance.number ());
+	// How many this account has issued already, which is what prices the next
+	// one (§12). Read here because the burn check needs it and the apply below
+	// writes it back incremented.
+	uint64_t issued_already (0);
 	if (block_a.hashables.op == nano::asset_op::issue)
 	{
+		issued_already = ledger.store.asset.issued_count (transaction, block_a.hashables.account);
+		auto const burn (nano::issuance_burn (issued_already));
 		// The burn is expressed as the balance decrease itself, with no
 		// corresponding receivable — the Kei is destroyed, not moved (§12).
-		if (previous_balance < nano::issuance_burn || new_balance != previous_balance - nano::issuance_burn)
+		if (previous_balance < burn || new_balance != previous_balance - burn)
 		{
 			result.code = nano::process_result::issuance_burn_mismatch;
 			return;
@@ -916,6 +932,12 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 	if (asset_dirty)
 	{
 		ledger.store.asset.put (transaction, asset_id, asset);
+	}
+	if (block_a.hashables.op == nano::asset_op::issue)
+	{
+		// Priced the burn above; record that it happened, so this account's
+		// next asset costs one Kei more than this one did.
+		ledger.store.asset.issued_put (transaction, block_a.hashables.account, issued_already + 1);
 	}
 	if (debit)
 	{

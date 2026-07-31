@@ -31,8 +31,28 @@ nano::uint128_t const raw_ratio = nano::uint128_t ("1"); // 10^0
  * that new Kei be structurally impossible is inherited rather than enforced.
  */
 nano::uint128_t const kei_total_supply = nano::uint128_t ("1000000000000000000000000000000"); // 10^30
-/** Issuing an asset burns 1,000 Kei (SPEC §5.6.5, decisions-m2.md §12). */
-nano::uint128_t const issuance_burn = nano::uint128_t ("1000000000000000000000"); // 1,000 * 10^18
+/**
+ * The nth asset an account issues burns n Kei (SPEC §5.6.5, decisions-m2.md §12).
+ *
+ * A flat price did not bound the thing the burn exists to bound. An asset record
+ * is permanent global state that every node stores forever, and what has to be
+ * made expensive is one account creating a great many of them — not one account
+ * creating its first. Escalating per account does exactly that, and it is the
+ * only anti-spam here that consensus can enforce without knowing who anybody is:
+ * §5.6.3 means only an account can extend its own chain, so the count cannot be
+ * shed by anyone but the account paying it.
+ *
+ * The shape: SPEC §5.6.5's own example — a game issuing a currency and 500 item
+ * types, so 501 assets — burns 125,751 Kei, where a flat 1,000 would have cost
+ * it 501,000. A million junk assets from one account costs 5 × 10^11 Kei, five
+ * times the entire circulating supply, so that account cannot exist. Spreading
+ * the same million across many accounts costs a funded account each, which is
+ * what controlling distribution controls.
+ */
+inline nano::uint128_t issuance_burn (uint64_t issued_already_a)
+{
+	return nano::uint128_t (issued_already_a + 1) * nano::BAN_ratio;
+}
 
 class uint128_union
 {

@@ -277,7 +277,7 @@ std::string nano::error_process_messages::message (int ev) const
 		case nano::error_process::insufficient_asset_balance:
 			return "The account does not hold enough of that asset";
 		case nano::error_process::issuance_burn_mismatch:
-			return "Issuing an asset burns exactly 1,000 Kei, and this block's balance does not";
+			return "Issuing the nth asset from an account burns exactly n Kei, and this block's balance does not";
 		case nano::error_process::asset_balance_mismatch:
 			return "An asset block must carry the account's Kei balance unchanged; only issuance changes it";
 		case nano::error_process::bad_asset_payload:

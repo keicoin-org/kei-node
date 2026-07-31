@@ -435,7 +435,7 @@ enum class process_result
 	over_max_supply, // Minting this would exceed the asset's circulating supply cap
 	transfer_not_permitted, // The asset's immutable transfer policy forbids this move
 	insufficient_asset_balance, // The signer does not hold what they tried to move
-	issuance_burn_mismatch, // An issue block must burn exactly 1,000 Kei (SPEC §5.6.5)
+	issuance_burn_mismatch, // An issue block must burn exactly n Kei, for the account's nth asset (SPEC §5.6.5)
 	asset_balance_mismatch, // A non-issue asset block must carry the Kei balance unchanged
 	bad_asset_payload, // Malformed issuance parameters: name, decimals, max supply, policy
 	too_many_assets, // The account already holds the §7 maximum of 1,024 distinct assets
