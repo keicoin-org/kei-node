@@ -35,6 +35,9 @@ namespace rocksdb
 		nano::store_iterator<nano::asset_key, nano::amount> holders_begin (nano::transaction const &) const override;
 		nano::store_iterator<nano::asset_key, nano::amount> holders_end () const override;
 
+		uint64_t issued_count (nano::transaction const &, nano::account const &) override;
+		void issued_put (nano::write_transaction const &, nano::account const &, uint64_t) override;
+
 		void pending_put (nano::write_transaction const &, nano::pending_key const &, nano::asset_pending_info const &) override;
 		bool pending_get (nano::transaction const &, nano::pending_key const &, nano::asset_pending_info &) override;
 		void pending_del (nano::write_transaction const &, nano::pending_key const &) override;

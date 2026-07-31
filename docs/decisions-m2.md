@@ -259,7 +259,7 @@ Proposed layout — fixed header, variable payload:
 | `account` | 32 | Signer. |
 | `previous` | 32 | Links into the account's **one** chain (§5.6.1). |
 | `representative` | 32 | Carried, so an asset block never silently changes delegation. |
-| `balance` | 16 | **The account's Kei balance, unchanged from its predecessor** — §5.6.1's concession to §5.6.8, so a Banano-derived explorer that ignores the asset payload still tracks Kei correctly instead of reporting a broken balance. Except on `issue`, which burns 1,000 Kei, and where this field is how the burn is expressed. |
+| `balance` | 16 | **The account's Kei balance, unchanged from its predecessor** — §5.6.1's concession to §5.6.8, so a Banano-derived explorer that ignores the asset payload still tracks Kei correctly instead of reporting a broken balance. Except on `issue`, which burns Kei (§12), and where this field is how the burn is expressed. |
 | `op` | 1 | `issue` \| `mint` \| `burn` \| `transfer` \| `asset_receive`. |
 | `asset_id` | 32 | `H(issuer_pubkey ‖ symbol)` — derived, never assigned (§5.6.1). |
 | `amount` | 16 | Units, in the asset's own decimals. Zero for `issue`. |
@@ -376,7 +376,7 @@ already makes rather than a new subsystem.
 `mint` is tier A because minting is the cheapest operation to abuse and the one
 whose abuse creates permanent state.
 
-## 12. Issuance burns 1,000 Kei
+## 12. Issuance burns n Kei for an account's nth asset
 
 SPEC §5.6.5. Work is a rate limit; this is a cost, and it is the one place Kei is
 not free. An asset record is permanent global state that every node stores
@@ -385,11 +385,58 @@ symbols.
 
 Expressed as a decrease in the `issue` block's `balance` field with no
 corresponding receivable — the Kei is destroyed, not moved. The node must reject
-an `issue` whose balance decrease is not exactly 1,000 Kei.
+an `issue` whose balance decrease is not exactly the price of that account's next
+asset.
+
+**The price escalates per account, and it is linear per asset.** SPEC used to
+charge a flat 1,000 Kei; it now charges 1 Kei for an account's first asset, 2 for
+its second, n for its nth. That is a deliberate choice of curve. A flat price
+does not bound what the burn exists to bound: the thing to make expensive is one
+account creating a great many records, not one account creating its first, which
+is the one a developer meets before they have any reason to trust the project.
+
+Exponential was considered and rejected. Doubling reaches 2^500 Kei by SPEC's own
+worked example — a game with a currency and five hundred item types — which does
+not price spam, it prices the product. Linear-per-asset makes the total quadratic
+in the table size, which is the mildest curve that still makes a large table from
+one account impossible: 501 assets cost 125,751 Kei where the flat rate charged
+501,000, and a million cost five times the circulating supply.
+
+It is also the only anti-spam measure available to this node that does not
+require an identity. §5.6.3 means only an account can extend its own chain, so
+the count cannot be shed by anyone but the account paying it. Everything else —
+rate limits, one-grant-per-human — needs to know who somebody is, and a
+permissionless block-lattice never does.
+
+**The count is state, so it needs a table and a rollback.** `issued` maps an
+account to how many assets it has issued, in both backends, alongside the §9
+tables. Zero is absence, the same rule `holdings` follows: an account that has
+never issued has no entry, and rolling back an account's first issuance leaves it
+with none again. Rollback walks one chain backwards, so the block being undone is
+always that account's most recent issuance and the stored count is its ordinal —
+which is why decrementing is correct and does not need to re-derive anything.
 
 Be precise in the docs about what this does and does not contradict: **the
 feeless promise is about transactions**, and it survives intact. Sending Kei,
 transferring tokens, minting, and claiming are free forever.
+
+**The count has to be readable, or no client can issue.** The burn is a balance
+decrease the `issue` block states exactly, so a signer that does not know how
+many assets it has already issued cannot construct a valid one. `account_info`
+therefore carries `issuedCount`. That is an addition to
+[`rpc.md`](../../kei-transaction/docs/rpc.md) rather than something it already
+asked for, and the SDK and `MockLedger` need the same field before the
+conformance suite can pass — it is listed in §16 with the other SDK-side work.
+
+**Seeding is not part of this, on purpose.** Making the first asset cost 1 Kei
+raises the obvious next question — where does a developer get their first Kei —
+and the answer is not a consensus rule. Consensus cannot see a new wallet: an
+account is a keypair, there is no registration event, and "an account with no
+chain may claim once" is unlimited free money to anyone who can run a loop. So
+seeding is a faucet, it is testnet-only, and it targets issuers rather than every
+wallet, because transactions are feeless and a player needs no Kei to play. SPEC
+§5.6.5 now says so; the node's part is the `faucet` action, which §16 lists as
+not implemented and which belongs with M3's testnet.
 
 ## 13. `kei_` addresses, same encoding
 
@@ -520,7 +567,7 @@ putting the public testnet in M3.
 
 ## 16. What is not finished, stated plainly
 
-Two things are implemented but not yet demonstrated, and two are not implemented.
+Two things are implemented but not yet demonstrated, and three are not implemented.
 
 **The reserve set is empty.** `ledger_constants::reserve_accounts` is the fixed,
 immutable enumeration §5.7 requires, and `is_reserve` enforces the null
@@ -537,7 +584,7 @@ in this document should be read as though it were.
 **One deliberate divergence from the mock.** §1 makes `MockLedger` the reference
 and says that where this node could differ it does not. It differs in exactly
 one place, on purpose: the mock checks reserve-locked only on a `send`, so a
-reserve account can still `issue`, and issuance destroys 1,000 Kei (§12). That is
+reserve account can still `issue`, and issuance destroys Kei (§12). That is
 a supply change with no vote behind it, which SPEC §5.7 does not permit. The node
 refuses it. The cost is nothing today, because the reserve set is empty until
 the ceremony, and the mock should adopt the same rule.
@@ -545,6 +592,12 @@ the ceremony, and the mock should adopt the same rule.
 **`account_history` still answers in Nano's shape**, and `faucet` does not answer
 at all. §15 has both, and the first needs a decision about what inherited
 tooling is owed before it is worth writing.
+
+**The SDK does not know about the escalating burn.** §12 changed issuance from a
+flat 1,000 Kei to n Kei for an account's nth asset, and added `issuedCount` to
+`account_info` so a signer can compute it. `MockLedger` still charges the flat
+rate and `rpc.md` does not carry the field, so the two disagree about whether a
+given `issue` block is valid. Both sides are small; neither is done.
 
 **The SDK's hash has to move.** §7 settled that `asset` blocks hash as binary
 fields under a preamble, and §14 extends that to every block type. The SDK still
@@ -563,7 +616,7 @@ no matter what this node does.
 3. Reserve accounts are enumerated in genesis, name the null representative, and
    contribute zero weight of any kind.
 4. The node validates `issue`, `mint`, `burn`, `transfer`, and `asset_receive`,
-   including max-supply caps, transfer policy, and the 1,000 Kei issuance burn.
+   including max-supply caps, transfer policy, and the escalating issuance burn.
 5. `balanceOf` answers in a single call, from `holders`.
 6. `packages/core/test/mock-server.test.ts` and `packages/kei/test/over-http.test.ts`
    pass against `kei-node` with only the URL changed.

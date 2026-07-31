@@ -49,7 +49,7 @@ rewritten.
 
 | Op | Behaviour |
 |---|---|
-| `issue` | Create a token: name, symbol, decimals, max supply. Permanent, and its parameters immutable. Burns 1,000 Kei. |
+| `issue` | Create a token: name, symbol, decimals, max supply. Permanent, and its parameters immutable. Burns n Kei for the account's nth token, so a first one costs 1. |
 | `mint` | Issuer creates units. Rejected if it would exceed max supply. |
 | `burn` | Destroy units permanently. The economic sink. |
 | `transfer` | Move units between accounts, subject to the token's immutable transfer policy. |

@@ -572,6 +572,7 @@ enum class tables
 	frontiers,
 	holders,
 	holdings,
+	issued,
 	meta,
 	online_weight,
 	peers,
@@ -735,6 +736,15 @@ public:
 	virtual nano::store_iterator<nano::asset_key, nano::amount> holders_begin (nano::transaction const &, nano::asset_key const &) const = 0;
 	virtual nano::store_iterator<nano::asset_key, nano::amount> holders_begin (nano::transaction const &) const = 0;
 	virtual nano::store_iterator<nano::asset_key, nano::amount> holders_end () const = 0;
+
+	/**
+	 * How many assets an account has already issued, which is what prices the
+	 * next one (SPEC §5.6.5). Zero when absent, so an account that has never
+	 * issued needs no entry.
+	 */
+	virtual uint64_t issued_count (nano::transaction const &, nano::account const &) = 0;
+	/** Writes the count, or deletes the entry when it returns to zero. */
+	virtual void issued_put (nano::write_transaction const &, nano::account const &, uint64_t) = 0;
 
 	virtual void pending_put (nano::write_transaction const &, nano::pending_key const &, nano::asset_pending_info const &) = 0;
 	virtual bool pending_get (nano::transaction const &, nano::pending_key const &, nano::asset_pending_info &) = 0;
