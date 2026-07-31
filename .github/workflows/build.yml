@@ -17,6 +17,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A branch only needs its newest commit built. Without this, a run of quick
+# fixes queues a full build each, and the answer to the one that matters
+# arrives last.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   linux:
     name: Linux (gcc, lmdb, dev network)
@@ -66,23 +73,13 @@ jobs:
       # packaging change (systemd unit, CPack, Docker) and is deliberately not
       # bundled in with the CI setup.
       #
-      # Diagnostics are re-emitted as workflow `::error` commands so they become
-      # check annotations. That puts them on the pull request next to the line
-      # that caused them, and it is also the only way to read a failure without
-      # downloading the log.
+      # -k 0 keeps going after the first failure, so one run reports every
+      # error in the tree rather than only the first translation unit's.
       - name: Build node
         run: |
           set -o pipefail
           if ! cmake --build build --target bananode -- -k 0 2>&1 | tee build.log; then
-            grep -E '^[^ ]+:[0-9]+:[0-9]+: (error|fatal error):' build.log \
-              | sort -u | head -40 \
-              | while IFS= read -r line; do
-                  file=$(echo "$line" | cut -d: -f1)
-                  lineno=$(echo "$line" | cut -d: -f2)
-                  col=$(echo "$line" | cut -d: -f3)
-                  msg=$(echo "$line" | cut -d: -f4-)
-                  echo "::error file=${file},line=${lineno},col=${col}::${msg}"
-                done
+            bash ci/annotate-build-failure.sh build.log
             exit 1
           fi
 
@@ -90,26 +87,18 @@ jobs:
         run: ./build/bananode --version
 
       # "It compiles" is a weaker claim than "it works", and until this step
-      # existed it was the only claim this workflow could support. The filter is
-      # deliberate: the inherited suite has hashes and genesis balances baked in
-      # that decisions-m2.md §14 changed on purpose, so it is red for reasons
-      # that are not regressions. Bringing it back to green is its own job.
+      # existed it was the only claim this workflow could support.
       - name: Build tests
         run: |
           set -o pipefail
           if ! cmake --build build --target core_test -- -k 0 2>&1 | tee test-build.log; then
-            grep -E '^[^ ]+:[0-9]+:[0-9]+: (error|fatal error):' test-build.log \
-              | sort -u | head -40 \
-              | while IFS= read -r line; do
-                  file=$(echo "$line" | cut -d: -f1)
-                  lineno=$(echo "$line" | cut -d: -f2)
-                  col=$(echo "$line" | cut -d: -f3)
-                  msg=$(echo "$line" | cut -d: -f4-)
-                  echo "::error file=${file},line=${lineno},col=${col}::${msg}"
-                done
+            bash ci/annotate-build-failure.sh test-build.log
             exit 1
           fi
 
+      # The filter is deliberate: the inherited suite bakes in block hashes and
+      # genesis balances that decisions-m2.md §14 changed on purpose, so it is
+      # red for reasons that are not regressions. Bringing it back to green is
+      # its own job, and pretending otherwise here would only hide this signal.
       - name: Run Kei tests
-        run: |
-          ./build/core_test --gtest_filter='asset_block.*:asset_payload.*:asset_id.*:block.kei_hash_domain'
+        run: ./build/core_test --gtest_filter='asset_block.*:asset_payload.*:asset_id.*:block.kei_hash_domain'
