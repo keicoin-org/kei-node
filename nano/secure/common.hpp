@@ -513,11 +513,18 @@ public:
 	 * mismatch is a launch blocker, so `validate_allocation` returns an error
 	 * and the node refuses to start rather than logging a warning.
 	 */
-	static nano::uint128_t const allocation_reserve;
-	static nano::uint128_t const allocation_grants;
-	static nano::uint128_t const allocation_community;
-	static nano::uint128_t const allocation_bounty;
-	static nano::uint128_t const allocation_team;
+	// Functions rather than static data members, and deliberately so: a
+	// nano::uint128_t needs dynamic initialisation, `nano::dev::network_params`
+	// is a global whose constructor calls validate_allocation, and it is
+	// defined earlier in the same translation unit. As data members these read
+	// back as zero during that constructor, the allocation check failed against
+	// a set of zeroes, and every node aborted at startup on an assertion whose
+	// message said the allocation was wrong when it was not.
+	static nano::uint128_t allocation_reserve ();
+	static nano::uint128_t allocation_grants ();
+	static nano::uint128_t allocation_community ();
+	static nano::uint128_t allocation_bounty ();
+	static nano::uint128_t allocation_team ();
 	/** Returns true, and fills `message_a`, if the allocation does not add up. */
 	static bool validate_allocation (std::string & message_a);
 };

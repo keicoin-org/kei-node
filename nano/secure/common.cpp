@@ -177,22 +177,41 @@ nano::ledger_constants::ledger_constants (nano::work_thresholds & work, nano::ne
 	release_assert (!genesis->account ().is_zero (), "This network has no genesis block. The SPEC 5.7 genesis ceremony has not been run and its output is not in nano/secure/common.cpp, so only the dev network can be started today.");
 }
 
-nano::uint128_t const nano::ledger_constants::allocation_reserve{ nano::uint128_t ("900000000000") * nano::BAN_ratio };
-nano::uint128_t const nano::ledger_constants::allocation_grants{ nano::uint128_t ("37000000000") * nano::BAN_ratio };
-nano::uint128_t const nano::ledger_constants::allocation_community{ nano::uint128_t ("28000000000") * nano::BAN_ratio };
-nano::uint128_t const nano::ledger_constants::allocation_bounty{ nano::uint128_t ("18000000000") * nano::BAN_ratio };
-nano::uint128_t const nano::ledger_constants::allocation_team{ nano::uint128_t ("17000000000") * nano::BAN_ratio };
+nano::uint128_t nano::ledger_constants::allocation_reserve ()
+{
+	return nano::uint128_t ("900000000000") * nano::BAN_ratio;
+}
+
+nano::uint128_t nano::ledger_constants::allocation_grants ()
+{
+	return nano::uint128_t ("37000000000") * nano::BAN_ratio;
+}
+
+nano::uint128_t nano::ledger_constants::allocation_community ()
+{
+	return nano::uint128_t ("28000000000") * nano::BAN_ratio;
+}
+
+nano::uint128_t nano::ledger_constants::allocation_bounty ()
+{
+	return nano::uint128_t ("18000000000") * nano::BAN_ratio;
+}
+
+nano::uint128_t nano::ledger_constants::allocation_team ()
+{
+	return nano::uint128_t ("17000000000") * nano::BAN_ratio;
+}
 
 bool nano::ledger_constants::validate_allocation (std::string & message_a)
 {
-	auto const circulating (allocation_grants + allocation_community + allocation_bounty + allocation_team);
+	auto const circulating (allocation_grants () + allocation_community () + allocation_bounty () + allocation_team ());
 	auto const expected_circulating (nano::uint128_t ("100000000000") * nano::BAN_ratio);
 	if (circulating != expected_circulating)
 	{
 		message_a = "The four circulating allocations must sum to exactly 100,000,000,000 Kei (SPEC 5.7). This is a launch blocker.";
 		return true;
 	}
-	if (circulating + allocation_reserve != nano::kei_total_supply)
+	if (circulating + allocation_reserve () != nano::kei_total_supply)
 	{
 		message_a = "Genesis must produce exactly 1,000,000,000,000 Kei (SPEC 5.7). This is a launch blocker.";
 		return true;
