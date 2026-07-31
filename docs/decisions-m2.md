@@ -621,7 +621,7 @@ with §0 putting the public testnet in M3.
 
 ## 16. What is not finished, stated plainly
 
-Three things are implemented but not yet demonstrated, and two are not implemented.
+Two things are implemented but not yet demonstrated, and two are not implemented.
 
 **The reserve set is empty.** `ledger_constants::reserve_accounts` is the fixed,
 immutable enumeration §5.7 requires, and `is_reserve` enforces the null
@@ -630,10 +630,24 @@ genesis ceremony produces them, so on dev those rules currently hold vacuously.
 The four circulating allocations and the reserve total are asserted at startup
 today; the *blocks* that distribute them are part of the same ceremony.
 
-**Nothing has been executed.** Per §3 there is still no toolchain on this
-machine, so everything here is checked by compiling in CI and by having been
-written against the mock's semantics. "Compiles" is not "works", and no assertion
-in this document should be read as though it were.
+**Almost nothing has been executed, and the exception is worth being precise
+about.** Per §3 there is still no toolchain on this machine, so nearly everything
+here is checked by compiling in CI and by having been written against the mock's
+semantics. "Compiles" is not "works", and no assertion in this document should be
+read as though it were.
+
+The exception, as of the `account_history` work in §15: `rpc_test` is now built
+in CI and one case runs there. It stands up a node through `nano::test::system`,
+processes a change, a send and a receive through `ledger.cpp` and the store, and
+reads them back from a live RPC server. So the ledger and store paths are no
+longer entirely untried — a chain is built and queried on every run.
+
+What that does *not* cover is most of what this document decides. No asset block
+has been through `ledger_processor`; the `holdings`, `holders` and `issued`
+tables are written by no test; rollback (§12) is unexecuted, and rollback is the
+code whose bugs stay invisible until a fork actually happens. One green test
+proves the harness works, which is mainly valuable because it means the next
+ones are cheap.
 
 **One deliberate divergence from the mock.** §1 makes `MockLedger` the reference
 and says that where this node could differ it does not. It differs in exactly
@@ -643,25 +657,36 @@ a supply change with no vote behind it, which SPEC §5.7 does not permit. The no
 refuses it. The cost is nothing today, because the reserve set is empty until
 the ceremony, and the mock should adopt the same rule.
 
-**`account_history` now answers in both shapes and has been executed in
-neither.** §15 records the decision and what it turns on. The SDK half of it
-runs — `mockRpcHandler` requires `shape`, `HttpNode` sends it, and the
-conformance suite now covers history, which it did not before — so the contract
-is pinned from the client's side. The node half is a `rpc_test` case that CI
-does not build: §3's workflow builds and filters `core_test` only, and every
-Kei test in that filter is a unit test over serialisation, hashing, the response
-encoder, or the burn arithmetic. Not one of them constructs a ledger. Wiring
-`rpc_test` in under the same kind of filter is what would make this claim
-checkable, and it is the same work that would first execute `ledger.cpp` and
-the store.
+**`account_history` answers in both shapes, and this one has actually been
+run.** §15 records the decision and what it turns on. Both halves are executed
+rather than argued:
+
+- The SDK half — `mockRpcHandler` requires `shape`, `HttpNode` sends it, and the
+  conformance suite now covers `account_history`, which it did not before. That
+  absence is why the shape being wrong went unnoticed in the first place.
+- The node half — `rpc.account_history_block_shape` builds a chain, asks for it
+  in both shapes, and checks the things that distinguish them: that `type` is
+  the block type and not the subtype, that `account` is the signer and not the
+  counterparty, that `previous` and `signature` are present where the inherited
+  entry has neither, that the change block the inherited shape drops is there,
+  and that an unknown `shape` and a `shape` + `account_filter` combination are
+  refused rather than answered.
+
+Getting there needed `rpc_test` built in CI at all, which it never had been —
+so the §15 shapes that shipped before this one (`accounts_receivable`,
+`block_info`, `account_info`) had their tests read rather than compiled. They
+now at least compile; none of them has a test of its own yet, and each is worth
+one.
 
 `faucet` (testnet only) is the one action still not implemented at all.
 
-**The SDK does not know about the escalating burn.** §12 changed issuance from a
-flat 1,000 Kei to n Kei for an account's nth asset, and added `issuedCount` to
-`account_info` so a signer can compute it. `MockLedger` still charges the flat
-rate and `rpc.md` does not carry the field, so the two disagree about whether a
-given `issue` block is valid. Both sides are small; neither is done.
+**The SDK now knows about the escalating burn.** §12 changed issuance from a flat
+1,000 Kei to n Kei for an account's nth asset, and added `issuedCount` to
+`account_info` so a signer can compute it. `MockLedger` charges
+`issuanceBurn(ordinal - 1)` and `rpc.md` carries the field, so the two agree
+about whether a given `issue` block is valid. What remains unchecked is that
+they agree *with each other* rather than separately with this document, and only
+definition-of-done (6) can settle that.
 
 **The SDK's hash has to move.** §7 settled that `asset` blocks hash as binary
 fields under a preamble, and §14 extends that to every block type. The SDK still
