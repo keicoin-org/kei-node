@@ -1260,7 +1260,11 @@ TEST (rpc, commit_info_claim_status_contract)
 		request.put ("action", action);
 		request.put ("root", root.to_string ());
 		auto response (wait_response (system, rpc_ctx, request));
-		ASSERT_EQ (std::string (), response.get<std::string> ("commit"));
+		// The wire sends unquoted `null` (nano::json::put_null, decisions-m2.md
+		// §15). boost::property_tree has no null type, so read_json here — used
+		// by wait_response to decode the response — keeps that literal token as
+		// the text "null" rather than an empty string.
+		ASSERT_EQ (std::string ("null"), response.get<std::string> ("commit"));
 	}
 
 	for (std::string const & action : { "claim_status", "asset_claims" })
