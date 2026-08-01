@@ -204,3 +204,107 @@ nano::store_iterator<nano::pending_key, nano::asset_pending_info> nano::lmdb::as
 {
 	return nano::store_iterator<nano::pending_key, nano::asset_pending_info> (nullptr);
 }
+
+void nano::lmdb::asset_store::commit_put (nano::write_transaction const & transaction, nano::uint256_union const & root, nano::asset_commit_info const & info)
+{
+	auto status = store.put (transaction, tables::asset_commits, root, info);
+	store.release_assert_success (status);
+}
+
+bool nano::lmdb::asset_store::commit_get (nano::transaction const & transaction, nano::uint256_union const & root, nano::asset_commit_info & info_a)
+{
+	nano::mdb_val value;
+	auto status = store.get (transaction, tables::asset_commits, root, value);
+	release_assert (store.success (status) || store.not_found (status));
+	bool result (true);
+	if (store.success (status))
+	{
+		nano::bufferstream stream (reinterpret_cast<uint8_t const *> (value.data ()), value.size ());
+		result = info_a.deserialize (stream);
+	}
+	return result;
+}
+
+void nano::lmdb::asset_store::commit_del (nano::write_transaction const & transaction, nano::uint256_union const & root)
+{
+	auto status = store.del (transaction, tables::asset_commits, root);
+	store.release_assert_success (status);
+}
+
+bool nano::lmdb::asset_store::commit_exists (nano::transaction const & transaction, nano::uint256_union const & root)
+{
+	nano::mdb_val junk;
+	auto status = store.get (transaction, tables::asset_commits, root, junk);
+	release_assert (store.success (status) || store.not_found (status));
+	return store.success (status);
+}
+
+nano::store_iterator<nano::uint256_union, nano::asset_commit_info> nano::lmdb::asset_store::commit_begin (nano::transaction const & transaction, nano::uint256_union const & root) const
+{
+	return store.make_iterator<nano::uint256_union, nano::asset_commit_info> (transaction, tables::asset_commits, root);
+}
+
+nano::store_iterator<nano::uint256_union, nano::asset_commit_info> nano::lmdb::asset_store::commit_begin (nano::transaction const & transaction) const
+{
+	return store.make_iterator<nano::uint256_union, nano::asset_commit_info> (transaction, tables::asset_commits);
+}
+
+nano::store_iterator<nano::uint256_union, nano::asset_commit_info> nano::lmdb::asset_store::commit_end () const
+{
+	return nano::store_iterator<nano::uint256_union, nano::asset_commit_info> (nullptr);
+}
+
+void nano::lmdb::asset_store::claim_put (nano::write_transaction const & transaction, nano::account const & account, nano::uint256_union const & root, nano::block_hash const & block)
+{
+	// Both orderings always move together, exactly as the two holdings tables do.
+	auto status = store.put (transaction, tables::asset_claims, nano::claim_key (account, root), block);
+	store.release_assert_success (status);
+	status = store.put (transaction, tables::asset_claim_roots, nano::claim_root_key (root, account), block);
+	store.release_assert_success (status);
+}
+
+void nano::lmdb::asset_store::claim_del (nano::write_transaction const & transaction, nano::account const & account, nano::uint256_union const & root)
+{
+	auto status = store.del (transaction, tables::asset_claims, nano::claim_key (account, root));
+	store.release_assert_success (status);
+	status = store.del (transaction, tables::asset_claim_roots, nano::claim_root_key (root, account));
+	store.release_assert_success (status);
+}
+
+bool nano::lmdb::asset_store::claim_exists (nano::transaction const & transaction, nano::account const & account, nano::uint256_union const & root)
+{
+	nano::mdb_val junk;
+	auto status = store.get (transaction, tables::asset_claims, nano::claim_key (account, root), junk);
+	release_assert (store.success (status) || store.not_found (status));
+	return store.success (status);
+}
+
+nano::store_iterator<nano::asset_key, nano::block_hash> nano::lmdb::asset_store::claims_begin (nano::transaction const & transaction, nano::asset_key const & key) const
+{
+	return store.make_iterator<nano::asset_key, nano::block_hash> (transaction, tables::asset_claims, key);
+}
+
+nano::store_iterator<nano::asset_key, nano::block_hash> nano::lmdb::asset_store::claims_begin (nano::transaction const & transaction) const
+{
+	return store.make_iterator<nano::asset_key, nano::block_hash> (transaction, tables::asset_claims);
+}
+
+nano::store_iterator<nano::asset_key, nano::block_hash> nano::lmdb::asset_store::claims_end () const
+{
+	return nano::store_iterator<nano::asset_key, nano::block_hash> (nullptr);
+}
+
+nano::store_iterator<nano::asset_key, nano::block_hash> nano::lmdb::asset_store::claim_roots_begin (nano::transaction const & transaction, nano::asset_key const & key) const
+{
+	return store.make_iterator<nano::asset_key, nano::block_hash> (transaction, tables::asset_claim_roots, key);
+}
+
+nano::store_iterator<nano::asset_key, nano::block_hash> nano::lmdb::asset_store::claim_roots_begin (nano::transaction const & transaction) const
+{
+	return store.make_iterator<nano::asset_key, nano::block_hash> (transaction, tables::asset_claim_roots);
+}
+
+nano::store_iterator<nano::asset_key, nano::block_hash> nano::lmdb::asset_store::claim_roots_end () const
+{
+	return nano::store_iterator<nano::asset_key, nano::block_hash> (nullptr);
+}

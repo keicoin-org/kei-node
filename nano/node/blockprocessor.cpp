@@ -484,6 +484,11 @@ nano::process_return nano::block_processor::process_one (nano::write_transaction
 		case nano::process_result::too_many_assets:
 		case nano::process_result::reserve_representative:
 		case nano::process_result::reserve_locked:
+		case nano::process_result::commit_exists:
+		case nano::process_result::no_such_commit:
+		case nano::process_result::commit_closed:
+		case nano::process_result::already_claimed:
+		case nano::process_result::bad_claim_proof:
 		{
 			// The asset rejections carry a message naming what the signer did
 			// wrong, so log that rather than restating the code.

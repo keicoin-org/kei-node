@@ -10,6 +10,8 @@
 
 #include <cryptopp/words.h>
 
+#include <limits>
+
 namespace
 {
 /**
@@ -260,6 +262,52 @@ public:
 				ledger.store.asset.pending_put (transaction, nano::pending_key (block_a.hashables.account, source_hash), nano::asset_pending_info (source_asset->hashables.account, asset_id, collected, source_asset->hashables.payload.memo));
 				break;
 			}
+			case nano::asset_op::commit:
+			{
+				auto const root (block_a.hashables.link.as_block_hash ());
+				// Claims against this root live on other accounts' chains, and
+				// nothing orders those against this one. They have to come off
+				// first, exactly as a collected mint's receive does — and unlike
+				// a receivable, a claim leaves no per-recipient key to find them
+				// by, which is what the root-keyed index exists for.
+				undo_claims (root);
+				if (!error)
+				{
+					ledger.store.asset.commit_del (transaction, root);
+				}
+				break;
+			}
+			case nano::asset_op::commit_close:
+			{
+				auto const root (block_a.hashables.link.as_block_hash ());
+				nano::asset_commit_info commit;
+				auto const commit_error (ledger.store.asset.commit_get (transaction, root, commit));
+				release_assert (!commit_error);
+				commit.closed = false;
+				ledger.store.asset.commit_put (transaction, root, commit);
+				break;
+			}
+			case nano::asset_op::claim:
+			{
+				auto const root (block_a.hashables.link.as_block_hash ());
+				if (!ledger.store.asset.get (transaction, asset_id, asset))
+				{
+					asset.circulating = asset.circulating.number () - amount;
+					ledger.store.asset.put (transaction, asset_id, asset);
+				}
+				auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
+				debug_assert (held >= amount);
+				if (held == amount)
+				{
+					ledger.store.asset.balance_del (transaction, block_a.hashables.account, asset_id);
+				}
+				else
+				{
+					ledger.store.asset.balance_put (transaction, block_a.hashables.account, asset_id, nano::amount (held - amount));
+				}
+				ledger.store.asset.claim_del (transaction, block_a.hashables.account, root);
+				break;
+			}
 		}
 		ledger.stats.inc (nano::stat::type::rollback, nano::stat::detail::asset_block);
 
@@ -324,6 +372,28 @@ public:
 		if (!error)
 		{
 			ledger.store.asset.pending_del (transaction, key);
+		}
+	}
+
+	/**
+	 * Roll back every claim made against a root, so the commit under them can go.
+	 *
+	 * Each claim is another account's frontier problem: rolling one back means
+	 * rolling back everything that account did afterwards, which is what
+	 * `ledger.rollback` already does. The loop re-reads the index each time
+	 * because those recursive rollbacks delete from it.
+	 */
+	void undo_claims (nano::uint256_union const & root_a)
+	{
+		while (!error)
+		{
+			auto iterator (ledger.store.asset.claim_roots_begin (transaction, nano::claim_root_key (root_a, 0)));
+			if (iterator == ledger.store.asset.claim_roots_end () || iterator->first.first != root_a)
+			{
+				break;
+			}
+			nano::account const claimant (iterator->first.second.number ());
+			error = ledger.rollback (transaction, ledger.latest (transaction, claimant), list);
 		}
 	}
 
@@ -741,12 +811,18 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 	nano::asset_info asset;
 	nano::uint256_union asset_id (block_a.hashables.asset_id);
 	auto const amount (block_a.hashables.amount.number ());
+	// The rooted ops put the root where every other op puts a destination or a
+	// source, which is what lets them reuse the fixed header unchanged
+	// (decisions-m4.md §2).
+	nano::uint256_union const root (block_a.hashables.link.as_block_hash ());
 	bool asset_dirty (false);
 	boost::optional<nano::asset_pending_info> receivable;
 	nano::account receivable_to{};
 	boost::optional<nano::amount> credit;
 	boost::optional<nano::amount> debit;
 	bool collect_receivable (false);
+	boost::optional<nano::asset_commit_info> commit;
+	bool claimed (false);
 
 	switch (block_a.hashables.op)
 	{
@@ -808,13 +884,20 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 				return;
 			}
 			// maxSupply caps circulating supply, so burning frees headroom
-			// (SPEC §5.6.6).
-			if (!asset.uncapped () && asset.circulating.number () + amount > asset.max_supply.number ())
+			// (SPEC §5.6.6). Both comparisons subtract rather than add:
+			// `circulating + amount` is uint128 arithmetic and wraps, so an
+			// amount large enough to carry past 2^128 would compare small and
+			// then be credited as the wrapped remainder. An uncapped asset has
+			// no cap to compare against but still has the arithmetic ceiling,
+			// which is why the first test runs either way.
+			auto const circulating (asset.circulating.number ());
+			auto const arithmetic_room (std::numeric_limits<nano::uint128_t>::max () - circulating);
+			if (amount > arithmetic_room || (!asset.uncapped () && amount > asset.max_supply.number () - circulating))
 			{
 				result.code = nano::process_result::over_max_supply;
 				return;
 			}
-			asset.circulating = asset.circulating.number () + amount;
+			asset.circulating = circulating + amount;
 			asset_dirty = true;
 			receivable_to = block_a.hashables.link.as_account ();
 			receivable = nano::asset_pending_info (block_a.hashables.account, asset_id, amount, block_a.hashables.payload.memo);
@@ -914,6 +997,144 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			collect_receivable = true;
 			break;
 		}
+		case nano::asset_op::commit:
+		{
+			// A drop mints units of one asset, so only that asset's issuer can
+			// underwrite one. This is also what stops anyone from racing an
+			// issuer to publish their root: an attacker cannot commit against
+			// an asset they did not issue, whatever they know about its leaves.
+			if (ledger.store.asset.get (transaction, asset_id, asset))
+			{
+				result.code = nano::process_result::no_such_asset;
+				return;
+			}
+			if (asset.issuer != block_a.hashables.account)
+			{
+				result.code = nano::process_result::not_issuer;
+				return;
+			}
+			// `total` is the issuer's own declaration of what the drop covers.
+			// The node cannot check it — it never sees the other leaves — but a
+			// drop declaring nothing is a mistake worth failing loudly.
+			if (root.is_zero () || amount == 0)
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			if (ledger.store.asset.commit_exists (transaction, root))
+			{
+				// Roots are unique across the ledger, not per issuer. Two issuers
+				// colliding here would need the same leaf set, and the leaf binds
+				// the asset id, so in practice this catches an issuer republishing
+				// a batch it already published — which would otherwise reopen a
+				// root it had closed.
+				result.code = nano::process_result::commit_exists;
+				return;
+			}
+			commit = nano::asset_commit_info (block_a.hashables.account, asset_id, block_a.hashables.payload.count, block_a.hashables.amount, hash);
+			break;
+		}
+		case nano::asset_op::commit_close:
+		{
+			nano::asset_commit_info existing;
+			if (ledger.store.asset.commit_get (transaction, root, existing))
+			{
+				result.code = nano::process_result::no_such_commit;
+				return;
+			}
+			if (existing.issuer != block_a.hashables.account)
+			{
+				result.code = nano::process_result::not_issuer;
+				return;
+			}
+			if (existing.closed)
+			{
+				// Closing twice would be a block that changes nothing, and a
+				// no-op block is a rollback that cannot tell what to undo.
+				result.code = nano::process_result::commit_closed;
+				return;
+			}
+			if (!asset_id.is_zero () || amount != 0)
+			{
+				// The root is the whole statement. Naming an asset or an amount
+				// here would be a second, unenforced claim about the drop.
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			existing.closed = true;
+			commit = existing;
+			break;
+		}
+		case nano::asset_op::claim:
+		{
+			nano::asset_commit_info existing;
+			if (ledger.store.asset.commit_get (transaction, root, existing))
+			{
+				result.code = nano::process_result::no_such_commit;
+				return;
+			}
+			if (existing.closed)
+			{
+				result.code = nano::process_result::commit_closed;
+				return;
+			}
+			if (amount == 0)
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			if (existing.asset_id != asset_id)
+			{
+				result.code = nano::process_result::bad_claim_proof;
+				return;
+			}
+			// Checked before the proof is folded: an account that has already
+			// claimed gets the honest answer rather than a proof error, and the
+			// cheap lookup runs before the expensive hashing.
+			if (ledger.store.asset.claim_exists (transaction, block_a.hashables.account, root))
+			{
+				result.code = nano::process_result::already_claimed;
+				return;
+			}
+			auto const leaf (nano::asset_claim_leaf (block_a.hashables.account, asset_id, block_a.hashables.amount));
+			if (nano::asset_claim_root (leaf, block_a.hashables.payload.proof) != root)
+			{
+				result.code = nano::process_result::bad_claim_proof;
+				return;
+			}
+			if (ledger.store.asset.get (transaction, asset_id, asset))
+			{
+				result.code = nano::process_result::no_such_asset;
+				return;
+			}
+			// A claim is where committed units actually come into existence, so
+			// this is where the cap applies. An issuer who commits to more than
+			// the cap allows has published a drop whose later claims fail — the
+			// node cannot tell that at commit time, because it never learns what
+			// the other leaves say. Subtracting rather than adding, for the same
+			// reason as the mint above: the sum is uint128 and would wrap.
+			auto const circulating (asset.circulating.number ());
+			auto const arithmetic_room (std::numeric_limits<nano::uint128_t>::max () - circulating);
+			if (amount > arithmetic_room || (!asset.uncapped () && amount > asset.max_supply.number () - circulating))
+			{
+				result.code = nano::process_result::over_max_supply;
+				return;
+			}
+			auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
+			if (held == 0 && ledger.store.asset.holdings_count (transaction, block_a.hashables.account) >= nano::max_assets_per_account)
+			{
+				result.code = nano::process_result::too_many_assets;
+				return;
+			}
+			asset.circulating = circulating + amount;
+			asset_dirty = true;
+			// The claimant writes their own block, so there is no receivable step
+			// and nothing to collect later: this is the whole point of §5.5, and
+			// the reason a thousand claims cost the issuer nothing.
+			credit = nano::amount (held + amount);
+			claimed = true;
+			break;
+		}
 	}
 
 	ledger.stats.inc (nano::stat::type::ledger, nano::stat::detail::asset_block);
@@ -968,6 +1189,16 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 	if (collect_receivable)
 	{
 		ledger.store.asset.pending_del (transaction, nano::pending_key (block_a.hashables.account, block_a.hashables.link.as_block_hash ()));
+	}
+	if (commit)
+	{
+		// Publishing a root and closing one are the same write: the record is
+		// small, and a closed root differs from an open one by one byte.
+		ledger.store.asset.commit_put (transaction, root, *commit);
+	}
+	if (claimed)
+	{
+		ledger.store.asset.claim_put (transaction, block_a.hashables.account, root, hash);
 	}
 
 	nano::account_info new_info (hash, block_a.representative (), info.open_block.is_zero () ? hash : info.open_block, block_a.hashables.balance, nano::seconds_since_epoch (), info.block_count + 1, info.epoch ());
@@ -1749,8 +1980,15 @@ public:
 	void asset_block (nano::asset_block const & block_a) override
 	{
 		result[0] = block_a.hashables.previous;
-		// link is a counterparty account for issue/mint/burn/transfer, and only
-		// a dependent block hash for asset_receive (decisions-m2.md §7, §10).
+		// link is a counterparty account for issue/mint/burn/transfer, a Merkle
+		// root for the M4 rooted ops, and only a dependent block hash for
+		// asset_receive (decisions-m2.md §7, §10, decisions-m4.md §2).
+		//
+		// A claim does depend on its commit block, but it names the root rather
+		// than that block's hash, so there is nothing here to key an unchecked
+		// entry by. A claim that arrives before the root it proves against is
+		// rejected rather than held, and comes back on rebroadcast
+		// (decisions-m4.md §5).
 		if (block_a.hashables.op == nano::asset_op::asset_receive)
 		{
 			result[1] = block_a.hashables.link.as_block_hash ();

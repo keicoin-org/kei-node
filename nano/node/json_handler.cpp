@@ -3645,6 +3645,11 @@ void nano::json_handler::process ()
 							case nano::process_result::too_many_assets:
 							case nano::process_result::reserve_representative:
 							case nano::process_result::reserve_locked:
+							case nano::process_result::commit_exists:
+							case nano::process_result::no_such_commit:
+							case nano::process_result::commit_closed:
+							case nano::process_result::already_claimed:
+							case nano::process_result::bad_claim_proof:
 							{
 								rpc_l->ec = nano::to_error_process (result.code);
 								break;
@@ -5826,6 +5831,62 @@ void nano::json_handler::asset_holders ()
 	response_errors ();
 }
 
+void nano::json_handler::asset_commit ()
+{
+	nano::uint256_union root;
+	if (root.decode_hex (request.get<std::string> ("root", "")))
+	{
+		ec = nano::error_common::bad_root;
+	}
+	if (!ec)
+	{
+		auto transaction (node.store.tx_begin_read ());
+		nano::asset_commit_info info;
+		if (!node.store.asset.commit_get (transaction, root, info))
+		{
+			boost::property_tree::ptree commit;
+			commit.put ("root", root.to_string ());
+			commit.put ("issuer", info.issuer.to_account ());
+			commit.put ("asset", info.asset_id.to_string ());
+			nano::json::put_number (commit, "count", info.count);
+			commit.put ("total", info.total.to_string_dec ());
+			commit.put ("block", info.block.to_string ());
+			nano::json::put_boolean (commit, "closed", info.closed);
+			response_l.add_child ("commit", commit);
+		}
+		else
+		{
+			// A root nobody published is absent, not an error — the same rule
+			// `asset_info` follows for an asset nobody issued.
+			nano::json::put_null (response_l, "commit");
+		}
+	}
+	response_errors ();
+}
+
+void nano::json_handler::asset_claims ()
+{
+	auto account (account_impl ());
+	auto const count (count_optional_impl ());
+	if (!ec)
+	{
+		boost::property_tree::ptree claims;
+		auto transaction (node.store.tx_begin_read ());
+		uint64_t returned (0);
+		// Keyed by account, so an SDK asking "what have I already claimed?"
+		// before it publishes another claim gets one prefix scan (SPEC §5.5).
+		for (auto i (node.store.asset.claims_begin (transaction, nano::claim_key (account, 0))), n (node.store.asset.claims_end ()); i != n && i->first.first == account && returned < count; ++i, ++returned)
+		{
+			boost::property_tree::ptree entry;
+			entry.put ("root", i->first.second.to_string ());
+			entry.put ("block", i->second.to_string ());
+			claims.push_back (std::make_pair ("", entry));
+		}
+		nano::json::add_array (response_l, "claims", claims);
+	}
+	response_errors ();
+}
+
 void nano::json_handler::kei_receivables ()
 {
 	auto account (account_impl ());
@@ -6121,6 +6182,8 @@ ipc_json_handler_no_arg_func_map create_ipc_json_handler_no_arg_func_map ()
 	no_arg_funcs.emplace ("account_holdings", &nano::json_handler::account_holdings);
 	no_arg_funcs.emplace ("asset_balance", &nano::json_handler::asset_balance);
 	no_arg_funcs.emplace ("asset_holders", &nano::json_handler::asset_holders);
+	no_arg_funcs.emplace ("asset_commit", &nano::json_handler::asset_commit);
+	no_arg_funcs.emplace ("asset_claims", &nano::json_handler::asset_claims);
 	no_arg_funcs.emplace ("work_thresholds", &nano::json_handler::work_thresholds);
 	no_arg_funcs.emplace ("faucet", &nano::json_handler::faucet);
 	no_arg_funcs.emplace ("work_peer_add", &nano::json_handler::work_peer_add);

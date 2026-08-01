@@ -32,21 +32,23 @@ enum class block_type : uint8_t
 	// keeps its number and its meaning, per decisions-m2.md §2.
 	asset = 7
 };
-// The five asset operations M2 validates (decisions-m2.md §0, §7, §11).
-// commit/commit_close/claim and the swap legs land with M4 and M5 and are
-// deliberately not members of this enum yet. Their numbers are reserved rather
-// than merely deferred, because the op byte is hashed and renumbering later
-// invalidates every vector and signature made against the earlier guess:
-// 5 = commit, 6 = commit_close, 7 = claim, 8 upward = the SPEC §5.6.4 swap
-// legs. See decisions-m2.md §18. asset_op_valid stays bounded at
-// asset_receive, so a reserved number is still rejected on the wire.
+// The eight asset operations this node validates. M2 shipped the first five
+// (decisions-m2.md §0, §7, §11) and reserved the next three by number, because
+// the op byte is hashed and renumbering later invalidates every vector and
+// signature made against the earlier guess. M4 activates them at exactly the
+// reserved numbers (decisions-m2.md §18, decisions-m4.md §2). 8 upward stays
+// reserved for the SPEC §5.6.4 swap legs, and asset_op_valid stays bounded at
+// the last live op so a reserved number is still rejected on the wire.
 enum class asset_op : uint8_t
 {
 	issue = 0,
 	mint = 1,
 	burn = 2,
 	transfer = 3,
-	asset_receive = 4
+	asset_receive = 4,
+	commit = 5,
+	commit_close = 6,
+	claim = 7
 };
 /**
  * The domain separator every Kei block hash begins with, so that no Nano or
@@ -131,6 +133,14 @@ public:
 	// `mint` and `transfer` only (decisions-m2.md §8).
 	std::string memo;
 
+	// `commit` only: how many recipients the root covers. Informational — the
+	// node verifies one claimant's leaf and never enumerates the others — but
+	// it is signed, so an issuer cannot restate the size of a drop afterwards
+	// (decisions-m4.md §2).
+	uint32_t count{ 0 };
+	// `claim` only: the sibling hashes from the claimant's leaf to the root.
+	std::vector<nano::uint256_union> proof;
+
 	// Bounds, enforced here so a block that cannot be stored cannot be parsed
 	// either. The ledger repeats the ones that carry a user-facing message.
 	static std::size_t constexpr max_name = 64;
@@ -138,6 +148,8 @@ public:
 	static std::size_t constexpr max_description = 256;
 	static std::size_t constexpr max_image = 128;
 	static std::size_t constexpr max_memo = 128;
+	/** 2^48 leaves is more than any legitimate drop, and it bounds the payload. */
+	static std::size_t constexpr max_proof = 48;
 };
 
 /**
@@ -149,6 +161,29 @@ public:
 nano::uint256_union derive_asset_id (nano::public_key const &, std::string const & symbol);
 /** Uppercased and trimmed. Returns false if the symbol is not 1-20 of [A-Z0-9-]. */
 bool normalize_symbol (std::string const &, std::string &);
+
+/**
+ * One entitlement, hashed: this account, this asset, this amount, and nothing
+ * else (decisions-m4.md §3).
+ *
+ * SPEC §5.5 settles that a root commits to at most one leaf per recipient, so
+ * the recipient is the leaf's identity and the double-claim index needs no leaf
+ * index to key on. The leaf carries the asset id as well as the amount because a
+ * claim states both, and a leaf that bound only the amount would let a proof cut
+ * from one asset's drop be replayed against another's.
+ */
+nano::uint256_union asset_claim_leaf (nano::account const &, nano::uint256_union const & asset_id, nano::amount const &);
+/**
+ * Fold a leaf up through its siblings and return the root it implies.
+ *
+ * Interior pairs are ordered by value, so a proof is siblings alone with no
+ * direction bits to encode, disagree about, or forge. That trick is only safe
+ * when a leaf hash can never be read as an interior hash, which is what the two
+ * distinct domain separators in the implementation buy — without them a
+ * 64-byte "leaf" could be presented as an interior node and prove a membership
+ * the issuer never committed to.
+ */
+nano::uint256_union asset_claim_root (nano::uint256_union const & leaf, std::vector<nano::uint256_union> const & proof);
 class block_details
 {
 	static_assert (std::is_same<std::underlying_type<nano::epoch>::type, uint8_t> (), "Epoch enum is not the proper type");

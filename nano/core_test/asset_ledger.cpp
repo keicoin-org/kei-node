@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <limits>
 
 // The five asset operations, taken through nano::ledger::process and back out
@@ -80,6 +81,77 @@ issued_asset issue_one (nano::ledger & ledger_a, nano::store & store_a, nano::wo
 	EXPECT_EQ (nano::process_result::progress, ledger_a.process (transaction, *issued.block).code);
 	return issued;
 }
+
+/**
+ * The tree an issuer's SDK builds, and the proofs it hands out.
+ *
+ * Interior nodes are folded with the node's own helper rather than a second copy
+ * of the hashing rule, so a test proof is built by exactly the code that will
+ * later check it. The tree shape — pairs left to right, an odd node promoted —
+ * is this builder's business alone: the node folds whatever siblings it is
+ * given and never learns what shape produced them.
+ */
+class drop final
+{
+public:
+	explicit drop (std::vector<nano::uint256_union> const & leaves_a)
+	{
+		levels.push_back (leaves_a);
+		while (levels.back ().size () > 1)
+		{
+			auto const & below (levels.back ());
+			std::vector<nano::uint256_union> above;
+			for (std::size_t i (0); i < below.size (); i += 2)
+			{
+				above.push_back (i + 1 < below.size () ? nano::asset_claim_root (below[i], { below[i + 1] }) : below[i]);
+			}
+			levels.push_back (above);
+		}
+	}
+
+	/**
+	 * A `block_hash` rather than the `uint256_union` the tree is built from,
+	 * because a root travels in the block's `link` and that is the only 32-byte
+	 * type `nano::link` will take.
+	 */
+	nano::block_hash root () const
+	{
+		return nano::block_hash (levels.back ().front ().number ());
+	}
+
+	std::vector<nano::uint256_union> proof (std::size_t index_a) const
+	{
+		std::vector<nano::uint256_union> result;
+		for (std::size_t level (0); level + 1 < levels.size (); ++level, index_a /= 2)
+		{
+			auto const sibling (index_a ^ 1);
+			if (sibling < levels[level].size ())
+			{
+				result.push_back (levels[level][sibling]);
+			}
+		}
+		return result;
+	}
+
+private:
+	std::vector<std::vector<nano::uint256_union>> levels;
+};
+
+/** A claim payload carrying a proof, which is the only op that has one. */
+nano::asset_payload claim_payload (std::vector<nano::uint256_union> const & proof_a)
+{
+	nano::asset_payload payload;
+	payload.proof = proof_a;
+	return payload;
+}
+
+/** A commit payload, whose only field is the recipient count it declares. */
+nano::asset_payload commit_payload (uint32_t count_a)
+{
+	nano::asset_payload payload;
+	payload.count = count_a;
+	return payload;
+}
 }
 
 // Every op has to survive the record the block store writes — a type byte, the
@@ -152,7 +224,7 @@ TEST (asset_ledger, every_op_survives_the_record_the_store_writes)
 	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
 	nano::keypair key;
 
-	for (auto const op : { nano::asset_op::issue, nano::asset_op::mint, nano::asset_op::burn, nano::asset_op::transfer, nano::asset_op::asset_receive })
+	for (auto const op : { nano::asset_op::issue, nano::asset_op::mint, nano::asset_op::burn, nano::asset_op::transfer, nano::asset_op::asset_receive, nano::asset_op::commit, nano::asset_op::commit_close, nano::asset_op::claim })
 	{
 		SCOPED_TRACE (nano::asset_op_to_string (op));
 		nano::asset_payload payload;
@@ -164,8 +236,22 @@ TEST (asset_ledger, every_op_survives_the_record_the_store_writes)
 		{
 			payload.memo = "quest reward";
 		}
+		else if (op == nano::asset_op::commit)
+		{
+			payload.count = 4096;
+		}
+		else if (op == nano::asset_op::claim)
+		{
+			// A proof deep enough to catch a length prefix that only works for
+			// one sibling, and shallow enough to stay a unit test.
+			for (uint8_t depth (0); depth < 12; ++depth)
+			{
+				payload.proof.push_back (nano::uint256_union (depth + 1));
+			}
+		}
 		// An asset block can open an account, so one of these has no predecessor
-		// — the shape a player's first collect takes (§10).
+		// — the shape a player's first collect takes (§10), and the shape a
+		// player's first claim takes too (§5.5).
 		nano::block_hash const previous (op == nano::asset_op::asset_receive ? 0 : 7);
 		auto block (signed_asset (pool, key, previous, 1000, op, nano::derive_asset_id (key.pub, "GEM"), 5, 9, payload));
 		block->sideband_set (nano::block_sideband (key.pub, 0, 0, 1, nano::seconds_since_epoch (), nano::block_details (nano::epoch::epoch_0, false, false, false), nano::epoch::epoch_0));
@@ -353,6 +439,108 @@ TEST (asset_ledger, mint_cannot_exceed_max_supply)
 	nano::asset_info asset;
 	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
 	ASSERT_EQ (asset.max_supply, asset.circulating);
+}
+
+// The cap is checked with uint128 arithmetic, and uint128 wraps. Comparing
+// `circulating + amount` against the cap lets a large enough amount carry past
+// 2^128, compare small, and be credited as the wrapped remainder — a mint of
+// nearly 2^128 units against a cap of 1000, leaving the supply at zero. The
+// checks subtract instead, which cannot wrap.
+TEST (asset_ledger, minting_cannot_wrap_a_capped_supply)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const ceiling (std::numeric_limits<nano::uint128_t>::max ());
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto const balance (nano::amount (after_issuing (1)));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), balance, nano::asset_op::mint, issued.id, 600, player.pub));
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
+	}
+
+	// 600 + (2^128 - 599) is 2^128, which is zero in uint128.
+	auto wrapping (signed_asset (pool, nano::dev::team_key, mint->hash (), balance, nano::asset_op::mint, issued.id, nano::amount (ceiling - 599), player.pub));
+	auto exact (signed_asset (pool, nano::dev::team_key, mint->hash (), balance, nano::asset_op::mint, issued.id, 400, player.pub));
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *wrapping).code);
+
+		// Rejected means nothing moved: the supply is what it was, the block was
+		// never stored, and there is no receivable for anyone to collect.
+		nano::asset_info rejected;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, rejected));
+		ASSERT_EQ (nano::amount (600), rejected.circulating);
+		ASSERT_FALSE (store.block.exists (transaction, wrapping->hash ()));
+		ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, wrapping->hash ())));
+		auto const issuer (ledger.account_info (transaction, nano::dev::team_key.pub));
+		ASSERT_TRUE (issuer);
+		ASSERT_EQ (mint->hash (), issuer->head);
+
+		// And the headroom that is actually there is still spendable.
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *exact).code);
+	}
+
+	auto transaction (store.tx_begin_read ());
+	nano::asset_info asset;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+	ASSERT_EQ (nano::amount (1000), asset.circulating);
+}
+
+// An uncapped asset has no cap to compare against, which is exactly why the old
+// check skipped it: `!uncapped ()` short-circuited and the addition ran
+// unguarded. There is no cap but there is still a ceiling, and a mint that
+// crosses it must fail rather than roll the supply over to a small number.
+TEST (asset_ledger, minting_cannot_wrap_an_uncapped_supply)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const ceiling (std::numeric_limits<nano::uint128_t>::max ());
+	// A zero maxSupply is uncapped (SPEC §5.6.6).
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 0));
+	auto const balance (nano::amount (after_issuing (1)));
+	auto nearly_all (signed_asset (pool, nano::dev::team_key, issued.block->hash (), balance, nano::asset_op::mint, issued.id, nano::amount (ceiling - 10), player.pub));
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *nearly_all).code);
+		nano::asset_info asset;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+		ASSERT_TRUE (asset.uncapped ());
+		ASSERT_EQ (nano::amount (ceiling - 10), asset.circulating);
+	}
+
+	auto over (signed_asset (pool, nano::dev::team_key, nearly_all->hash (), balance, nano::asset_op::mint, issued.id, 11, player.pub));
+	auto exact (signed_asset (pool, nano::dev::team_key, nearly_all->hash (), balance, nano::asset_op::mint, issued.id, 10, player.pub));
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *over).code);
+
+		nano::asset_info rejected;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, rejected));
+		ASSERT_EQ (nano::amount (ceiling - 10), rejected.circulating);
+		ASSERT_FALSE (store.block.exists (transaction, over->hash ()));
+		ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, over->hash ())));
+
+		// The last ten units that fit still fit: the guard is off by nothing.
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *exact).code);
+		nano::asset_info asset;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+		ASSERT_EQ (nano::amount (ceiling), asset.circulating);
+
+		// With the supply at the ceiling, one more unit has nowhere to go.
+		auto beyond (signed_asset (pool, nano::dev::team_key, exact->hash (), balance, nano::asset_op::mint, issued.id, 1, player.pub));
+		ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *beyond).code);
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+		ASSERT_EQ (nano::amount (ceiling), asset.circulating);
+	}
 }
 
 // SPEC §5.6.6: maxSupply caps what exists at once, so burning frees headroom to
@@ -616,4 +804,604 @@ TEST (asset_ledger, rolling_back_a_collect_makes_it_receivable_again)
 	nano::asset_info asset;
 	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
 	ASSERT_EQ (nano::amount (500), asset.circulating);
+}
+
+// The claim model (SPEC §5.5). Everything below is about the one property that
+// makes it worth having: the issuer writes one block, and the claims that block
+// underwrites are written by other accounts, in parallel, on their own chains.
+
+// The headline case. Three players, one issuer block, three claims — and the
+// issuer's chain is one block longer at the end of it, not three.
+TEST (asset_ledger, one_issuer_block_underwrites_claims_from_many_accounts)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	std::array<nano::keypair, 3> players;
+	std::array<nano::uint128_t, 3> const amounts{ 100, 250, 550 };
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	std::vector<nano::uint256_union> leaves;
+	for (std::size_t i (0); i < players.size (); ++i)
+	{
+		leaves.push_back (nano::asset_claim_leaf (players[i].pub, issued.id, nano::amount (amounts[i])));
+	}
+	drop const tree (leaves);
+
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 900, tree.root (), commit_payload (3)));
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+	}
+	{
+		auto transaction (store.tx_begin_read ());
+		nano::asset_commit_info published;
+		ASSERT_FALSE (store.asset.commit_get (transaction, tree.root (), published));
+		ASSERT_EQ (nano::dev::team_key.pub, published.issuer);
+		ASSERT_EQ (issued.id, published.asset_id);
+		ASSERT_EQ (3, published.count);
+		ASSERT_EQ (nano::amount (900), published.total);
+		ASSERT_EQ (commit->hash (), published.block);
+		ASSERT_FALSE (published.closed);
+		// Committing to a drop creates nothing. The units exist only once someone
+		// claims them, which is what makes an unclaimed entitlement free.
+		nano::asset_info asset;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+		ASSERT_TRUE (asset.circulating.is_zero ());
+	}
+
+	// Each claim opens its player's account: a player who has never held Kei can
+	// claim, and pays no Kei to do it.
+	for (std::size_t i (0); i < players.size (); ++i)
+	{
+		SCOPED_TRACE (i);
+		auto claim (signed_asset (pool, players[i], 0, 0, nano::asset_op::claim, issued.id, nano::amount (amounts[i]), tree.root (), claim_payload (tree.proof (i))));
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *claim).code);
+		ASSERT_EQ (claim->hash (), ledger.latest (transaction, players[i].pub));
+	}
+
+	auto transaction (store.tx_begin_read ());
+	nano::asset_info asset;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+	ASSERT_EQ (nano::amount (900), asset.circulating);
+	for (std::size_t i (0); i < players.size (); ++i)
+	{
+		SCOPED_TRACE (i);
+		ASSERT_EQ (nano::amount (amounts[i]), store.asset.balance (transaction, players[i].pub, issued.id));
+		ASSERT_TRUE (store.asset.claim_exists (transaction, players[i].pub, tree.root ()));
+		// SPEC §5.6.2 again, and it matters more here than anywhere: a drop that
+		// bought weight would let an issuer mint themselves a majority.
+		ASSERT_EQ (nano::uint128_t (0), ledger.weight (players[i].pub));
+	}
+
+	// The point of the whole mechanism: the issuer signed one block for three
+	// recipients, and would have signed one for three million.
+	auto const issuer_info (ledger.account_info (transaction, nano::dev::team_key.pub));
+	ASSERT_TRUE (issuer_info);
+	ASSERT_EQ (commit->hash (), issuer_info->head);
+}
+
+// One leaf per account per root, claimed once (SPEC §5.5). Without this the same
+// proof is a licence to print the asset.
+TEST (asset_ledger, a_claim_cannot_be_made_twice)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	drop const tree ({ nano::asset_claim_leaf (player.pub, issued.id, nano::amount (500)) });
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 500, tree.root (), commit_payload (1)));
+	auto claim (signed_asset (pool, player, 0, 0, nano::asset_op::claim, issued.id, 500, tree.root (), claim_payload (tree.proof (0))));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *claim).code);
+
+	// A second claim from the same account against the same root, with a
+	// perfectly valid proof, and it is still refused.
+	auto again (signed_asset (pool, player, claim->hash (), 0, nano::asset_op::claim, issued.id, 500, tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::already_claimed, ledger.process (transaction, *again).code);
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+}
+
+// A proof proves one account is owed one amount of one asset. Change any of the
+// three and it proves nothing.
+TEST (asset_ledger, a_proof_only_proves_the_leaf_it_was_cut_from)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+	nano::keypair thief;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 10000));
+	drop const tree ({ nano::asset_claim_leaf (player.pub, issued.id, nano::amount (500)),
+	nano::asset_claim_leaf (thief.pub, issued.id, nano::amount (1)) });
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 501, tree.root (), commit_payload (2)));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+
+	// The thief's own proof, for the amount the other player was owed.
+	auto inflated (signed_asset (pool, thief, 0, 0, nano::asset_op::claim, issued.id, 500, tree.root (), claim_payload (tree.proof (1))));
+	ASSERT_EQ (nano::process_result::bad_claim_proof, ledger.process (transaction, *inflated).code);
+
+	// Someone else's proof, presented by the thief.
+	auto stolen (signed_asset (pool, thief, 0, 0, nano::asset_op::claim, issued.id, 1, tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::bad_claim_proof, ledger.process (transaction, *stolen).code);
+
+	// No proof at all, which is the shape that works if a root is ever allowed
+	// to equal a leaf it did not commit to.
+	auto bare (signed_asset (pool, thief, 0, 0, nano::asset_op::claim, issued.id, 1, tree.root (), claim_payload ({})));
+	ASSERT_EQ (nano::process_result::bad_claim_proof, ledger.process (transaction, *bare).code);
+
+	// The honest claim still works, so the rejections above are about the proofs
+	// and not about the root.
+	auto honest (signed_asset (pool, player, 0, 0, nano::asset_op::claim, issued.id, 500, tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *honest).code);
+}
+
+// A leaf hash must never be readable as an interior node. Sorted pairs are what
+// let a proof be siblings alone, and this is the attack that trick invites: fold
+// two leaves by hand, present the pair as a leaf, and claim the parent.
+TEST (asset_ledger, a_leaf_cannot_be_passed_off_as_an_interior_node)
+{
+	nano::keypair player;
+	auto const asset_id (nano::derive_asset_id (player.pub, "GEM"));
+	auto const leaf (nano::asset_claim_leaf (player.pub, asset_id, nano::amount (500)));
+	auto const sibling (nano::asset_claim_leaf (player.pub, asset_id, nano::amount (501)));
+
+	// Folding is order-independent, which is the property that removes direction
+	// bits from the proof.
+	ASSERT_EQ (nano::asset_claim_root (leaf, { sibling }), nano::asset_claim_root (sibling, { leaf }));
+
+	// And the two domains are genuinely separate: the interior node over a pair
+	// is not the leaf of anything, so no leaf can be constructed to equal it.
+	auto const parent (nano::asset_claim_root (leaf, { sibling }));
+	ASSERT_NE (parent, leaf);
+	ASSERT_NE (parent, sibling);
+	ASSERT_EQ (parent, nano::asset_claim_root (parent, {}));
+}
+
+namespace
+{
+/**
+ * Cross-language claim vectors, generated by running kei-transaction's own
+ * `packages/core/src/merkle.ts` (`leafHash` / `combineHashes`) — the frozen
+ * contract `@keicoin/claims` proofs are built against — and independently
+ * cross-checked against a second, unrelated BLAKE2b implementation
+ * (`@noble/hashes`) before being pinned here. This node computed leaves and
+ * roots that disagreed with every one of these, silently, because a domain
+ * separator was hashed instead of sent as the SDK's literal `0x00`/`0x01`
+ * tag byte (docs/decisions-m4.md §3). These tests exist so that regressing
+ * the tag, the field order, or the amount width fails loudly instead of as
+ * `bad_claim_proof` on a real network.
+ */
+nano::uint256_union hash32 (std::string const & hex_a)
+{
+	nano::uint256_union result;
+	release_assert (!result.decode_hex (hex_a));
+	return result;
+}
+
+nano::account account32 (std::string const & hex_a)
+{
+	nano::account result;
+	release_assert (!result.decode_hex (hex_a));
+	return result;
+}
+
+nano::amount amount_dec (std::string const & dec_a)
+{
+	nano::amount result;
+	release_assert (!result.decode_dec (dec_a));
+	return result;
+}
+
+nano::uint256_union const sdk_asset (hash32 ("FEEDFACEFEEDFACEFEEDFACEFEEDFACEFEEDFACEFEEDFACEFEEDFACEFEEDFACE"));
+nano::uint256_union const sdk_asset2 (hash32 ("C0FFEE00C0FFEE00C0FFEE00C0FFEE00C0FFEE00C0FFEE00C0FFEE00C0FFEE00"));
+}
+
+TEST (asset_ledger, claim_leaf_matches_the_frozen_sdk_vectors)
+{
+	// A single leaf, and its sibling from the two-leaf vector below.
+	ASSERT_EQ (hash32 ("1402721BF99B3726B51D10011B1F8567C3F475E7C96229B5B17B913E4F852205"),
+	nano::asset_claim_leaf (account32 ("A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1"), sdk_asset, nano::amount (500)));
+	ASSERT_EQ (hash32 ("747B2A828015083E0D690A6D682F83C911681F0D704FD63EE111DDDD62D9D6AE"),
+	nano::asset_claim_leaf (account32 ("B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2"), sdk_asset, nano::amount (1)));
+
+	// Boundary amounts: zero, and the largest value a 128-bit amount can hold.
+	// The amount is 16 bytes on both sides of the wire (SPEC §5.4); this is
+	// the check that neither end silently truncates or sign-extends it.
+	ASSERT_EQ (hash32 ("CC51FF1614DEAE1F581B9FD1B71C199756630A9DA179D57249D3708BA1B8E63E"),
+	nano::asset_claim_leaf (account32 ("A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1"), sdk_asset, nano::amount (0)));
+	ASSERT_EQ (hash32 ("20DAF936F09E33045B0E02ED26E4EBA5F1AD31D42555B64D118643AAD60DCB77"),
+	nano::asset_claim_leaf (account32 ("A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1"), sdk_asset, amount_dec ("340282366920938463463374607431768211455")));
+
+	// Same account and amount, different asset: a different leaf (§3's
+	// "the leaf binds the asset id, not just the amount").
+	ASSERT_NE (nano::asset_claim_leaf (account32 ("A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1"), sdk_asset, nano::amount (500)),
+	nano::asset_claim_leaf (account32 ("A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1"), sdk_asset2, nano::amount (500)));
+}
+
+// A one-leaf drop: the proof is empty and the root equals the leaf itself —
+// the only shape that produces the JSON `[]` decisions-m4.md §8.3 describes.
+TEST (asset_ledger, claim_root_of_an_empty_proof_is_the_leaf_itself)
+{
+	auto const leaf (hash32 ("721B73BEC584F7433AD9A1130D90A0F6D05342BD32B51139C921B3AAE93E072B"));
+	ASSERT_EQ (leaf, nano::asset_claim_root (leaf, {}));
+}
+
+// A two-leaf drop: the proof is exactly one sibling, and folds to the same
+// root regardless of which side of the pair supplies it.
+TEST (asset_ledger, claim_root_of_a_two_leaf_drop_matches_the_sdk)
+{
+	auto const leaf_a (hash32 ("1402721BF99B3726B51D10011B1F8567C3F475E7C96229B5B17B913E4F852205"));
+	auto const leaf_b (hash32 ("747B2A828015083E0D690A6D682F83C911681F0D704FD63EE111DDDD62D9D6AE"));
+	auto const root (hash32 ("4D92EF46B7C8DD62A4A36EB099322AFFA64B54D990279244D4C424604B14B574"));
+	ASSERT_EQ (root, nano::asset_claim_root (leaf_a, { leaf_b }));
+	ASSERT_EQ (root, nano::asset_claim_root (leaf_b, { leaf_a }));
+}
+
+// A five-leaf drop, pairwise left to right with the odd node promoted at the
+// top (the SDK's own tree shape — this node never chooses one, §3), checked
+// with every leaf's own multi-level proof rather than just the first.
+TEST (asset_ledger, claim_root_of_a_five_leaf_drop_matches_the_sdk)
+{
+	auto const leaf0 (hash32 ("A2894133746AB705360EDADC89D9B6758B8E4B725F4E083314B06637E5842D1C"));
+	auto const leaf1 (hash32 ("8876712DF6EE23B2ADA3EE69E08BA7D551614E511DEC0729091A5B5980FA57A4"));
+	auto const leaf2 (hash32 ("088F6D869E5B1E6721A5D21B982D46A8B3A1119D934732F45E07EFFD212B09A5"));
+	auto const leaf3 (hash32 ("B558332403A2D64B56E7418D59835AC235BAC53F2AB17A10775CDEF71C9A8DCF"));
+	auto const leaf4 (hash32 ("B1BD7E140EF0A09533D996AA089F029427E3AC8D235257C40B84259A9FDFAE5C"));
+	auto const level1_01 (hash32 ("9D9735E537D629E9223EB4A22E29265D965CB4257A6EC4E0D898856785AA93F8"));
+	auto const level1_23 (hash32 ("805ECA323809743F128B5258EB3EFF61E00E5A018F1745BCECA048D43AF89826"));
+	auto const level2_0123 (hash32 ("E4B60B003BCF33F8D2D6F019B9AA5D3E98D9072ED728E9DA4361B35F2C106A1A"));
+	auto const root (hash32 ("D52BC3EBFF47B0D5E7DF0739250E53E71C82D210D06169F20338B3A397E7D53C"));
+
+	ASSERT_EQ (root, nano::asset_claim_root (leaf0, { leaf1, level1_23, leaf4 }));
+	ASSERT_EQ (root, nano::asset_claim_root (leaf1, { leaf0, level1_23, leaf4 }));
+	ASSERT_EQ (root, nano::asset_claim_root (leaf2, { leaf3, level1_01, leaf4 }));
+	ASSERT_EQ (root, nano::asset_claim_root (leaf3, { leaf2, level1_01, leaf4 }));
+	ASSERT_EQ (root, nano::asset_claim_root (leaf4, { level2_0123 }));
+}
+
+// End to end: a claim built entirely from values the frozen SDK produced —
+// the leaf, the root, and the (empty, single-leaf) proof — going through the
+// real validation path (`ledger::process`), not just the hash functions
+// above. This is the shape that was actually broken: every proof
+// `@keicoin/claims` produces failed here with `bad_claim_proof` until the
+// domain separator matched the SDK's exactly.
+TEST (asset_ledger, an_sdk_produced_claim_proof_is_accepted_end_to_end)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+
+	// `nano::dev::team_key` is the same fixed issuer `issue_one` uses
+	// elsewhere in this file, so the asset id it derives here is exactly what
+	// the SDK computed offline from the same key and symbol.
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	ASSERT_EQ (hash32 ("C103556DE3F72E4C23FA8D338A202C2BE5F3FD596ABB636323A04B9C41752017"), issued.id);
+
+	nano::keypair const player ("AA00AA00AA00AA00AA00AA00AA00AA00AA00AA00AA00AA00AA00AA00AA00AA00");
+	ASSERT_EQ (account32 ("DECD65070C4EF8AE1AC04E6581A95F0FEFA0602F1761D2E70DA848285988857E"), player.pub);
+
+	auto const leaf (hash32 ("721B73BEC584F7433AD9A1130D90A0F6D05342BD32B51139C921B3AAE93E072B"));
+	ASSERT_EQ (leaf, nano::asset_claim_leaf (player.pub, issued.id, nano::amount (500)));
+	nano::block_hash const root (leaf.number ());
+
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 500, root, commit_payload (1)));
+	auto claim (signed_asset (pool, player, 0, 0, nano::asset_op::claim, issued.id, 500, root, claim_payload ({})));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *claim).code);
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+}
+
+// Roots are closed by the issuer, not by a clock (SPEC §5.5). A block-lattice
+// has no clock to close them with.
+TEST (asset_ledger, a_closed_root_accepts_no_further_claims)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair early;
+	nano::keypair late;
+	nano::keypair stranger;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	drop const tree ({ nano::asset_claim_leaf (early.pub, issued.id, nano::amount (100)),
+	nano::asset_claim_leaf (late.pub, issued.id, nano::amount (200)) });
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 300, tree.root (), commit_payload (2)));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+	auto claimed (signed_asset (pool, early, 0, 0, nano::asset_op::claim, issued.id, 100, tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *claimed).code);
+
+	// Only the issuer may close, and closing is a statement about the root alone.
+	auto trespass (signed_asset (pool, stranger, 0, 0, nano::asset_op::commit_close, 0, 0, tree.root ()));
+	ASSERT_EQ (nano::process_result::not_issuer, ledger.process (transaction, *trespass).code);
+
+	auto close (signed_asset (pool, nano::dev::team_key, commit->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit_close, 0, 0, tree.root ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *close).code);
+	nano::asset_commit_info published;
+	ASSERT_FALSE (store.asset.commit_get (transaction, tree.root (), published));
+	ASSERT_TRUE (published.closed);
+
+	// The unclaimed entitlement is now unclaimable, which is the cost the issuer
+	// accepted in exchange for the root becoming prunable.
+	auto too_late (signed_asset (pool, late, 0, 0, nano::asset_op::claim, issued.id, 200, tree.root (), claim_payload (tree.proof (1))));
+	ASSERT_EQ (nano::process_result::commit_closed, ledger.process (transaction, *too_late).code);
+
+	// Closing twice would be a block that changes nothing.
+	auto close_again (signed_asset (pool, nano::dev::team_key, close->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit_close, 0, 0, tree.root ()));
+	ASSERT_EQ (nano::process_result::commit_closed, ledger.process (transaction, *close_again).code);
+
+	// What was claimed before the close stays claimed.
+	ASSERT_EQ (nano::amount (100), store.asset.balance (transaction, early.pub, issued.id));
+}
+
+// Only the asset's issuer can underwrite a drop of it — which is also what makes
+// racing an issuer to publish their root impossible rather than merely hard.
+TEST (asset_ledger, only_the_issuer_can_commit_a_root)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair impostor;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	drop const tree ({ nano::asset_claim_leaf (impostor.pub, issued.id, nano::amount (500)) });
+
+	auto transaction (store.tx_begin_write ());
+	auto forged (signed_asset (pool, impostor, 0, 0, nano::asset_op::commit, issued.id, 500, tree.root (), commit_payload (1)));
+	ASSERT_EQ (nano::process_result::not_issuer, ledger.process (transaction, *forged).code);
+
+	// And a root nobody published underwrites nothing.
+	auto orphan (signed_asset (pool, impostor, 0, 0, nano::asset_op::claim, issued.id, 500, tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::no_such_commit, ledger.process (transaction, *orphan).code);
+
+	// Republishing a root the issuer already published would reopen it.
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 500, tree.root (), commit_payload (1)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+	auto twice (signed_asset (pool, nano::dev::team_key, commit->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 500, tree.root (), commit_payload (1)));
+	ASSERT_EQ (nano::process_result::commit_exists, ledger.process (transaction, *twice).code);
+}
+
+// The cap binds where units come into existence, and for a drop that is the
+// claim rather than the commit — the node cannot know what a root adds up to.
+TEST (asset_ledger, claims_cannot_exceed_max_supply)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair lucky;
+	nano::keypair unlucky;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 100));
+	drop const tree ({ nano::asset_claim_leaf (lucky.pub, issued.id, nano::amount (60)),
+	nano::asset_claim_leaf (unlucky.pub, issued.id, nano::amount (60)) });
+	// The issuer over-committed. Nothing here is checkable at commit time.
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 120, tree.root (), commit_payload (2)));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+
+	auto first (signed_asset (pool, lucky, 0, 0, nano::asset_op::claim, issued.id, 60, tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *first).code);
+
+	// Whoever claims second finds the cap already spent. This is the issuer's
+	// mistake surfacing at the only place the node can see it.
+	auto second (signed_asset (pool, unlucky, 0, 0, nano::asset_op::claim, issued.id, 60, tree.root (), claim_payload (tree.proof (1))));
+	ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *second).code);
+}
+
+// The claim path carries the same uint128 sum as the mint, and a leaf's amount
+// is whatever the issuer put in the tree — nothing bounds it below 2^128. A
+// wrapping claim would leave its claimant holding nearly the whole numeric range
+// of an asset capped at 100, and the recorded supply at zero.
+TEST (asset_ledger, claiming_cannot_wrap_a_capped_supply)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair lucky;
+	nano::keypair greedy;
+	nano::keypair last;
+
+	auto const ceiling (std::numeric_limits<nano::uint128_t>::max ());
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 100));
+	// 60 + (2^128 - 59) is 2^128, which is zero in uint128.
+	drop const tree ({ nano::asset_claim_leaf (lucky.pub, issued.id, nano::amount (60)),
+	nano::asset_claim_leaf (greedy.pub, issued.id, nano::amount (ceiling - 59)),
+	nano::asset_claim_leaf (last.pub, issued.id, nano::amount (40)) });
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, nano::amount (ceiling), tree.root (), commit_payload (3)));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+
+	auto first (signed_asset (pool, lucky, 0, 0, nano::asset_op::claim, issued.id, 60, tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *first).code);
+
+	auto wrapping (signed_asset (pool, greedy, 0, 0, nano::asset_op::claim, issued.id, nano::amount (ceiling - 59), tree.root (), claim_payload (tree.proof (1))));
+	ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *wrapping).code);
+
+	// Nothing was credited and nothing was recorded, so the supply still says
+	// what the first claim left it saying.
+	nano::asset_info rejected;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, rejected));
+	ASSERT_EQ (nano::amount (60), rejected.circulating);
+	ASSERT_TRUE (store.asset.balance (transaction, greedy.pub, issued.id).is_zero ());
+	ASSERT_EQ (0, store.asset.holdings_count (transaction, greedy.pub));
+	ASSERT_FALSE (store.asset.claim_exists (transaction, greedy.pub, tree.root ()));
+	ASSERT_FALSE (store.block.exists (transaction, wrapping->hash ()));
+	ASSERT_FALSE (ledger.account_info (transaction, greedy.pub));
+
+	// The honest leaf behind it still claims the headroom that is really there.
+	auto third (signed_asset (pool, last, 0, 0, nano::asset_op::claim, issued.id, 40, tree.root (), claim_payload (tree.proof (2))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *third).code);
+	nano::asset_info asset;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+	ASSERT_EQ (nano::amount (100), asset.circulating);
+	ASSERT_EQ (nano::amount (40), store.asset.balance (transaction, last.pub, issued.id));
+}
+
+// And uncapped on the claim side too, where the old check was skipped outright.
+TEST (asset_ledger, claiming_cannot_wrap_an_uncapped_supply)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair whale;
+	nano::keypair greedy;
+	nano::keypair last;
+
+	auto const ceiling (std::numeric_limits<nano::uint128_t>::max ());
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 0));
+	drop const tree ({ nano::asset_claim_leaf (whale.pub, issued.id, nano::amount (ceiling - 10)),
+	nano::asset_claim_leaf (greedy.pub, issued.id, nano::amount (11)),
+	nano::asset_claim_leaf (last.pub, issued.id, nano::amount (10)) });
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, nano::amount (ceiling), tree.root (), commit_payload (3)));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+
+	auto first (signed_asset (pool, whale, 0, 0, nano::asset_op::claim, issued.id, nano::amount (ceiling - 10), tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *first).code);
+
+	auto over (signed_asset (pool, greedy, 0, 0, nano::asset_op::claim, issued.id, 11, tree.root (), claim_payload (tree.proof (1))));
+	ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *over).code);
+
+	nano::asset_info rejected;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, rejected));
+	ASSERT_EQ (nano::amount (ceiling - 10), rejected.circulating);
+	ASSERT_TRUE (store.asset.balance (transaction, greedy.pub, issued.id).is_zero ());
+	ASSERT_FALSE (store.asset.claim_exists (transaction, greedy.pub, tree.root ()));
+	ASSERT_FALSE (store.block.exists (transaction, over->hash ()));
+
+	// Ten fits where eleven did not.
+	auto exact (signed_asset (pool, last, 0, 0, nano::asset_op::claim, issued.id, 10, tree.root (), claim_payload (tree.proof (2))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *exact).code);
+	nano::asset_info asset;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+	ASSERT_EQ (nano::amount (ceiling), asset.circulating);
+}
+
+TEST (asset_ledger, rolling_back_a_claim_returns_the_units_and_the_entitlement)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	drop const tree ({ nano::asset_claim_leaf (player.pub, issued.id, nano::amount (500)) });
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 500, tree.root (), commit_payload (1)));
+	auto claim (signed_asset (pool, player, 0, 0, nano::asset_op::claim, issued.id, 500, tree.root (), claim_payload (tree.proof (0))));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *claim).code);
+	ASSERT_FALSE (ledger.rollback (transaction, claim->hash ()));
+
+	// The units are gone, the supply they added is gone, and the account is back
+	// to never having existed.
+	ASSERT_TRUE (store.asset.balance (transaction, player.pub, issued.id).is_zero ());
+	ASSERT_EQ (0, store.asset.holdings_count (transaction, player.pub));
+	nano::asset_info asset;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+	ASSERT_TRUE (asset.circulating.is_zero ());
+	ASSERT_FALSE (ledger.account_info (transaction, player.pub));
+
+	// And the entitlement is claimable again, because a rolled-back claim never
+	// happened. A double-claim record that outlived its block would strand it.
+	ASSERT_FALSE (store.asset.claim_exists (transaction, player.pub, tree.root ()));
+	auto retry (signed_asset (pool, player, 0, 0, nano::asset_op::claim, issued.id, 500, tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *retry).code);
+}
+
+// The one rollback with no precedent in M2: the commit block loses a fork, and
+// the claims it underwrote are on chains this ledger cannot enumerate from the
+// commit itself. They come off first, oldest-account-last, or the ledger keeps
+// balances that nothing backs.
+TEST (asset_ledger, rolling_back_a_commit_takes_its_claims_with_it)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	std::array<nano::keypair, 2> players;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	drop const tree ({ nano::asset_claim_leaf (players[0].pub, issued.id, nano::amount (100)),
+	nano::asset_claim_leaf (players[1].pub, issued.id, nano::amount (200)) });
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 300, tree.root (), commit_payload (2)));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+	auto first (signed_asset (pool, players[0], 0, 0, nano::asset_op::claim, issued.id, 100, tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *first).code);
+	auto second (signed_asset (pool, players[1], 0, 0, nano::asset_op::claim, issued.id, 200, tree.root (), claim_payload (tree.proof (1))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *second).code);
+
+	// One player has since spent part of what they claimed, so their claim is no
+	// longer their frontier — the rollback has to walk their chain back to it.
+	auto spent (signed_asset (pool, players[1], second->hash (), 0, nano::asset_op::burn, issued.id, 50, 0));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *spent).code);
+
+	ASSERT_FALSE (ledger.rollback (transaction, commit->hash ()));
+
+	nano::asset_commit_info published;
+	ASSERT_TRUE (store.asset.commit_get (transaction, tree.root (), published));
+	for (auto const & player : players)
+	{
+		ASSERT_TRUE (store.asset.balance (transaction, player.pub, issued.id).is_zero ());
+		ASSERT_FALSE (store.asset.claim_exists (transaction, player.pub, tree.root ()));
+		ASSERT_FALSE (ledger.account_info (transaction, player.pub));
+	}
+	nano::asset_info asset;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+	ASSERT_TRUE (asset.circulating.is_zero ());
+	// The issuance underneath is untouched: only the drop was rolled back.
+	ASSERT_EQ (issued.block->hash (), ledger.latest (transaction, nano::dev::team_key.pub));
+}
+
+TEST (asset_ledger, rolling_back_a_close_reopens_the_root)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	drop const tree ({ nano::asset_claim_leaf (player.pub, issued.id, nano::amount (500)) });
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 500, tree.root (), commit_payload (1)));
+	auto close (signed_asset (pool, nano::dev::team_key, commit->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit_close, 0, 0, tree.root ()));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *close).code);
+	ASSERT_FALSE (ledger.rollback (transaction, close->hash ()));
+
+	nano::asset_commit_info published;
+	ASSERT_FALSE (store.asset.commit_get (transaction, tree.root (), published));
+	ASSERT_FALSE (published.closed);
+	auto claim (signed_asset (pool, player, 0, 0, nano::asset_op::claim, issued.id, 500, tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *claim).code);
 }

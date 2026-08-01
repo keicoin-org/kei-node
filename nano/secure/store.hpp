@@ -131,6 +131,16 @@ public:
 		convert_buffer_to_value ();
 	}
 
+	db_val (nano::asset_commit_info const & val_a) :
+		buffer (std::make_shared<std::vector<uint8_t>> ())
+	{
+		{
+			nano::vectorstream stream (*buffer);
+			val_a.serialize (stream);
+		}
+		convert_buffer_to_value ();
+	}
+
 	db_val (nano::confirmation_height_info const & val_a) :
 		buffer (std::make_shared<std::vector<uint8_t>> ())
 	{
@@ -247,6 +257,16 @@ public:
 	{
 		nano::bufferstream stream (reinterpret_cast<uint8_t const *> (data ()), size ());
 		nano::asset_pending_info result;
+		bool error (result.deserialize (stream));
+		(void)error;
+		debug_assert (!error);
+		return result;
+	}
+
+	explicit operator nano::asset_commit_info () const
+	{
+		nano::bufferstream stream (reinterpret_cast<uint8_t const *> (data ()), size ());
+		nano::asset_commit_info result;
 		bool error (result.deserialize (stream));
 		(void)error;
 		debug_assert (!error);
@@ -563,6 +583,9 @@ private:
 enum class tables
 {
 	accounts,
+	asset_claim_roots,
+	asset_claims,
+	asset_commits,
 	asset_pending,
 	assets,
 	blocks,
@@ -753,6 +776,42 @@ public:
 	virtual nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_begin (nano::transaction const &, nano::pending_key const &) const = 0;
 	virtual nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_begin (nano::transaction const &) const = 0;
 	virtual nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_end () const = 0;
+
+	/**
+	 * Published roots, keyed by the root itself.
+	 *
+	 * This is the one asset table that is not keyed by an account, and it has to
+	 * be: a claim block names a root and nothing else about the drop, so the
+	 * lookup a claim needs is root-to-record. It is bounded by issuer writes
+	 * rather than by player writes, and `commit_close` is what lets it shrink
+	 * (SPEC §5.5).
+	 */
+	virtual void commit_put (nano::write_transaction const &, nano::uint256_union const & root, nano::asset_commit_info const &) = 0;
+	virtual bool commit_get (nano::transaction const &, nano::uint256_union const & root, nano::asset_commit_info &) = 0;
+	virtual void commit_del (nano::write_transaction const &, nano::uint256_union const & root) = 0;
+	virtual bool commit_exists (nano::transaction const &, nano::uint256_union const & root) = 0;
+	virtual nano::store_iterator<nano::uint256_union, nano::asset_commit_info> commit_begin (nano::transaction const &, nano::uint256_union const & root) const = 0;
+	virtual nano::store_iterator<nano::uint256_union, nano::asset_commit_info> commit_begin (nano::transaction const &) const = 0;
+	virtual nano::store_iterator<nano::uint256_union, nano::asset_commit_info> commit_end () const = 0;
+
+	/**
+	 * The double-claim record, written to both orderings at once for the same
+	 * reason `holdings` and `holders` are: one ordering answers validation's
+	 * question and the other answers rollback's, and a writer that could update
+	 * one without the other is the only way they could ever disagree.
+	 *
+	 * The value is the claiming block's hash, so a wallet asking "did I claim
+	 * this, and where" gets both answers from the record it already had to read.
+	 */
+	virtual void claim_put (nano::write_transaction const &, nano::account const &, nano::uint256_union const & root, nano::block_hash const &) = 0;
+	virtual void claim_del (nano::write_transaction const &, nano::account const &, nano::uint256_union const & root) = 0;
+	virtual bool claim_exists (nano::transaction const &, nano::account const &, nano::uint256_union const & root) = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::block_hash> claims_begin (nano::transaction const &, nano::asset_key const &) const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::block_hash> claims_begin (nano::transaction const &) const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::block_hash> claims_end () const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_begin (nano::transaction const &, nano::asset_key const &) const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_begin (nano::transaction const &) const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_end () const = 0;
 };
 
 /**

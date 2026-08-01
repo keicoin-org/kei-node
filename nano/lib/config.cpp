@@ -119,11 +119,18 @@ uint64_t nano::work_thresholds::threshold_asset (nano::asset_op const op_a) cons
 	{
 		case nano::asset_op::issue:
 		case nano::asset_op::mint:
+		case nano::asset_op::commit:
+		case nano::asset_op::commit_close:
 			return tier_a;
 		case nano::asset_op::transfer:
 			return tier_b ();
 		case nano::asset_op::burn:
 		case nano::asset_op::asset_receive:
+		// SPEC §5.6.4 puts `claim` in the cheap tier deliberately: §5.5's whole
+		// design depends on a thousand players claiming at once without a
+		// visible pause, and a claim can only materialise an entitlement an
+		// issuer already committed to.
+		case nano::asset_op::claim:
 			return tier_c ();
 	}
 	debug_assert (false && "Invalid asset op specified to threshold_asset");

@@ -1,6 +1,7 @@
 #include <nano/crypto_lib/random_pool.hpp>
 #include <nano/lib/blocks.hpp>
 #include <nano/lib/convert.hpp>
+#include <nano/lib/json_response.hpp>
 #include <nano/lib/memory.hpp>
 #include <nano/lib/numbers.hpp>
 #include <nano/lib/threading.hpp>
@@ -12,6 +13,7 @@
 
 #include <bitset>
 #include <cstring>
+#include <limits>
 
 #include <cryptopp/words.h>
 
@@ -1379,7 +1381,7 @@ void nano::state_block::signature_set (nano::signature const & signature_a)
 
 bool nano::asset_op_valid (uint8_t raw_a)
 {
-	return raw_a <= static_cast<uint8_t> (nano::asset_op::asset_receive);
+	return raw_a <= static_cast<uint8_t> (nano::asset_op::claim);
 }
 
 char const * nano::asset_op_to_string (nano::asset_op op_a)
@@ -1396,6 +1398,12 @@ char const * nano::asset_op_to_string (nano::asset_op op_a)
 			return "transfer";
 		case nano::asset_op::asset_receive:
 			return "asset_receive";
+		case nano::asset_op::commit:
+			return "commit";
+		case nano::asset_op::commit_close:
+			return "commit_close";
+		case nano::asset_op::claim:
+			return "claim";
 	}
 	return "invalid";
 }
@@ -1422,6 +1430,18 @@ bool nano::asset_op_from_string (std::string const & text_a, nano::asset_op & op
 	else if (text_a == "asset_receive")
 	{
 		op_a = nano::asset_op::asset_receive;
+	}
+	else if (text_a == "commit")
+	{
+		op_a = nano::asset_op::commit;
+	}
+	else if (text_a == "commit_close")
+	{
+		op_a = nano::asset_op::commit_close;
+	}
+	else if (text_a == "claim")
+	{
+		op_a = nano::asset_op::claim;
 	}
 	else
 	{
@@ -1615,9 +1635,56 @@ nano::uint256_union nano::derive_asset_id (nano::public_key const & issuer_a, st
 	return result;
 }
 
+namespace
+{
+/**
+ * The two separators that keep a leaf from ever being read as an interior
+ * node. This is the frozen SDK's own encoding (`packages/core/src/merkle.ts`
+ * in kei-transaction): a single tag byte, not a hashed label. The two must
+ * match bit for bit, because the SDK builds the tree and the node only
+ * verifies against it — there is no negotiation between them.
+ */
+constexpr uint8_t claim_leaf_tag = 0x00;
+constexpr uint8_t claim_node_tag = 0x01;
+}
+
+nano::uint256_union nano::asset_claim_leaf (nano::account const & account_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a)
+{
+	nano::uint256_union result;
+	blake2b_state hash;
+	auto status (blake2b_init (&hash, sizeof (result.bytes)));
+	debug_assert (status == 0);
+	blake2b_update (&hash, &claim_leaf_tag, sizeof (claim_leaf_tag));
+	blake2b_update (&hash, account_a.bytes.data (), account_a.bytes.size ());
+	blake2b_update (&hash, asset_id_a.bytes.data (), asset_id_a.bytes.size ());
+	blake2b_update (&hash, amount_a.bytes.data (), amount_a.bytes.size ());
+	status = blake2b_final (&hash, result.bytes.data (), sizeof (result.bytes));
+	debug_assert (status == 0);
+	return result;
+}
+
+nano::uint256_union nano::asset_claim_root (nano::uint256_union const & leaf_a, std::vector<nano::uint256_union> const & proof_a)
+{
+	auto result (leaf_a);
+	for (auto const & sibling : proof_a)
+	{
+		auto const & first (result < sibling ? result : sibling);
+		auto const & second (result < sibling ? sibling : result);
+		blake2b_state hash;
+		auto status (blake2b_init (&hash, sizeof (result.bytes)));
+		debug_assert (status == 0);
+		blake2b_update (&hash, &claim_node_tag, sizeof (claim_node_tag));
+		blake2b_update (&hash, first.bytes.data (), first.bytes.size ());
+		blake2b_update (&hash, second.bytes.data (), second.bytes.size ());
+		status = blake2b_final (&hash, result.bytes.data (), sizeof (result.bytes));
+		debug_assert (status == 0);
+	}
+	return result;
+}
+
 bool nano::asset_payload::operator== (nano::asset_payload const & other_a) const
 {
-	return name == other_a.name && symbol == other_a.symbol && decimals == other_a.decimals && max_supply == other_a.max_supply && transfer == other_a.transfer && swap == other_a.swap && description == other_a.description && image == other_a.image && kind == other_a.kind && memo == other_a.memo;
+	return name == other_a.name && symbol == other_a.symbol && decimals == other_a.decimals && max_supply == other_a.max_supply && transfer == other_a.transfer && swap == other_a.swap && description == other_a.description && image == other_a.image && kind == other_a.kind && memo == other_a.memo && count == other_a.count && proof == other_a.proof;
 }
 
 void nano::asset_payload::serialize (nano::stream & stream_a, nano::asset_op op_a) const
@@ -1639,8 +1706,25 @@ void nano::asset_payload::serialize (nano::stream & stream_a, nano::asset_op op_
 		case nano::asset_op::transfer:
 			write_payload_string (stream_a, memo);
 			break;
+		case nano::asset_op::commit:
+			// Big-endian, like every other integer in a block's hashables. The
+			// two length prefixes are the one little-endian exception (§7).
+			nano::write (stream_a, boost::endian::native_to_big (count));
+			break;
+		case nano::asset_op::claim:
+		{
+			// One length byte is enough for a bound of 48, and it is what keeps
+			// a proof canonical: one length, that many siblings, nothing else.
+			nano::write (stream_a, static_cast<uint8_t> (proof.size ()));
+			for (auto const & sibling : proof)
+			{
+				nano::write (stream_a, sibling.bytes);
+			}
+			break;
+		}
 		case nano::asset_op::burn:
 		case nano::asset_op::asset_receive:
+		case nano::asset_op::commit_close:
 			break;
 	}
 }
@@ -1659,7 +1743,7 @@ bool nano::asset_payload::deserialize (nano::stream & stream_a, nano::asset_op o
 	// encoding rather than the ordinary case.
 	if (size_a == 0)
 	{
-		return op_a != nano::asset_op::burn && op_a != nano::asset_op::asset_receive;
+		return op_a != nano::asset_op::burn && op_a != nano::asset_op::asset_receive && op_a != nano::asset_op::commit_close;
 	}
 
 	std::vector<uint8_t> bytes;
@@ -1709,8 +1793,32 @@ bool nano::asset_payload::deserialize (nano::stream & stream_a, nano::asset_op o
 			case nano::asset_op::transfer:
 				error = read_payload_string (payload_stream, memo, nano::asset_payload::max_memo);
 				break;
+			case nano::asset_op::commit:
+				nano::read (payload_stream, count);
+				boost::endian::big_to_native_inplace (count);
+				// A drop with no recipients is not a drop, and the ledger says
+				// so too — but a block that cannot describe one should not
+				// parse into a valid-looking payload in the first place.
+				error = count == 0;
+				break;
+			case nano::asset_op::claim:
+			{
+				uint8_t proof_length{ 0 };
+				nano::read (payload_stream, proof_length);
+				error = proof_length > nano::asset_payload::max_proof;
+				if (!error)
+				{
+					proof.resize (proof_length);
+					for (auto & sibling : proof)
+					{
+						nano::read (payload_stream, sibling.bytes);
+					}
+				}
+				break;
+			}
 			case nano::asset_op::burn:
 			case nano::asset_op::asset_receive:
+			case nano::asset_op::commit_close:
 				break;
 		}
 	}
@@ -1910,6 +2018,44 @@ bool nano::asset_hashables::deserialize_op_json (boost::property_tree::ptree con
 			link = source;
 			break;
 		}
+		case nano::asset_op::commit:
+		{
+			// The root travels in `link`: it is 32 bytes and the fixed header
+			// already carries one such field, so the rooted ops need no new
+			// layout at all (decisions-m4.md §2).
+			nano::block_hash root;
+			error = asset_id.decode_hex (op_a.get<std::string> ("asset"));
+			error = error || amount.decode_dec (op_a.get<std::string> ("total"));
+			error = error || root.decode_hex (op_a.get<std::string> ("root"));
+			link = root;
+			auto const count_l (op_a.get<uint64_t> ("count"));
+			error = error || count_l == 0 || count_l > std::numeric_limits<uint32_t>::max ();
+			payload.count = static_cast<uint32_t> (count_l);
+			break;
+		}
+		case nano::asset_op::commit_close:
+		{
+			nano::block_hash root;
+			error = root.decode_hex (op_a.get<std::string> ("root"));
+			link = root;
+			break;
+		}
+		case nano::asset_op::claim:
+		{
+			nano::block_hash root;
+			error = asset_id.decode_hex (op_a.get<std::string> ("asset"));
+			error = error || amount.decode_dec (op_a.get<std::string> ("amount"));
+			error = error || root.decode_hex (op_a.get<std::string> ("root"));
+			link = root;
+			for (auto const & entry : op_a.get_child ("proof"))
+			{
+				nano::uint256_union sibling;
+				error = error || sibling.decode_hex (entry.second.get_value<std::string> ());
+				payload.proof.push_back (sibling);
+			}
+			error = error || payload.proof.size () > nano::asset_payload::max_proof;
+			break;
+		}
 	}
 	return error;
 }
@@ -1974,6 +2120,36 @@ void nano::asset_hashables::serialize_op_json (boost::property_tree::ptree & op_
 		case nano::asset_op::asset_receive:
 		{
 			op_a.put ("link", link.as_block_hash ().to_string ());
+			break;
+		}
+		case nano::asset_op::commit:
+		{
+			op_a.put ("asset", asset_id.to_string ());
+			op_a.put ("root", link.as_block_hash ().to_string ());
+			nano::json::put_number (op_a, "count", payload.count);
+			op_a.put ("total", amount.to_string_dec ());
+			break;
+		}
+		case nano::asset_op::commit_close:
+		{
+			op_a.put ("root", link.as_block_hash ().to_string ());
+			break;
+		}
+		case nano::asset_op::claim:
+		{
+			op_a.put ("root", link.as_block_hash ().to_string ());
+			op_a.put ("asset", asset_id.to_string ());
+			op_a.put ("amount", amount.to_string_dec ());
+			boost::property_tree::ptree proof_l;
+			for (auto const & sibling : payload.proof)
+			{
+				boost::property_tree::ptree entry;
+				entry.put ("", sibling.to_string ());
+				proof_l.push_back (std::make_pair ("", entry));
+			}
+			// A one-leaf drop has no siblings, and an array that collapses to ""
+			// when empty is a different type to whatever parses this.
+			nano::json::add_array (op_a, "proof", proof_l);
 			break;
 		}
 	}

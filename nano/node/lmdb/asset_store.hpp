@@ -48,6 +48,24 @@ namespace lmdb
 		nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_begin (nano::transaction const &) const override;
 		nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_end () const override;
 
+		void commit_put (nano::write_transaction const &, nano::uint256_union const &, nano::asset_commit_info const &) override;
+		bool commit_get (nano::transaction const &, nano::uint256_union const &, nano::asset_commit_info &) override;
+		void commit_del (nano::write_transaction const &, nano::uint256_union const &) override;
+		bool commit_exists (nano::transaction const &, nano::uint256_union const &) override;
+		nano::store_iterator<nano::uint256_union, nano::asset_commit_info> commit_begin (nano::transaction const &, nano::uint256_union const &) const override;
+		nano::store_iterator<nano::uint256_union, nano::asset_commit_info> commit_begin (nano::transaction const &) const override;
+		nano::store_iterator<nano::uint256_union, nano::asset_commit_info> commit_end () const override;
+
+		void claim_put (nano::write_transaction const &, nano::account const &, nano::uint256_union const &, nano::block_hash const &) override;
+		void claim_del (nano::write_transaction const &, nano::account const &, nano::uint256_union const &) override;
+		bool claim_exists (nano::transaction const &, nano::account const &, nano::uint256_union const &) override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claims_begin (nano::transaction const &, nano::asset_key const &) const override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claims_begin (nano::transaction const &) const override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claims_end () const override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_begin (nano::transaction const &, nano::asset_key const &) const override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_begin (nano::transaction const &) const override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_end () const override;
+
 		/**
 		 * Maps an asset id to its record.
 		 * nano::uint256_union -> nano::asset_info
@@ -78,6 +96,26 @@ namespace lmdb
 		 * nano::account -> uint64_t
 		 */
 		MDB_dbi issued_handle{ 0 };
+
+		/**
+		 * Maps a published Merkle root to the drop it commits to.
+		 * nano::uint256_union -> nano::asset_commit_info
+		 */
+		MDB_dbi asset_commits_handle{ 0 };
+
+		/**
+		 * Maps (account, root) to the claiming block. Prefix-scannable by
+		 * account, which is the ordering SPEC 5.5 settles on.
+		 * nano::asset_key -> nano::block_hash
+		 */
+		MDB_dbi asset_claims_handle{ 0 };
+
+		/**
+		 * Maps (root, account) to the claiming block. Prefix-scannable by root,
+		 * which is what a rollback of the commit block underneath needs.
+		 * nano::asset_key -> nano::block_hash
+		 */
+		MDB_dbi asset_claim_roots_handle{ 0 };
 	};
 }
 }
