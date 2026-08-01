@@ -2,7 +2,7 @@
   <img src="kei-coin-256.png" width="168" alt="The Kei coin: an owl pushing a boulder uphill between two olive branches, reading UNUS KEI — one boulder — above a lyre marked with the Roman numeral one.">
 </p>
 
-<p align="center"><i><b>UNUS KEI</b> — one boulder. An owl rolling it uphill, which is the honest picture of shipping a chain.</i></p>
+<p align="center"><i><b>UNUS KEI</b> — one boulder. An owl rolling it uphill, which is the honest picture of shipping a massively multiplayer game.</i></p>
 
 # kei-node
 
