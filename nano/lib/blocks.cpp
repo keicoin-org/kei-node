@@ -1644,6 +1644,21 @@ void nano::asset_payload::serialize (nano::stream & stream_a, nano::asset_op op_
 
 bool nano::asset_payload::deserialize (nano::stream & stream_a, nano::asset_op op_a, std::size_t size_a)
 {
+	// `burn` and `asset_receive` carry no payload, and an empty one cannot be
+	// read through a stream: an empty vector's `data ()` is null, and
+	// `nano::bufferstream` is a boost *direct* device, whose first read throws
+	// `bad_read` over a null buffer rather than reporting end-of-stream. That
+	// throw made every burn and every collect block unreadable once stored —
+	// they serialised fine and then failed to parse coming back out.
+	//
+	// Every other op writes at least a length prefix (a memo's is written even
+	// when the memo is empty), so for them a zero-length payload is a malformed
+	// encoding rather than the ordinary case.
+	if (size_a == 0)
+	{
+		return op_a != nano::asset_op::burn && op_a != nano::asset_op::asset_receive;
+	}
+
 	std::vector<uint8_t> bytes;
 	try
 	{

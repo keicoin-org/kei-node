@@ -130,7 +130,7 @@ jobs:
       # red for reasons that are not regressions. Bringing it back to green is
       # its own job, and pretending otherwise here would only hide this signal.
       - name: Run Kei tests
-        run: ./build/core_test --gtest_filter='asset_block.*:asset_payload.*:asset_id.*:block.kei_hash_domain:block.kei_hash_vectors:json_response.*:issuance_burn.*'
+        run: ./build/core_test --gtest_filter='asset_block.*:asset_ledger.*:asset_payload.*:asset_id.*:block.kei_hash_domain:block.kei_hash_vectors:json_response.*:issuance_burn.*'
 
       # `rpc_test` is a separate target, so until this step existed the RPC
       # changes shipped without anything compiling their tests — the shapes in
@@ -144,12 +144,11 @@ jobs:
             exit 1
           fi
 
-      # And the expensive half, which is the point: every test above is a unit
-      # test over serialisation, hashing, the response encoder, or the burn
-      # arithmetic, and not one of them constructs a ledger. This one stands up
-      # a node, processes blocks through `ledger.cpp` and the store, and asks
-      # the running RPC server for them — so §16's "nothing has been executed"
-      # stops being true of the ledger path, for one action.
+      # And the expensive half: `asset_ledger.*` above drives the five asset
+      # operations through `ledger.cpp` and the store directly, and this drives
+      # the inherited block types through the same path and then asks a running
+      # RPC server for them — so the wire shape is checked against a real chain
+      # rather than a constructed response.
       #
       # Filtered to the Kei case for the same reason the core_test filter is:
       # the inherited RPC suite is red on genesis balances §14 changed on

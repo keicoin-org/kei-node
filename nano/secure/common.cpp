@@ -151,10 +151,27 @@ nano::ledger_constants::ledger_constants (nano::work_thresholds & work, nano::ne
 	: network_a == nano::networks::banano_test_network                                                                                                                 ? nano_test_final_votes_canary_height
 																																									   : nano_live_final_votes_canary_height)
 {
-	nano_beta_genesis->sideband_set (nano::block_sideband (nano_beta_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
-	nano_dev_genesis->sideband_set (nano::block_sideband (nano_dev_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
-	nano_live_genesis->sideband_set (nano::block_sideband (nano_live_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
-	nano_test_genesis->sideband_set (nano::block_sideband (nano_test_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_0, false, false, false, nano::epoch::epoch_0));
+	// Kei starts at epoch 2, where Nano and Banano start at epoch 0 and climb
+	// with epoch blocks. The epochs are a migration artefact of chains that
+	// were already running when the thresholds changed, and Kei has no such
+	// history — its genesis is the first block there has ever been.
+	//
+	// It is also what makes decisions-m2.md §11 true rather than advertised.
+	// The tiers are not separate constants: B *is* `epoch_2` and C *is*
+	// `epoch_2_receive`, so they only govern once an account has reached epoch
+	// 2. At epoch 0 the single `epoch_1` threshold covers sends and receives
+	// alike, and on dev that is 0xfe00… against tier C's 0xf000… — so the node
+	// answered `work_thresholds` with a receive tier that its own ledger then
+	// refused, and every block a client opened its account with failed as
+	// "insufficient work". Starting at epoch 2 makes the answer and the rule
+	// the same number.
+	//
+	// The sideband is not hashed, so this moves no block hash and none of the
+	// §14 vectors.
+	nano_beta_genesis->sideband_set (nano::block_sideband (nano_beta_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_2, false, false, false, nano::epoch::epoch_2));
+	nano_dev_genesis->sideband_set (nano::block_sideband (nano_dev_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_2, false, false, false, nano::epoch::epoch_2));
+	nano_live_genesis->sideband_set (nano::block_sideband (nano_live_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_2, false, false, false, nano::epoch::epoch_2));
+	nano_test_genesis->sideband_set (nano::block_sideband (nano_test_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_2, false, false, false, nano::epoch::epoch_2));
 
 	nano::link epoch_link_v1;
 	char const * epoch_message_v1 ("epoch v1 block");

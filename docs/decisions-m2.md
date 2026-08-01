@@ -621,7 +621,7 @@ with §0 putting the public testnet in M3.
 
 ## 16. What is not finished, stated plainly
 
-Two things are implemented but not yet demonstrated, and two are not implemented.
+Two things are not implemented, and what is implemented is unevenly demonstrated.
 
 **The reserve set is empty.** `ledger_constants::reserve_accounts` is the fixed,
 immutable enumeration §5.7 requires, and `is_reserve` enforces the null
@@ -630,24 +630,48 @@ genesis ceremony produces them, so on dev those rules currently hold vacuously.
 The four circulating allocations and the reserve total are asserted at startup
 today; the *blocks* that distribute them are part of the same ceremony.
 
-**Almost nothing has been executed, and the exception is worth being precise
-about.** Per §3 there is still no toolchain on this machine, so nearly everything
-here is checked by compiling in CI and by having been written against the mock's
-semantics. "Compiles" is not "works", and no assertion in this document should be
-read as though it were.
+**What has been executed, and what has only been compiled.** Per §3 there is no
+toolchain on this machine, so anything not named below is checked by compiling in
+CI and by having been written against the mock's semantics. "Compiles" is not
+"works", and no assertion in this document should be read as though it were.
 
-The exception, as of the `account_history` work in §15: `rpc_test` is now built
+The first exception, from the `account_history` work in §15: `rpc_test` is built
 in CI and one case runs there. It stands up a node through `nano::test::system`,
 processes a change, a send and a receive through `ledger.cpp` and the store, and
 reads them back from a live RPC server. So the ledger and store paths are no
 longer entirely untried — a chain is built and queried on every run.
 
-What that does *not* cover is most of what this document decides. No asset block
-has been through `ledger_processor`; the `holdings`, `holders` and `issued`
-tables are written by no test; rollback (§12) is unexecuted, and rollback is the
-code whose bugs stay invisible until a fork actually happens. One green test
-proves the harness works, which is mainly valuable because it means the next
-ones are cheap.
+That harness being cheap is what `core_test/asset_ledger.cpp` spends. **All five
+asset operations now go through `ledger_processor` and back out through
+`ledger::rollback` on every CI run**, against a real store: the escalating burn
+and the issuance count it prices from, a mint arriving as a receivable and the
+`asset_receive` that collects it, the `holdings` and `holders` entries that
+collect writes and the deletion of both when a balance reaches zero, the max
+supply cap and the headroom a burn frees (§5.6.6), and both transfer policies
+that can refuse a move.
+
+Rollback is covered because rollback is the code whose bugs stay invisible until
+a fork actually happens — including the case that is easy to get wrong, where the
+recipient has already collected the mint being rolled back and their
+`asset_receive` has to come off their own chain first.
+
+**It caught one immediately, and the shape of it is the argument for running
+code.** `burn` and `asset_receive` are the only two ops whose canonical payload
+is zero bytes — every other op writes at least a length prefix — and a
+zero-length payload could not be parsed at all. An empty vector's `data ()` is
+null, `nano::bufferstream` is a boost *direct* device, and its first read over a
+null buffer throws `bad_read` rather than reporting end-of-stream. So both block
+types serialised correctly, stored correctly, and then could not be read back:
+unrollable, unbootstrappable, and unservable over RPC. Nothing found it because
+nothing had ever read one back — the round-trip test in `block.cpp` uses an
+`issue` block, whose payload is never empty. `asset_ledger.cpp` now round-trips
+all five ops through the exact record the store writes.
+
+What is still unexecuted after that: the reserve rules, which cannot be executed
+until the reserve set has members (above); `asset_info` and the rest of the asset
+RPC, which have no test of their own; and everything in §15 apart from
+`account_history`. A ledger test is also not a running node — definition-of-done
+(1) and (6) still need a toolchain (§3).
 
 **One deliberate divergence from the mock.** §1 makes `MockLedger` the reference
 and says that where this node could differ it does not. It differs in exactly
@@ -688,12 +712,77 @@ about whether a given `issue` block is valid. What remains unchecked is that
 they agree *with each other* rather than separately with this document, and only
 definition-of-done (6) can settle that.
 
-**The SDK's hash has to move.** §7 settled that `asset` blocks hash as binary
-fields under a preamble, and §14 extends that to every block type. The SDK still
-hashes canonical JSON under `"kei-block-v0"`, so the two disagree and signatures
-will not verify across them. §7 already noted this lands as one change on the SDK
-side; it has not been made, and until it is, definition-of-done (6) cannot pass
-no matter what this node does.
+**The SDK's hash has moved, and both sides are pinned to the same vectors.** §7
+settled that `asset` blocks hash as binary fields under a preamble and §14
+extended that to every block type, which left the SDK hashing canonical JSON
+under `"kei-block-v0"` and the two disagreeing about every signature. The SDK
+now hashes as this node does. What makes that more than two implementations
+agreeing with this document separately: `block.kei_hash_vectors` here and the
+SDK's own vector test assert the same hashes for the same blocks, so a change to
+either side that moves a hash fails on both.
+
+---
+
+## 17. What running it found
+
+§3 said the binding constraint was that this tree had no machine to compile on.
+It has one now — a Linux box, built from the same recipe as
+[`.github/workflows/build.yml`](../.github/workflows/build.yml) — so
+definition-of-done (1) is met: **`bananode` builds, starts, and serves RPC**, and
+[`conformance/`](../conformance/) drives the SDK's own suite against it over HTTP.
+
+Seven of its eleven cases pass. What the other four cost is written down in
+`conformance/README.md`; what the seven cost is written down here, because every
+one of them was a defect that compiling could not have found, and three of them
+would have made the node unusable by any client.
+
+**`faucet` existed only in the contract.** It is testnet-only (SPEC §12), pays
+from the dev genesis account rather than the mock's `community` — §5's four
+circulating allocations are sends the §5.7 ceremony has not produced — and
+serialises its read-build-process, because two calls reading one frontier fork
+the single account every test funds from.
+
+**`process` could not read a block.** Nano sends `block` as a *string* of JSON
+and opts into an object with `json_block`; rpc.md sends the object, with no such
+flag, as every other action in that contract does. So `get<std::string>` on a
+subtree yielded an empty string, an empty string is not JSON, and every block the
+SDK ever signed came back "Block is invalid" without the node looking at it.
+`block_impl` now accepts whichever arrived — a subtree has children and a string
+does not — which keeps the inherited form working.
+
+**§11's work tiers were advertised but not enforced.** The tiers are not separate
+constants: B *is* `epoch_2` and C *is* `epoch_2_receive`, so they govern only
+once an account has reached epoch 2. Kei sat at epoch 0, where the single
+`epoch_1` threshold covers sends and receives alike — and on dev that is `0xfe00…`
+against tier C's `0xf000…`. The node answered `work_thresholds` with a receive
+tier its own ledger then refused, so **every client's opening block failed as
+"insufficient work"**. Kei starts at epoch 2 now, in both places the fact is
+written: the genesis sideband in `common.cpp` and the genesis *account record* in
+`store.cpp`, which is the one actually read when the next block is validated and
+which had it hardcoded. Fixing only the first changed nothing, which is how the
+second was found. No block hash moves — the sideband is not hashed, and the §14
+vectors still pass.
+
+**A bad signature cost fifteen seconds and said nothing.** State blocks whose
+signature fails verification are dropped rather than queued, so `process_one`
+never saw them and the promise `add_blocking` waits on was never settled: the
+caller waited out the whole `block_process_timeout` and was told "Stopped", which
+names the timeout rather than the fault. It is also the first thing any new
+client integration meets, because signing over the wrong bytes — a different hash
+domain (§14), a field the layout has no room for (§8) — lands exactly here. Those
+promises are now settled with the real reason: **15,001 ms to 1 ms**, and "Bad
+signature" instead of "Stopped".
+
+**The one thing left that is a decision rather than a defect** is the shape of a
+Kei payment carrying a memo. §8 put memos on the asset block and left `state`
+untouched, and `kei.pay({ memo })` builds a `state` block with a `memo` field —
+which the §14 layout has no room for. The SDK already knows: `wire.ts` names it a
+node-layout gap and hashes such a block under a deliberately local domain so that
+a node rejects it loudly rather than accepting it with the memo quietly dropped.
+So the two implementations agree that this block is not valid; what was never
+settled is what the valid one looks like. §8 implies an asset-family block with
+asset id 0, which is a wire question this document should answer before M3
+depends on it.
 
 ## 17. A Kei payment carries no memo, and `pay({ memo })` says so out loud
 

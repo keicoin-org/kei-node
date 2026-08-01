@@ -42,6 +42,8 @@ public:
 	/** The one-account, Kei-and-assets shape of `accounts_receivable`. */
 	void kei_receivables ();
 	void work_thresholds ();
+	/** Testnet only, and refused everywhere else (SPEC §12). */
+	void faucet ();
 	void account_key ();
 	void account_list ();
 	void account_move ();

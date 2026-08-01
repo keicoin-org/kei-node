@@ -106,6 +106,8 @@ enum class error_rpc
 	difficulty_limit,
 	disabled_bootstrap_lazy,
 	disabled_bootstrap_legacy,
+	faucet_disabled,
+	faucet_insufficient,
 	invalid_balance,
 	invalid_destinations,
 	invalid_epoch,
