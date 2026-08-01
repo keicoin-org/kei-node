@@ -1,0 +1,6 @@
+# ci/setup-build-box.sh is read verbatim and handed to cloud-init as user_data
+# by ci/provision-build-box.py, so it runs as bash on Ubuntu no matter which
+# machine checked it out. A Windows clone with core.autocrlf=true would rewrite
+# it to CRLF, and every line would reach the box with a trailing \r — which bash
+# reports as "command not found" on lines that are plainly correct. Pin it.
+*.sh text eol=lf
