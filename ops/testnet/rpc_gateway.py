@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Public, deliberately narrow gateway for the Kei testnet RPC.
+
+The node's control RPC stays on loopback.  This process is the only public
+listener and forwards only the actions used by the SDK.  It also puts hard
+bounds around the dev-network faucet; the node's deterministic faucet key must
+never be reachable through an unbounded public request.
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import http.server
+import json
+import os
+import threading
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Callable
+
+
+ALLOWED_ACTIONS = frozenset(
+    {
+        "version",
+        "account_info",
+        "account_history",
+        "block_info",
+        "accounts_receivable",
+        "process",
+        "work_thresholds",
+        "asset_info",
+        "asset_by_symbol",
+        "account_holdings",
+        "asset_balance",
+        "asset_holders",
+        "commit_info",
+        "claim_status",
+        "faucet",
+    }
+)
+
+MAX_BODY_BYTES = 256 * 1024
+DEFAULT_FAUCET_MAX_RAW = 10_000 * 10**18
+
+
+@dataclass(frozen=True)
+class Limit:
+    requests: int
+    seconds: int
+
+
+class SlidingWindow:
+    """Small in-memory limiter. A restart forgets history, never ledger state."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self._clock = clock
+        self._events: dict[str, collections.deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, limit: Limit) -> bool:
+        now = self._clock()
+        cutoff = now - limit.seconds
+        with self._lock:
+            events = self._events.setdefault(key, collections.deque())
+            while events and events[0] <= cutoff:
+                events.popleft()
+            if len(events) >= limit.requests:
+                return False
+            events.append(now)
+            return True
+
+
+class GatewayState:
+    def __init__(self, upstream: str, faucet_max_raw: int = DEFAULT_FAUCET_MAX_RAW):
+        self.upstream = upstream
+        self.faucet_max_raw = faucet_max_raw
+        self.limiter = SlidingWindow()
+        self.slots = threading.BoundedSemaphore(32)
+
+
+class GatewayHandler(http.server.BaseHTTPRequestHandler):
+    server_version = "KeiTestnetGateway/1"
+    state: GatewayState
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        # Never log bodies: future SDK requests may carry material that should
+        # not become an accidental credential log.
+        super().log_message("%s %s", self.client_address[0], fmt % args)
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if self.path != "/rpc":
+            self._json(404, {"error": "Not found"})
+            return
+        self.send_response(204)
+        self._cors()
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if self.path == "/healthz":
+            self._json(200, {"status": "ok"})
+        else:
+            self._json(404, {"error": "Not found"})
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if self.path != "/rpc":
+            self._json(404, {"error": "Not found"})
+            return
+
+        length_text = self.headers.get("Content-Length", "")
+        if not length_text.isdigit() or int(length_text) > MAX_BODY_BYTES:
+            self._json(413, {"error": "RPC request body is missing or too large"})
+            return
+        try:
+            request_body = self.rfile.read(int(length_text))
+            request = json.loads(request_body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._json(400, {"error": "RPC request must be JSON"})
+            return
+        if not isinstance(request, dict) or not isinstance(request.get("action"), str):
+            self._json(400, {"error": "RPC request needs an action"})
+            return
+
+        action = request["action"]
+        if action not in ALLOWED_ACTIONS:
+            self._json(403, {"error": "That RPC action is not public"})
+            return
+
+        client = self.client_address[0]
+        if not self.state.limiter.allow("global", Limit(3_000, 60)):
+            self._json(429, {"error": "The public testnet is busy; retry in a minute"})
+            return
+        if not self.state.limiter.allow("client:" + client, Limit(180, 60)):
+            self._json(429, {"error": "Too many RPC requests; retry in a minute"})
+            return
+        if action == "faucet" and not self._allow_faucet(request, client):
+            return
+
+        if not self.state.slots.acquire(blocking=False):
+            self._json(503, {"error": "The public testnet is busy; retry shortly"})
+            return
+        try:
+            upstream = urllib.request.Request(
+                self.state.upstream,
+                data=request_body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(upstream, timeout=15) as response:
+                    body = response.read(MAX_BODY_BYTES + 1)
+                    if len(body) > MAX_BODY_BYTES:
+                        self._json(502, {"error": "The node response was too large"})
+                        return
+                    self.send_response(response.status)
+                    self._cors()
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+            except (urllib.error.URLError, TimeoutError):
+                self._json(502, {"error": "The testnet node is temporarily unavailable"})
+        finally:
+            self.state.slots.release()
+
+    def _allow_faucet(self, request: dict[str, object], client: str) -> bool:
+        account = request.get("account")
+        if not isinstance(account, str) or not account.startswith("kei_") or len(account) > 70:
+            self._json(400, {"error": "Faucet account must be a Kei address"})
+            return False
+        amount = request.get("amount")
+        if amount is not None:
+            if not isinstance(amount, str) or not amount.isdigit():
+                self._json(400, {"error": "Faucet amount must be raw units as a decimal string"})
+                return False
+            if int(amount) <= 0 or int(amount) > self.state.faucet_max_raw:
+                self._json(400, {"error": "Faucet request exceeds the 10,000 Kei testnet cap"})
+                return False
+
+        checks = (
+            ("faucet-global", Limit(200, 3600)),
+            ("faucet-client:" + client, Limit(20, 3600)),
+            ("faucet-account:" + account, Limit(2, 86400)),
+        )
+        if not all(self.state.limiter.allow(key, limit) for key, limit in checks):
+            self._json(429, {"error": "Faucet limit reached; retry later"})
+            return False
+        return True
+
+    def _cors(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("X-Content-Type-Options", "nosniff")
+
+    def _json(self, status: int, value: dict[str, str]) -> None:
+        body = json.dumps(value, separators=(",", ":")).encode()
+        self.send_response(status)
+        self._cors()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def handler_for(state: GatewayState) -> type[GatewayHandler]:
+    return type("ConfiguredGatewayHandler", (GatewayHandler,), {"state": state})
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--listen", default=os.environ.get("KEI_GATEWAY_LISTEN", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("KEI_GATEWAY_PORT", "8080")))
+    parser.add_argument(
+        "--upstream",
+        # The node config needs an IPv4-mapped IPv6 bind address, but clients
+        # can and should use ordinary loopback. It also avoids proxy-variable
+        # edge cases around bracketed IPv6 URLs in urllib.
+        default=os.environ.get("KEI_RPC_UPSTREAM", "http://127.0.0.1:45000"),
+    )
+    parser.add_argument(
+        "--faucet-max-raw",
+        type=int,
+        default=int(os.environ.get("KEI_FAUCET_MAX_RAW", str(DEFAULT_FAUCET_MAX_RAW))),
+    )
+    args = parser.parse_args()
+    state = GatewayState(args.upstream, args.faucet_max_raw)
+    server = http.server.ThreadingHTTPServer((args.listen, args.port), handler_for(state))
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
