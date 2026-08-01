@@ -1,7 +1,7 @@
 # M3 — the public testnet boundary
 
 M3 swaps the SDK's default mock transport for a real node without changing the
-public API. The canonical endpoint is `https://rpc.testnet.keicoin.org/rpc`.
+public API. The canonical endpoint is `https://testnet.keicoin.org/rpc`.
 It is one best-effort dev-network node on Hetzner, not a resilient network and
 not somewhere to put value (SPEC §5.9, §13).
 
