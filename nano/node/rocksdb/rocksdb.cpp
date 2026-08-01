@@ -199,7 +199,10 @@ std::unordered_map<char const *, nano::tables> nano::rocksdb::store::create_cf_n
 		{ "holdings", tables::holdings },
 		{ "holders", tables::holders },
 		{ "asset_pending", tables::asset_pending },
-		{ "issued", tables::issued } };
+		{ "issued", tables::issued },
+		{ "asset_commits", tables::asset_commits },
+		{ "asset_claims", tables::asset_claims },
+		{ "asset_claim_roots", tables::asset_claim_roots } };
 
 	debug_assert (map.size () == all_tables ().size () + 1);
 	return map;
@@ -419,6 +422,22 @@ rocksdb::ColumnFamilyOptions nano::rocksdb::store::get_cf_options (std::string c
 		std::shared_ptr<::rocksdb::TableFactory> table_factory (::rocksdb::NewBlockBasedTableFactory (get_active_table_options (block_cache_size_bytes * 2)));
 		cf_options = get_active_cf_options (table_factory, memtable_size_bytes);
 	}
+	else if (cf_name_a == "asset_commits")
+	{
+		// One entry per drop the issuer publishes, deleted only when the issuer
+		// closes a root and its claims cement (SPEC §5.5). Write-light and
+		// delete-light, but read on every single claim, so it is worth the cache
+		// a small table gets rather than the eviction pressure of an active one.
+		cf_options = get_small_cf_options (small_table_factory);
+	}
+	else if (cf_name_a == "asset_claims" || cf_name_a == "asset_claim_roots")
+	{
+		// A row per claim, written once and never updated. Deletes happen only on
+		// rollback and pruning, so this is the append-heavy shape "blocks" has
+		// rather than the churn "pending" has.
+		std::shared_ptr<::rocksdb::TableFactory> table_factory (::rocksdb::NewBlockBasedTableFactory (get_active_table_options (block_cache_size_bytes)));
+		cf_options = get_active_cf_options (table_factory, memtable_size_bytes);
+	}
 	else if (cf_name_a == "assets" || cf_name_a == "issued")
 	{
 		// One entry per token ever issued, and per account that has issued one.
@@ -576,6 +595,12 @@ rocksdb::ColumnFamilyHandle * nano::rocksdb::store::table_to_column_family (tabl
 			return get_column_family ("asset_pending");
 		case tables::issued:
 			return get_column_family ("issued");
+		case tables::asset_commits:
+			return get_column_family ("asset_commits");
+		case tables::asset_claims:
+			return get_column_family ("asset_claims");
+		case tables::asset_claim_roots:
+			return get_column_family ("asset_claim_roots");
 		default:
 			release_assert (false);
 			return get_column_family ("");
@@ -917,7 +942,7 @@ void nano::rocksdb::store::on_flush (::rocksdb::FlushJobInfo const & flush_job_i
 
 std::vector<nano::tables> nano::rocksdb::store::all_tables () const
 {
-	return std::vector<nano::tables>{ tables::accounts, tables::asset_pending, tables::assets, tables::blocks, tables::confirmation_height, tables::final_votes, tables::frontiers, tables::holders, tables::holdings, tables::issued, tables::meta, tables::online_weight, tables::peers, tables::pending, tables::pruned, tables::vote };
+	return std::vector<nano::tables>{ tables::accounts, tables::asset_claim_roots, tables::asset_claims, tables::asset_commits, tables::asset_pending, tables::assets, tables::blocks, tables::confirmation_height, tables::final_votes, tables::frontiers, tables::holders, tables::holdings, tables::issued, tables::meta, tables::online_weight, tables::peers, tables::pending, tables::pruned, tables::vote };
 }
 
 bool nano::rocksdb::store::copy_db (boost::filesystem::path const & destination_path)

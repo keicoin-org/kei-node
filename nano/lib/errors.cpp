@@ -45,6 +45,8 @@ std::string nano::error_common_messages::message (int ev) const
 			return "Bad previous hash";
 		case nano::error_common::bad_representative_number:
 			return "Bad representative";
+		case nano::error_common::bad_root:
+			return "A commit root is 64 hex characters";
 		case nano::error_common::bad_source:
 			return "Bad source";
 		case nano::error_common::bad_signature:
@@ -289,13 +291,23 @@ std::string nano::error_process_messages::message (int ev) const
 		case nano::error_process::asset_balance_mismatch:
 			return "An asset block must carry the account's Kei balance unchanged; only issuance changes it";
 		case nano::error_process::bad_asset_payload:
-			return "Malformed issuance parameters";
+			return "Malformed fields for that asset operation";
 		case nano::error_process::too_many_assets:
 			return "The account already holds the maximum of 1,024 distinct assets; burn or transfer something first";
 		case nano::error_process::reserve_representative:
 			return "Reserve accounts must name the null representative, so reserve Kei carries no weight of any kind";
 		case nano::error_process::reserve_locked:
 			return "Reserve Kei can only move through a passed on-chain vote";
+		case nano::error_process::commit_exists:
+			return "That commit root has already been published; build the next batch with a fresh salt";
+		case nano::error_process::no_such_commit:
+			return "No commit with that root exists, so there is nothing to claim or close";
+		case nano::error_process::commit_closed:
+			return "That commit root is closed and accepts no further claims";
+		case nano::error_process::already_claimed:
+			return "This account has already claimed from that root";
+		case nano::error_process::bad_claim_proof:
+			return "That proof does not lead from this account, asset and amount to the committed root";
 		case nano::error_process::other:
 			return "Error processing block";
 	}

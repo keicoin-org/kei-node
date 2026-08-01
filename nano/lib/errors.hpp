@@ -27,6 +27,7 @@ enum class error_common
 	bad_link,
 	bad_previous,
 	bad_representative_number,
+	bad_root,
 	bad_source,
 	bad_signature,
 	bad_private_key,
@@ -161,6 +162,11 @@ enum class error_process
 	too_many_assets,
 	reserve_representative,
 	reserve_locked,
+	commit_exists,
+	no_such_commit,
+	commit_closed,
+	already_claimed,
+	bad_claim_proof,
 	other
 };
 

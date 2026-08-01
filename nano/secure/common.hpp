@@ -177,6 +177,25 @@ public:
 };
 nano::asset_key holding_key (nano::account const &, nano::uint256_union const & asset_id);
 nano::asset_key holder_key (nano::uint256_union const & asset_id, nano::account const &);
+/**
+ * The double-claim index, keyed (account, root) exactly as SPEC §5.5 requires:
+ * keyed by account the record is partitioned with the account that made it and
+ * prunes alongside that account's chain, where a root-keyed set would be global,
+ * grow forever, and belong to nobody.
+ */
+nano::asset_key claim_key (nano::account const &, nano::uint256_union const & root);
+/**
+ * The rollback index, keyed (root, account), which is the same pair the other
+ * way round and is *not* the double-claim index.
+ *
+ * SPEC §5.5 settles how a claim is looked up; it does not discuss what happens
+ * when the commit block underneath one loses a fork. Rolling that block back
+ * means undoing every claim written against it, on chains this node cannot
+ * enumerate from the commit alone — the same problem `pending` solves for a send
+ * whose receive already exists, solved the same way. Nothing reads it during
+ * validation, and it prunes with the root (decisions-m4.md §4).
+ */
+nano::asset_key claim_root_key (nano::uint256_union const & root, nano::account const &);
 
 /**
  * A token's immutable parameters plus the one thing about it that moves.
@@ -229,6 +248,35 @@ public:
 	nano::amount amount{ 0 };
 	/** Carried through so the recipient sees what the sender labelled it (§8). */
 	std::string memo;
+};
+
+/**
+ * A published Merkle root, and the one thing about it that moves.
+ *
+ * One issuer block underwrites an unbounded number of player claims (SPEC §5.5),
+ * so this record is what those claims are checked against: who published it,
+ * which asset it pays, and whether it is still open. `count` and `total` are
+ * what the issuer declared the drop covers — the node verifies one claimant's
+ * leaf and never enumerates the others, so they are read by wallets rather than
+ * by consensus, and they are signed so an issuer cannot restate them later.
+ */
+class asset_commit_info final
+{
+public:
+	asset_commit_info () = default;
+	asset_commit_info (nano::account const &, nano::uint256_union const &, uint32_t, nano::amount const &, nano::block_hash const &, bool = false);
+	void serialize (nano::stream &) const;
+	bool deserialize (nano::stream &);
+	bool operator== (nano::asset_commit_info const &) const;
+
+	nano::account issuer{};
+	nano::uint256_union asset_id{ 0 };
+	uint32_t count{ 0 };
+	nano::amount total{ 0 };
+	/** The `commit` block that published it, so a reader can find the drop. */
+	nano::block_hash block{ 0 };
+	/** Set by the issuer's `commit_close`; there is no clock (SPEC §5.5). */
+	bool closed{ false };
 };
 
 class endpoint_key final
@@ -440,7 +488,12 @@ enum class process_result
 	bad_asset_payload, // Malformed issuance parameters: name, decimals, max supply, policy
 	too_many_assets, // The account already holds the §7 maximum of 1,024 distinct assets
 	reserve_representative, // A reserve account must name the null representative (SPEC §5.7)
-	reserve_locked // Reserve Kei moves only through a passed on-chain vote (SPEC §5.7)
+	reserve_locked, // Reserve Kei moves only through a passed on-chain vote (SPEC §5.7)
+	commit_exists, // That root is already published; a fresh salt makes a fresh root (SPEC §5.5)
+	no_such_commit, // Nothing to claim from or close: no commit block published this root
+	commit_closed, // The issuer closed this root, and closing is final (SPEC §5.5)
+	already_claimed, // One leaf per account per root, claimed once (SPEC §5.5)
+	bad_claim_proof // The proof does not put this account in this root for this amount
 };
 class process_return final
 {

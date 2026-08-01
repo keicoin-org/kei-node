@@ -45,6 +45,24 @@ namespace rocksdb
 		nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_begin (nano::transaction const &, nano::pending_key const &) const override;
 		nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_begin (nano::transaction const &) const override;
 		nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_end () const override;
+
+		void commit_put (nano::write_transaction const &, nano::uint256_union const &, nano::asset_commit_info const &) override;
+		bool commit_get (nano::transaction const &, nano::uint256_union const &, nano::asset_commit_info &) override;
+		void commit_del (nano::write_transaction const &, nano::uint256_union const &) override;
+		bool commit_exists (nano::transaction const &, nano::uint256_union const &) override;
+		nano::store_iterator<nano::uint256_union, nano::asset_commit_info> commit_begin (nano::transaction const &, nano::uint256_union const &) const override;
+		nano::store_iterator<nano::uint256_union, nano::asset_commit_info> commit_begin (nano::transaction const &) const override;
+		nano::store_iterator<nano::uint256_union, nano::asset_commit_info> commit_end () const override;
+
+		void claim_put (nano::write_transaction const &, nano::account const &, nano::uint256_union const &, nano::block_hash const &) override;
+		void claim_del (nano::write_transaction const &, nano::account const &, nano::uint256_union const &) override;
+		bool claim_exists (nano::transaction const &, nano::account const &, nano::uint256_union const &) override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claims_begin (nano::transaction const &, nano::asset_key const &) const override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claims_begin (nano::transaction const &) const override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claims_end () const override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_begin (nano::transaction const &, nano::asset_key const &) const override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_begin (nano::transaction const &) const override;
+		nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_end () const override;
 	};
 }
 }
