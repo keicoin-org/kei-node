@@ -736,12 +736,12 @@ either side that moves a hash fails on both.
 It has one now — a Linux box, built from the same recipe as
 [`.github/workflows/build.yml`](../.github/workflows/build.yml) — so
 definition-of-done (1) is met: **`bananode` builds, starts, and serves RPC**, and
-[`conformance/`](../conformance/) drives the SDK's own suite against it over HTTP.
-
-Seven of its eleven cases pass. What the other four cost is written down in
-`conformance/README.md`; what the seven cost is written down here, because every
-one of them was a defect that compiling could not have found, and three of them
-would have made the node unusable by any client.
+[`conformance/`](../conformance/) drives the SDK's M2 suite against it over HTTP.
+The first run used a copied harness and found four failures. That was useful
+diagnostically, but a copy that changes assertions is not "only the URL changed",
+and two failures were `commit`/`claim` cases that section 0 assigns to M4. The
+gate now runs the exact SDK-owned M2 files with `KEI_NODE_URL`; the M4 cases stay
+executable in explicitly named M4 suites and are not pulled into this milestone.
 
 **`faucet` existed only in the contract.** It is testnet-only (SPEC §12), pays
 from the deterministic dev `community` allocation, matching the mock, and
@@ -768,6 +768,16 @@ written: the genesis sideband in `common.cpp` and the genesis *account record* i
 which had it hardcoded. Fixing only the first changed nothing, which is how the
 second was found. No block hash moves — the sideband is not hashed, and the §14
 vectors still pass.
+
+**Asset work also had a second gate that used the wrong floor.** The block
+processor admits work cheaply before the ledger knows which asset operation it
+is. It treated every non-state block as a legacy block and required `epoch_1`,
+so valid tier-C `burn` and `asset_receive` work was rejected before
+`ledger_processor::asset_block` could apply the operation's A/B/C threshold.
+Asset blocks now enter at the global tier-C floor, exactly like state blocks;
+the ledger still enforces the higher tier for `issue`, `mint`, and `transfer`.
+The executed `asset_ledger.*` regression proves both halves, and the exact SDK
+loop found the defect by failing 9/10 against a real node before passing 10/10.
 
 **A bad signature cost fifteen seconds and said nothing.** State blocks whose
 signature fails verification are dropped rather than queued, so `process_one`
@@ -911,7 +921,8 @@ when this section was written.
 4. The node validates `issue`, `mint`, `burn`, `transfer`, and `asset_receive`,
    including max-supply caps, transfer policy, and the escalating issuance burn.
 5. `balanceOf` answers in a single call, from `holders`.
-6. `packages/core/test/mock-server.test.ts` and `packages/kei/test/over-http.test.ts`
-   pass against `kei-node` with only the URL changed.
+6. `packages/core/test/m2-node.test.ts` and `packages/kei/test/over-http.test.ts`
+   pass unchanged against both `MockNode` and `kei-node`; `KEI_NODE_URL` is the
+   only switch. The node CI starts a clean dev node and runs those exact files.
 
 (6) is the one that matters. The others are things the mock already does.

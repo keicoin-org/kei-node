@@ -93,6 +93,60 @@ issued_asset issue_one (nano::ledger & ledger_a, nano::store & store_a, nano::wo
 // empty vector's `data ()` is null and boost's direct stream throws over a null
 // buffer instead of reporting end-of-stream. Both serialised fine and then
 // failed to come back, which nothing noticed until a rollback read one.
+
+// The block processor's entry gate is deliberately only a cheap floor. Asset
+// operations have three different thresholds, so ingress must admit tier C and
+// leave the exact A/B/C decision to ledger_processor::asset_block.
+TEST (asset_ledger, work_tiers_clear_ingress_before_ledger_enforces_the_exact_tier)
+{
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair key;
+	auto const asset_id (nano::derive_asset_id (key.pub, "GEM"));
+
+	for (auto const op : { nano::asset_op::issue, nano::asset_op::transfer, nano::asset_op::asset_receive })
+	{
+		auto block (signed_asset (pool, key, 1, 1000, op, asset_id, 5, 9,
+			op == nano::asset_op::issue ? issuance ("GEM", nano::transfer_policy::open, 1000) : nano::asset_payload{}));
+		SCOPED_TRACE (nano::asset_op_to_string (op));
+		ASSERT_FALSE (nano::dev::network_params.work.validate_entry (*block));
+	}
+
+	// Work below even tier C is still rejected at ingress.
+	auto below_entry (signed_asset (pool, key, 1, 1000, nano::asset_op::asset_receive, asset_id, 5, 9));
+	uint64_t insufficient{ 0 };
+	while (nano::dev::network_params.work.difficulty (below_entry->work_version (), below_entry->root (), insufficient) >= nano::dev::network_params.work.entry)
+	{
+		++insufficient;
+	}
+	below_entry->block_work_set (insufficient);
+	ASSERT_TRUE (nano::dev::network_params.work.validate_entry (*below_entry));
+
+	// Clearing ingress is not enough: tier-C work on an issue must still fail
+	// the ledger's tier-A rule.
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	auto const payload (issuance ("GEM", nano::transfer_policy::open, 1000));
+	auto const team_asset_id (nano::derive_asset_id (nano::dev::team_key.pub, payload.symbol));
+	auto issue (signed_asset (pool, nano::dev::team_key, nano::dev::constants.genesis_allocations.back ().open->hash (), nano::amount (after_issuing (1)), nano::asset_op::issue, team_asset_id, 0, 0, payload));
+
+	uint64_t tier_c_only{ 0 };
+	auto const tier_c (nano::dev::network_params.work.tier_c ());
+	auto const tier_a (nano::dev::network_params.work.tier_a);
+	while (true)
+	{
+		auto const difficulty (nano::dev::network_params.work.difficulty (issue->work_version (), issue->root (), tier_c_only));
+		if (difficulty >= tier_c && difficulty < tier_a)
+		{
+			break;
+		}
+		++tier_c_only;
+	}
+	issue->block_work_set (tier_c_only);
+	ASSERT_FALSE (nano::dev::network_params.work.validate_entry (*issue));
+	ASSERT_EQ (nano::process_result::insufficient_work, ledger.process (store.tx_begin_write (), *issue).code);
+}
+
 TEST (asset_ledger, every_op_survives_the_record_the_store_writes)
 {
 	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };

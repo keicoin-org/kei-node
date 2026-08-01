@@ -20,23 +20,24 @@ token primitive** and a Kei genesis.
 > response encoder that emits the contract's numbers, nulls, and empty arrays
 > instead of quoting everything (§15).
 >
-> **The node now builds, starts, and serves RPC**, and the SDK's own conformance
-> suite runs against it over HTTP — [`conformance/`](conformance/), §17. Seven of
-> its eleven cases pass, including `process` for both `state` and `asset` blocks.
-> Getting there fixed three defects that made the node unusable by any client and
-> that compiling could not have found: `process` could not read the block shape
-> the contract sends, §11's work tiers were advertised but not enforced so every
-> client's opening block was refused, and a bad signature cost fifteen seconds
-> and reported "Stopped".
+> **The node now builds, starts, and serves RPC**, and CI starts a clean dev node
+> and runs the SDK-owned M2 contract over HTTP — [`conformance/`](conformance/).
+> The exact same files run against `MockNode` or the native node; only
+> `KEI_NODE_URL` changes.
+> Getting there fixed four defects that compiling could not have found:
+> `process` could not read the block shape the contract sends, state accounts
+> started below the epoch where §11's advertised work tiers apply, asset work
+> was rejected at a legacy ingress threshold before its A/B/C rule ran, and a
+> bad signature cost fifteen seconds and reported "Stopped".
 >
-> **Not finished** (§16, §17): `commit`/`claim` are M4 and account for two of
-> the four remaining conformance
-> failures. The other two are decisions rather than defects — the wire shape of a
-> Kei payment carrying a memo (§8), and a genesis whose oldest block is a legacy
-> `open` rather than the state block the contract expects. The dev genesis now
-> includes the reproducible §5.7 allocation: a null-representative reserve plus
-> four circulating accounts; beta/live still refuse to start until their offline
-> ceremony supplies real public blocks. It still does not build on
+> **Not finished** (§16, §17): `commit`/`claim` remain M4 and live in separate
+> M4 suites rather than weakening M2's gate. Kei-payment memos are likewise
+> deferred and rejected explicitly. The dev genesis now includes the
+> reproducible §5.7 allocation: a null-representative reserve plus four
+> circulating accounts; beta/live still refuse to start until their offline
+> ceremony supplies real public blocks. The inherited legacy genesis `open`
+> block is reported with semantic subtype `open` without changing its bytes or
+> hash. It still does not build on
 > the machine it was cloned onto, see [Building](#building). Nothing here holds
 > value.
 
@@ -89,11 +90,13 @@ described:
 
 - [`kei-transaction/docs/rpc.md`](../kei-transaction/docs/rpc.md) — the wire
   contract, action by action
-- `packages/core/test/mock-server.test.ts` and `packages/kei/test/over-http.test.ts`
+- `packages/core/test/m2-node.test.ts` and `packages/kei/test/over-http.test.ts`
   — the conformance suite
 
-**M2 is done when those two files pass against this node with only the URL
-changed.** M3 then points the demo game at it, and nothing above the URL moves.
+**M2's RPC gate is green when those two exact files pass unchanged against both
+the mock and a clean dev node; `KEI_NODE_URL` is the only switch.** M4's
+commit/claim cases are preserved separately. M3 remains blocked until every M2
+definition-of-done item passes.
 
 ## Building
 

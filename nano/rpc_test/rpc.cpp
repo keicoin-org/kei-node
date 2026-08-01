@@ -1196,6 +1196,23 @@ TEST (rpc, account_history_block_shape)
 		ASSERT_FALSE (newest.get<std::string> ("work").empty ());
 	}
 
+	// The mutable team fixture opens with a state block. Query the locked
+	// reserve separately to prove the inherited legacy open gets the same
+	// semantic subtype without changing its bytes or genesis hash.
+	boost::property_tree::ptree reserve_request;
+	reserve_request.put ("action", "account_history");
+	reserve_request.put ("account", nano::dev::genesis->account ().to_account ());
+	reserve_request.put ("count", 100);
+	reserve_request.put ("shape", "block");
+	{
+		auto response (wait_response (system, rpc_ctx, reserve_request, 10s));
+		auto & reserve_history (response.get_child ("history"));
+		ASSERT_GT (reserve_history.size (), 1);
+		auto & oldest (reserve_history.back ().second);
+		ASSERT_EQ ("open", oldest.get<std::string> ("type"));
+		ASSERT_EQ ("open", oldest.get<std::string> ("subtype"));
+	}
+
 	// An unrecognised shape is an error, not a quiet fall back to the inherited
 	// answer — a wrong shape that returns something is the failure the dispatch
 	// exists to prevent.
