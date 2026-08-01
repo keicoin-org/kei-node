@@ -198,8 +198,17 @@ already paid tier-A work to publish.
    it bites, not after.
 3. **A claim's JSON `proof` is an array, and an empty one stays `[]`** via the
    §15 response encoder. A one-leaf drop is the only way to produce one.
-4. **The RPC surface is two reads** — `asset_commit` and `asset_claims` — and no
-   writes. Blocks are published through `process` as every other op is.
+4. **The RPC surface is two reads** — `commit_info` and `claim_status`, the
+   exact names and shapes `kei-transaction/docs/rpc.md` (§ Claims) specifies —
+   and no writes. Blocks are published through `process` as every other op is.
+   `asset_commit` and `asset_claims` answer alongside them as deprecated
+   aliases: the branch that first shipped this surface used those names, and
+   `asset_claims` served a *list* of an account's claims rather than the single
+   `(account, root)` boolean the frozen contract calls `claim_status`. Nothing
+   in the SDK or a merged node ever depended on that list shape, so the alias
+   points at `claim_status` rather than preserving it. The public gateway
+   allowlists only `commit_info` and `claim_status`; the old names are for a
+   node accessed directly during the transition.
 
 ## Definition of done for the node side of M4
 

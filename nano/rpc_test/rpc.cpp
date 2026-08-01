@@ -1236,6 +1236,44 @@ TEST (rpc, account_history_block_shape)
 	}
 }
 
+// kei-transaction/docs/rpc.md (§ Claims): `commit_info` answers `null` for a
+// root nobody published and `claim_status` answers `false` for a claim nobody
+// made — absent, not an error, the same rule `account_info` and `asset_info`
+// already follow (json_response.booleans_and_null pins the encoding this
+// relies on). `asset_commit`/`asset_claims` are deprecated aliases for the
+// identical handlers (decisions-m4.md §8.4); the public gateway allowlists
+// only the frozen names, so the assertion that actually matters is that both
+// names answer identically rather than one of them going unrouted.
+TEST (rpc, commit_info_claim_status_contract)
+{
+	nano::test::system system;
+	auto node = add_ipc_enabled_node (system);
+	auto const rpc_ctx = add_rpc (system, node);
+
+	nano::uint256_union root;
+	ASSERT_FALSE (root.decode_hex ("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"));
+	nano::keypair player;
+
+	for (std::string const & action : { "commit_info", "asset_commit" })
+	{
+		boost::property_tree::ptree request;
+		request.put ("action", action);
+		request.put ("root", root.to_string ());
+		auto response (wait_response (system, rpc_ctx, request));
+		ASSERT_EQ (std::string (), response.get<std::string> ("commit"));
+	}
+
+	for (std::string const & action : { "claim_status", "asset_claims" })
+	{
+		boost::property_tree::ptree request;
+		request.put ("action", action);
+		request.put ("account", player.pub.to_account ());
+		request.put ("root", root.to_string ());
+		auto response (wait_response (system, rpc_ctx, request));
+		ASSERT_FALSE (response.get<bool> ("claimed"));
+	}
+}
+
 TEST (rpc, history_count)
 {
 	nano::test::system system;

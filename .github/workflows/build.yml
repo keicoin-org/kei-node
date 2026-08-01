@@ -173,7 +173,7 @@ jobs:
       # the inherited RPC suite is red on genesis balances §14 changed on
       # purpose, and widening this before that is fixed would bury the signal.
       - name: Run Kei RPC tests
-        run: ./build/rpc_test --gtest_filter='rpc.account_history_block_shape'
+        run: ./build/rpc_test --gtest_filter='rpc.account_history_block_shape:rpc.commit_info_claim_status_contract'
 
       - name: Start a clean dev node and wait for RPC
         env:
@@ -218,6 +218,16 @@ jobs:
           KEI_SDK_DIR: ${{ github.workspace }}/kei-transaction
           KEI_NODE_URL: http://127.0.0.1:45000
         run: bash conformance/run-m2.sh
+
+      # commit_info/claim_status are M4; the pinned SDK revision above already
+      # carries their coverage (m4-node.test.ts, m4-over-http.test.ts landed in
+      # the same commit as m2-node.test.ts), so this needed a second launcher
+      # and a second step, not a new pin. See conformance/README.md.
+      - name: Run the exact M4 SDK contract against the node
+        env:
+          KEI_SDK_DIR: ${{ github.workspace }}/kei-transaction
+          KEI_NODE_URL: http://127.0.0.1:45000
+        run: bash conformance/run-m4.sh
 
       - name: Stop dev node
         if: always()
