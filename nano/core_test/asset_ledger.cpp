@@ -441,6 +441,108 @@ TEST (asset_ledger, mint_cannot_exceed_max_supply)
 	ASSERT_EQ (asset.max_supply, asset.circulating);
 }
 
+// The cap is checked with uint128 arithmetic, and uint128 wraps. Comparing
+// `circulating + amount` against the cap lets a large enough amount carry past
+// 2^128, compare small, and be credited as the wrapped remainder — a mint of
+// nearly 2^128 units against a cap of 1000, leaving the supply at zero. The
+// checks subtract instead, which cannot wrap.
+TEST (asset_ledger, minting_cannot_wrap_a_capped_supply)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const ceiling (std::numeric_limits<nano::uint128_t>::max ());
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto const balance (nano::amount (after_issuing (1)));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), balance, nano::asset_op::mint, issued.id, 600, player.pub));
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
+	}
+
+	// 600 + (2^128 - 599) is 2^128, which is zero in uint128.
+	auto wrapping (signed_asset (pool, nano::dev::team_key, mint->hash (), balance, nano::asset_op::mint, issued.id, nano::amount (ceiling - 599), player.pub));
+	auto exact (signed_asset (pool, nano::dev::team_key, mint->hash (), balance, nano::asset_op::mint, issued.id, 400, player.pub));
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *wrapping).code);
+
+		// Rejected means nothing moved: the supply is what it was, the block was
+		// never stored, and there is no receivable for anyone to collect.
+		nano::asset_info rejected;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, rejected));
+		ASSERT_EQ (nano::amount (600), rejected.circulating);
+		ASSERT_FALSE (store.block.exists (transaction, wrapping->hash ()));
+		ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, wrapping->hash ())));
+		auto const issuer (ledger.account_info (transaction, nano::dev::team_key.pub));
+		ASSERT_TRUE (issuer);
+		ASSERT_EQ (mint->hash (), issuer->head);
+
+		// And the headroom that is actually there is still spendable.
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *exact).code);
+	}
+
+	auto transaction (store.tx_begin_read ());
+	nano::asset_info asset;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+	ASSERT_EQ (nano::amount (1000), asset.circulating);
+}
+
+// An uncapped asset has no cap to compare against, which is exactly why the old
+// check skipped it: `!uncapped ()` short-circuited and the addition ran
+// unguarded. There is no cap but there is still a ceiling, and a mint that
+// crosses it must fail rather than roll the supply over to a small number.
+TEST (asset_ledger, minting_cannot_wrap_an_uncapped_supply)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const ceiling (std::numeric_limits<nano::uint128_t>::max ());
+	// A zero maxSupply is uncapped (SPEC §5.6.6).
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 0));
+	auto const balance (nano::amount (after_issuing (1)));
+	auto nearly_all (signed_asset (pool, nano::dev::team_key, issued.block->hash (), balance, nano::asset_op::mint, issued.id, nano::amount (ceiling - 10), player.pub));
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *nearly_all).code);
+		nano::asset_info asset;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+		ASSERT_TRUE (asset.uncapped ());
+		ASSERT_EQ (nano::amount (ceiling - 10), asset.circulating);
+	}
+
+	auto over (signed_asset (pool, nano::dev::team_key, nearly_all->hash (), balance, nano::asset_op::mint, issued.id, 11, player.pub));
+	auto exact (signed_asset (pool, nano::dev::team_key, nearly_all->hash (), balance, nano::asset_op::mint, issued.id, 10, player.pub));
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *over).code);
+
+		nano::asset_info rejected;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, rejected));
+		ASSERT_EQ (nano::amount (ceiling - 10), rejected.circulating);
+		ASSERT_FALSE (store.block.exists (transaction, over->hash ()));
+		ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, over->hash ())));
+
+		// The last ten units that fit still fit: the guard is off by nothing.
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *exact).code);
+		nano::asset_info asset;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+		ASSERT_EQ (nano::amount (ceiling), asset.circulating);
+
+		// With the supply at the ceiling, one more unit has nowhere to go.
+		auto beyond (signed_asset (pool, nano::dev::team_key, exact->hash (), balance, nano::asset_op::mint, issued.id, 1, player.pub));
+		ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *beyond).code);
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+		ASSERT_EQ (nano::amount (ceiling), asset.circulating);
+	}
+}
+
 // SPEC §5.6.6: maxSupply caps what exists at once, so burning frees headroom to
 // mint again. The consequence, documented rather than discovered: a burned item
 // can be re-minted by its issuer.
@@ -967,6 +1069,99 @@ TEST (asset_ledger, claims_cannot_exceed_max_supply)
 	// mistake surfacing at the only place the node can see it.
 	auto second (signed_asset (pool, unlucky, 0, 0, nano::asset_op::claim, issued.id, 60, tree.root (), claim_payload (tree.proof (1))));
 	ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *second).code);
+}
+
+// The claim path carries the same uint128 sum as the mint, and a leaf's amount
+// is whatever the issuer put in the tree — nothing bounds it below 2^128. A
+// wrapping claim would leave its claimant holding nearly the whole numeric range
+// of an asset capped at 100, and the recorded supply at zero.
+TEST (asset_ledger, claiming_cannot_wrap_a_capped_supply)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair lucky;
+	nano::keypair greedy;
+	nano::keypair last;
+
+	auto const ceiling (std::numeric_limits<nano::uint128_t>::max ());
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 100));
+	// 60 + (2^128 - 59) is 2^128, which is zero in uint128.
+	drop const tree ({ nano::asset_claim_leaf (lucky.pub, issued.id, nano::amount (60)),
+	nano::asset_claim_leaf (greedy.pub, issued.id, nano::amount (ceiling - 59)),
+	nano::asset_claim_leaf (last.pub, issued.id, nano::amount (40)) });
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, nano::amount (ceiling), tree.root (), commit_payload (3)));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+
+	auto first (signed_asset (pool, lucky, 0, 0, nano::asset_op::claim, issued.id, 60, tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *first).code);
+
+	auto wrapping (signed_asset (pool, greedy, 0, 0, nano::asset_op::claim, issued.id, nano::amount (ceiling - 59), tree.root (), claim_payload (tree.proof (1))));
+	ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *wrapping).code);
+
+	// Nothing was credited and nothing was recorded, so the supply still says
+	// what the first claim left it saying.
+	nano::asset_info rejected;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, rejected));
+	ASSERT_EQ (nano::amount (60), rejected.circulating);
+	ASSERT_TRUE (store.asset.balance (transaction, greedy.pub, issued.id).is_zero ());
+	ASSERT_EQ (0, store.asset.holdings_count (transaction, greedy.pub));
+	ASSERT_FALSE (store.asset.claim_exists (transaction, greedy.pub, tree.root ()));
+	ASSERT_FALSE (store.block.exists (transaction, wrapping->hash ()));
+	ASSERT_FALSE (ledger.account_info (transaction, greedy.pub));
+
+	// The honest leaf behind it still claims the headroom that is really there.
+	auto third (signed_asset (pool, last, 0, 0, nano::asset_op::claim, issued.id, 40, tree.root (), claim_payload (tree.proof (2))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *third).code);
+	nano::asset_info asset;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+	ASSERT_EQ (nano::amount (100), asset.circulating);
+	ASSERT_EQ (nano::amount (40), store.asset.balance (transaction, last.pub, issued.id));
+}
+
+// And uncapped on the claim side too, where the old check was skipped outright.
+TEST (asset_ledger, claiming_cannot_wrap_an_uncapped_supply)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair whale;
+	nano::keypair greedy;
+	nano::keypair last;
+
+	auto const ceiling (std::numeric_limits<nano::uint128_t>::max ());
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 0));
+	drop const tree ({ nano::asset_claim_leaf (whale.pub, issued.id, nano::amount (ceiling - 10)),
+	nano::asset_claim_leaf (greedy.pub, issued.id, nano::amount (11)),
+	nano::asset_claim_leaf (last.pub, issued.id, nano::amount (10)) });
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, nano::amount (ceiling), tree.root (), commit_payload (3)));
+
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+
+	auto first (signed_asset (pool, whale, 0, 0, nano::asset_op::claim, issued.id, nano::amount (ceiling - 10), tree.root (), claim_payload (tree.proof (0))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *first).code);
+
+	auto over (signed_asset (pool, greedy, 0, 0, nano::asset_op::claim, issued.id, 11, tree.root (), claim_payload (tree.proof (1))));
+	ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *over).code);
+
+	nano::asset_info rejected;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, rejected));
+	ASSERT_EQ (nano::amount (ceiling - 10), rejected.circulating);
+	ASSERT_TRUE (store.asset.balance (transaction, greedy.pub, issued.id).is_zero ());
+	ASSERT_FALSE (store.asset.claim_exists (transaction, greedy.pub, tree.root ()));
+	ASSERT_FALSE (store.block.exists (transaction, over->hash ()));
+
+	// Ten fits where eleven did not.
+	auto exact (signed_asset (pool, last, 0, 0, nano::asset_op::claim, issued.id, 10, tree.root (), claim_payload (tree.proof (2))));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *exact).code);
+	nano::asset_info asset;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+	ASSERT_EQ (nano::amount (ceiling), asset.circulating);
 }
 
 TEST (asset_ledger, rolling_back_a_claim_returns_the_units_and_the_entitlement)

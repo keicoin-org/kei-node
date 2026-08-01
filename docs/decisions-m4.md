@@ -174,6 +174,16 @@ The SDK should check a batch against remaining headroom before publishing its
 root, and that check is advice, not enforcement — as it must be, since the node
 cannot verify it either way.
 
+**The check subtracts, and it runs on uncapped assets too.** A leaf's amount is
+whatever the issuer wrote into the tree, and the same goes for a mint's, so
+`circulating + amount` is an attacker-chosen uint128 sum that can carry past
+2^128 — comparing that sum against the cap would let it wrap, compare small,
+and be credited as the remainder. Both the mint and the claim therefore ask
+`amount > max_supply - circulating` instead, behind `amount > 2^128 - 1 -
+circulating`. That ceiling test runs whether or not the asset is capped: an
+uncapped asset has no cap to compare against but still has the arithmetic
+ceiling, and that is exactly the case a capped-only check skips.
+
 ## 7. `claim` is a tier-C operation
 
 Work tiers (decisions-m2.md §11) put `issue` and `mint` at A, `transfer` at B,
