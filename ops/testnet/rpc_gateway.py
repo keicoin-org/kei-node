@@ -14,6 +14,7 @@ import collections
 import http.server
 import json
 import os
+import ssl
 import threading
 import time
 import urllib.error
@@ -216,6 +217,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--listen", default=os.environ.get("KEI_GATEWAY_LISTEN", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("KEI_GATEWAY_PORT", "8080")))
+    parser.add_argument("--tls-cert", default=os.environ.get("KEI_GATEWAY_TLS_CERT"))
+    parser.add_argument("--tls-key", default=os.environ.get("KEI_GATEWAY_TLS_KEY"))
     parser.add_argument(
         "--upstream",
         # The node config needs an IPv4-mapped IPv6 bind address, but clients
@@ -229,8 +232,15 @@ def main() -> None:
         default=int(os.environ.get("KEI_FAUCET_MAX_RAW", str(DEFAULT_FAUCET_MAX_RAW))),
     )
     args = parser.parse_args()
+    if bool(args.tls_cert) != bool(args.tls_key):
+        parser.error("--tls-cert and --tls-key must be provided together")
     state = GatewayState(args.upstream, args.faucet_max_raw)
     server = http.server.ThreadingHTTPServer((args.listen, args.port), handler_for(state))
+    if args.tls_cert and args.tls_key:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(args.tls_cert, args.tls_key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
     server.serve_forever()
 
 

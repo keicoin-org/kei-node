@@ -14,6 +14,10 @@ only public listener. It forwards the exact SDK actions, refuses every other
 action, adds browser CORS, bounds bodies and concurrency, and does not log
 request bodies.
 
+Cloudflare terminates the public certificate and connects to the gateway over
+TLS in Full mode. The origin key is generated on the host, mode `0640`, and is
+never committed or printed. The gateway does not serve plaintext RPC.
+
 The gateway applies three faucet bounds before a request reaches the node:
 
 - at most 10,000 testnet Kei in one grant;

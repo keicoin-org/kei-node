@@ -5,7 +5,7 @@ set -euo pipefail
 # ledger directory is never modified by this script.
 repo="${KEI_NODE_REPO:-/root/kei-node}"
 listen="${KEI_GATEWAY_LISTEN:-0.0.0.0}"
-port="${KEI_GATEWAY_PORT:-80}"
+port="${KEI_GATEWAY_PORT:-443}"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup="/root/kei-rollbacks/gateway-${stamp}"
 
@@ -15,13 +15,28 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 test -f "${repo}/ops/testnet/rpc_gateway.py"
 
-mkdir -p "${backup}" /opt/kei-rpc-gateway
+mkdir -p "${backup}" /opt/kei-rpc-gateway /etc/kei-rpc-gateway
 for existing in /opt/kei-rpc-gateway/rpc_gateway.py /etc/systemd/system/kei-rpc-gateway.service; do
   if [[ -f "${existing}" ]]; then
     cp -a "${existing}" "${backup}/"
   fi
 done
 install -m 0755 "${repo}/ops/testnet/rpc_gateway.py" /opt/kei-rpc-gateway/rpc_gateway.py
+
+# Cloudflare's edge terminates the browser certificate and the zone uses Full
+# mode to the origin. A host-local certificate keeps that second leg encrypted;
+# the private key is generated on the host, never committed or printed.
+if [[ ! -s /etc/kei-rpc-gateway/origin.key || ! -s /etc/kei-rpc-gateway/origin.crt ]]; then
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    -subj "/CN=testnet.keicoin.org" \
+    -addext "subjectAltName=DNS:testnet.keicoin.org" \
+    -keyout /etc/kei-rpc-gateway/origin.key \
+    -out /etc/kei-rpc-gateway/origin.crt >/dev/null 2>&1
+fi
+chown root:nogroup /etc/kei-rpc-gateway /etc/kei-rpc-gateway/origin.key /etc/kei-rpc-gateway/origin.crt
+chmod 0750 /etc/kei-rpc-gateway
+chmod 0640 /etc/kei-rpc-gateway/origin.key
+chmod 0644 /etc/kei-rpc-gateway/origin.crt
 
 cat > /etc/systemd/system/kei-rpc-gateway.service <<UNIT
 [Unit]
@@ -30,7 +45,7 @@ After=network-online.target kei-node.service
 Requires=kei-node.service
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/kei-rpc-gateway/rpc_gateway.py --listen ${listen} --port ${port}
+ExecStart=/usr/bin/python3 /opt/kei-rpc-gateway/rpc_gateway.py --listen ${listen} --port ${port} --tls-cert /etc/kei-rpc-gateway/origin.crt --tls-key /etc/kei-rpc-gateway/origin.key
 Restart=on-failure
 RestartSec=2
 User=nobody
@@ -50,7 +65,7 @@ systemctl daemon-reload
 systemctl enable --now kei-rpc-gateway
 ready=0
 for _ in $(seq 1 25); do
-  if curl -fsS --max-time 5 "http://127.0.0.1:${port}/healthz"; then
+  if curl -kfsS --max-time 5 "https://127.0.0.1:${port}/healthz"; then
     ready=1
     break
   fi
