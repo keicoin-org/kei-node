@@ -723,6 +723,69 @@ either side that moves a hash fails on both.
 
 ---
 
+## 17. What running it found
+
+§3 said the binding constraint was that this tree had no machine to compile on.
+It has one now — a Linux box, built from the same recipe as
+[`.github/workflows/build.yml`](../.github/workflows/build.yml) — so
+definition-of-done (1) is met: **`bananode` builds, starts, and serves RPC**, and
+[`conformance/`](../conformance/) drives the SDK's own suite against it over HTTP.
+
+Seven of its eleven cases pass. What the other four cost is written down in
+`conformance/README.md`; what the seven cost is written down here, because every
+one of them was a defect that compiling could not have found, and three of them
+would have made the node unusable by any client.
+
+**`faucet` existed only in the contract.** It is testnet-only (SPEC §12), pays
+from the dev genesis account rather than the mock's `community` — §5's four
+circulating allocations are sends the §5.7 ceremony has not produced — and
+serialises its read-build-process, because two calls reading one frontier fork
+the single account every test funds from.
+
+**`process` could not read a block.** Nano sends `block` as a *string* of JSON
+and opts into an object with `json_block`; rpc.md sends the object, with no such
+flag, as every other action in that contract does. So `get<std::string>` on a
+subtree yielded an empty string, an empty string is not JSON, and every block the
+SDK ever signed came back "Block is invalid" without the node looking at it.
+`block_impl` now accepts whichever arrived — a subtree has children and a string
+does not — which keeps the inherited form working.
+
+**§11's work tiers were advertised but not enforced.** The tiers are not separate
+constants: B *is* `epoch_2` and C *is* `epoch_2_receive`, so they govern only
+once an account has reached epoch 2. Kei sat at epoch 0, where the single
+`epoch_1` threshold covers sends and receives alike — and on dev that is `0xfe00…`
+against tier C's `0xf000…`. The node answered `work_thresholds` with a receive
+tier its own ledger then refused, so **every client's opening block failed as
+"insufficient work"**. Kei starts at epoch 2 now, in both places the fact is
+written: the genesis sideband in `common.cpp` and the genesis *account record* in
+`store.cpp`, which is the one actually read when the next block is validated and
+which had it hardcoded. Fixing only the first changed nothing, which is how the
+second was found. No block hash moves — the sideband is not hashed, and the §14
+vectors still pass.
+
+**A bad signature cost fifteen seconds and said nothing.** State blocks whose
+signature fails verification are dropped rather than queued, so `process_one`
+never saw them and the promise `add_blocking` waits on was never settled: the
+caller waited out the whole `block_process_timeout` and was told "Stopped", which
+names the timeout rather than the fault. It is also the first thing any new
+client integration meets, because signing over the wrong bytes — a different hash
+domain (§14), a field the layout has no room for (§8) — lands exactly here. Those
+promises are now settled with the real reason: **15,001 ms to 1 ms**, and "Bad
+signature" instead of "Stopped".
+
+**The one thing left that is a decision rather than a defect** is the shape of a
+Kei payment carrying a memo. §8 put memos on the asset block and left `state`
+untouched, and `kei.pay({ memo })` builds a `state` block with a `memo` field —
+which the §14 layout has no room for. The SDK already knows: `wire.ts` names it a
+node-layout gap and hashes such a block under a deliberately local domain so that
+a node rejects it loudly rather than accepting it with the memo quietly dropped.
+So the two implementations agree that this block is not valid; what was never
+settled is what the valid one looks like. §8 implies an asset-family block with
+asset id 0, which is a wire question this document should answer before M3
+depends on it.
+
+---
+
 ## Definition of done for M2
 
 1. `kei-node` builds and runs a single local node.

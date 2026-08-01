@@ -14,12 +14,23 @@ token primitive** and a Kei genesis.
 > response encoder that emits the contract's numbers, nulls, and empty arrays
 > instead of quoting everything (§15).
 >
-> **Not finished** (§16): the reserve set is empty until the SPEC §5.7 genesis
-> ceremony fills it, so the reserve rules currently hold vacuously, and `faucet`
-> is not implemented. The five asset operations now run through the ledger and
-> back out through rollback on every CI run; most of the RPC half is still
-> checked only by compiling, which is not the same claim. It still does not build
-> on the machine it was cloned onto, see [Building](#building). Nothing here holds
+> **The node now builds, starts, and serves RPC**, and the SDK's own conformance
+> suite runs against it over HTTP — [`conformance/`](conformance/), §17. Seven of
+> its eleven cases pass, including `process` for both `state` and `asset` blocks.
+> Getting there fixed three defects that made the node unusable by any client and
+> that compiling could not have found: `process` could not read the block shape
+> the contract sends, §11's work tiers were advertised but not enforced so every
+> client's opening block was refused, and a bad signature cost fifteen seconds
+> and reported "Stopped".
+>
+> **Not finished** (§16, §17): the reserve set is empty until the SPEC §5.7
+> genesis ceremony fills it, so the reserve rules currently hold vacuously.
+> `commit`/`claim` are M4 and account for two of the four remaining conformance
+> failures. The other two are decisions rather than defects — the wire shape of a
+> Kei payment carrying a memo (§8), and a genesis whose oldest block is a legacy
+> `open` rather than the state block the contract expects, which belongs to the
+> ceremony because changing it moves the genesis hash. It still does not build on
+> the machine it was cloned onto, see [Building](#building). Nothing here holds
 > value.
 
 ## Why a fork at all
