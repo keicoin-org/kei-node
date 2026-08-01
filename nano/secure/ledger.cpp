@@ -10,6 +10,8 @@
 
 #include <cryptopp/words.h>
 
+#include <limits>
+
 namespace
 {
 /**
@@ -882,13 +884,20 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 				return;
 			}
 			// maxSupply caps circulating supply, so burning frees headroom
-			// (SPEC §5.6.6).
-			if (!asset.uncapped () && asset.circulating.number () + amount > asset.max_supply.number ())
+			// (SPEC §5.6.6). Both comparisons subtract rather than add:
+			// `circulating + amount` is uint128 arithmetic and wraps, so an
+			// amount large enough to carry past 2^128 would compare small and
+			// then be credited as the wrapped remainder. An uncapped asset has
+			// no cap to compare against but still has the arithmetic ceiling,
+			// which is why the first test runs either way.
+			auto const circulating (asset.circulating.number ());
+			auto const arithmetic_room (std::numeric_limits<nano::uint128_t>::max () - circulating);
+			if (amount > arithmetic_room || (!asset.uncapped () && amount > asset.max_supply.number () - circulating))
 			{
 				result.code = nano::process_result::over_max_supply;
 				return;
 			}
-			asset.circulating = asset.circulating.number () + amount;
+			asset.circulating = circulating + amount;
 			asset_dirty = true;
 			receivable_to = block_a.hashables.link.as_account ();
 			receivable = nano::asset_pending_info (block_a.hashables.account, asset_id, amount, block_a.hashables.payload.memo);
@@ -1102,8 +1111,11 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			// this is where the cap applies. An issuer who commits to more than
 			// the cap allows has published a drop whose later claims fail — the
 			// node cannot tell that at commit time, because it never learns what
-			// the other leaves say.
-			if (!asset.uncapped () && asset.circulating.number () + amount > asset.max_supply.number ())
+			// the other leaves say. Subtracting rather than adding, for the same
+			// reason as the mint above: the sum is uint128 and would wrap.
+			auto const circulating (asset.circulating.number ());
+			auto const arithmetic_room (std::numeric_limits<nano::uint128_t>::max () - circulating);
+			if (amount > arithmetic_room || (!asset.uncapped () && amount > asset.max_supply.number () - circulating))
 			{
 				result.code = nano::process_result::over_max_supply;
 				return;
@@ -1114,7 +1126,7 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 				result.code = nano::process_result::too_many_assets;
 				return;
 			}
-			asset.circulating = asset.circulating.number () + amount;
+			asset.circulating = circulating + amount;
 			asset_dirty = true;
 			// The claimant writes their own block, so there is no receivable step
 			// and nothing to collect later: this is the whole point of §5.5, and
