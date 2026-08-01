@@ -47,6 +47,10 @@ TEST (genesis_reserve, dev_ceremony_installs_the_set_and_exact_allocation)
 	ASSERT_EQ (nano::dev::constants.allocation_reserve (), reserve_info->balance.number ());
 	ASSERT_EQ (5, reserve_info->block_count);
 	ASSERT_EQ (nano::dev::constants.genesis_allocations.back ().send->hash (), reserve_info->head);
+	nano::confirmation_height_info reserve_confirmation;
+	ASSERT_FALSE (store.confirmation_height.get (transaction, reserve, reserve_confirmation));
+	ASSERT_EQ (5, reserve_confirmation.height);
+	ASSERT_EQ (reserve_info->head, reserve_confirmation.frontier);
 	ASSERT_EQ (0, ledger.weight (reserve));
 	ASSERT_EQ (0, ledger.weight (nano::account{}));
 
@@ -60,6 +64,10 @@ TEST (genesis_reserve, dev_ceremony_installs_the_set_and_exact_allocation)
 		ASSERT_EQ (circulating_amounts[i], info->balance.number ());
 		ASSERT_EQ (account, info->representative);
 		ASSERT_EQ (circulating_amounts[i], ledger.weight (account));
+		nano::confirmation_height_info confirmation;
+		ASSERT_FALSE (store.confirmation_height.get (transaction, account, confirmation));
+		ASSERT_EQ (1, confirmation.height);
+		ASSERT_EQ (info->head, confirmation.frontier);
 		ASSERT_TRUE (store.block.exists (transaction, nano::dev::constants.genesis_allocations[i].send->hash ()));
 		ASSERT_TRUE (store.block.exists (transaction, nano::dev::constants.genesis_allocations[i].open->hash ()));
 		ASSERT_FALSE (nano::validate_message (reserve, nano::dev::constants.genesis_allocations[i].send->hash (), nano::dev::constants.genesis_allocations[i].send->block_signature ()));
@@ -72,6 +80,9 @@ TEST (genesis_reserve, dev_ceremony_installs_the_set_and_exact_allocation)
 
 	ASSERT_EQ (nano::uint128_t ("100000000000") * nano::BAN_ratio, circulating);
 	ASSERT_EQ (nano::kei_total_supply, reserve_info->balance.number () + circulating);
+	ASSERT_EQ (9, ledger.cache.block_count.load ());
+	ASSERT_EQ (9, ledger.cache.cemented_count.load ());
+	ASSERT_EQ (5, ledger.cache.account_count.load ());
 }
 
 TEST (genesis_reserve, ordinary_blocks_cannot_delegate_send_or_issue)
