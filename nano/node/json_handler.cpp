@@ -2895,6 +2895,15 @@ void nano::json_handler::account_history ()
 					}
 					entry.put ("subtype", subtype);
 				}
+				else if (block->type () == nano::block_type::open)
+				{
+					// Kei's dev genesis deliberately keeps the inherited legacy
+					// open block. Its hash and wire bytes must not move, but the SDK
+					// still needs the semantic subtype promised by docs/rpc.md.
+					// This is response metadata only; process continues to accept
+					// the unchanged legacy block shape.
+					entry.put ("subtype", "open");
+				}
 				// Every block on the chain appears, where the visitor drops the
 				// ones it has no derived entry for — a change block without
 				// `raw`, most visibly. The contract asks for the account's

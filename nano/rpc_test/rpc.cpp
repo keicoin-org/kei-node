@@ -1194,6 +1194,13 @@ TEST (rpc, account_history_block_shape)
 		ASSERT_FALSE (newest.get<std::string> ("representative").empty ());
 		ASSERT_FALSE (newest.get<std::string> ("balance").empty ());
 		ASSERT_FALSE (newest.get<std::string> ("work").empty ());
+
+		// The oldest block is the inherited legacy open, not a state-open.
+		// Adding its semantic subtype to the response must not alter the block
+		// itself or the genesis hash.
+		auto & oldest (history_node.back ().second);
+		ASSERT_EQ ("open", oldest.get<std::string> ("type"));
+		ASSERT_EQ ("open", oldest.get<std::string> ("subtype"));
 	}
 
 	// An unrecognised shape is an error, not a quiet fall back to the inherited

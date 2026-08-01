@@ -38,6 +38,25 @@ jobs:
           # CMakeLists.txt add_subdirectory()s each Boost library directly.
           submodules: recursive
 
+      # M2's contract lives in the SDK repository. Pinning the revision makes
+      # a green node build a claim about one reviewable contract, not whatever
+      # happened to be at the tip of another repository when the job started.
+      - name: Check out the pinned SDK contract
+        uses: actions/checkout@v4
+        with:
+          repository: keicoin-org/kei-transaction
+          ref: a448884b735071720e3da51589ad6c512c4a44ae
+          path: kei-transaction
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.0
+
+      - name: Install SDK dependencies
+        working-directory: kei-transaction
+        run: bun install --frozen-lockfile
+
       # gcc-12 rather than whatever ubuntu-latest ships. RocksDB 7.8.3 is
       # vendored at submodules/rocksdb and predates GCC 13's removal of the
       # transitive <cstdint> include, so on a current image it fails with
@@ -155,3 +174,68 @@ jobs:
       # purpose, and widening this before that is fixed would bury the signal.
       - name: Run Kei RPC tests
         run: ./build/rpc_test --gtest_filter='rpc.account_history_block_shape'
+
+      - name: Start a clean dev node and wait for RPC
+        env:
+          KEI_DATA_PATH: ${{ runner.temp }}/kei-data
+          KEI_NODE_LOG: ${{ runner.temp }}/kei-node.log
+          KEI_NODE_PID: ${{ runner.temp }}/kei-node.pid
+        run: |
+          mkdir -p "${KEI_DATA_PATH}"
+          cat > "${KEI_DATA_PATH}/config-node.toml" <<'TOML'
+          [rpc]
+          enable = true
+          TOML
+          cat > "${KEI_DATA_PATH}/config-rpc.toml" <<'TOML'
+          address = "::ffff:127.0.0.1"
+          port = 45000
+          enable_control = true
+          TOML
+
+          ./build/bananode --daemon --data_path "${KEI_DATA_PATH}" > "${KEI_NODE_LOG}" 2>&1 &
+          echo $! > "${KEI_NODE_PID}"
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error --max-time 2 \
+              --header 'content-type: application/json' \
+              --data '{"action":"version"}' \
+              http://127.0.0.1:45000 > "${{ runner.temp }}/kei-version.json"; then
+              cat "${{ runner.temp }}/kei-version.json"
+              exit 0
+            fi
+            if ! kill -0 "$(cat "${KEI_NODE_PID}")" 2>/dev/null; then
+              echo "bananode exited before RPC became ready"
+              cat "${KEI_NODE_LOG}"
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "RPC did not become ready within 120 seconds"
+          cat "${KEI_NODE_LOG}"
+          exit 1
+
+      - name: Run the exact M2 SDK contract against the node
+        env:
+          KEI_SDK_DIR: ${{ github.workspace }}/kei-transaction
+          KEI_NODE_URL: http://127.0.0.1:45000
+        run: bash conformance/run-m2.sh
+
+      - name: Stop dev node
+        if: always()
+        env:
+          KEI_NODE_PID: ${{ runner.temp }}/kei-node.pid
+        run: |
+          if [[ -f "${KEI_NODE_PID}" ]]; then
+            kill "$(cat "${KEI_NODE_PID}")" 2>/dev/null || true
+          fi
+
+      - name: Upload node conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m2-node-conformance-${{ github.sha }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/kei-node.log
+            ${{ runner.temp }}/kei-version.json
+            ${{ runner.temp }}/kei-data/config-node.toml
+            ${{ runner.temp }}/kei-data/config-rpc.toml

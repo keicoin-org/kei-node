@@ -736,12 +736,12 @@ either side that moves a hash fails on both.
 It has one now — a Linux box, built from the same recipe as
 [`.github/workflows/build.yml`](../.github/workflows/build.yml) — so
 definition-of-done (1) is met: **`bananode` builds, starts, and serves RPC**, and
-[`conformance/`](../conformance/) drives the SDK's own suite against it over HTTP.
-
-Seven of its eleven cases pass. What the other four cost is written down in
-`conformance/README.md`; what the seven cost is written down here, because every
-one of them was a defect that compiling could not have found, and three of them
-would have made the node unusable by any client.
+[`conformance/`](../conformance/) drives the SDK's M2 suite against it over HTTP.
+The first run used a copied harness and found four failures. That was useful
+diagnostically, but a copy that changes assertions is not "only the URL changed",
+and two failures were `commit`/`claim` cases that section 0 assigns to M4. The
+gate now runs the exact SDK-owned M2 files with `KEI_NODE_URL`; the M4 cases stay
+executable in explicitly named M4 suites and are not pulled into this milestone.
 
 **`faucet` existed only in the contract.** It is testnet-only (SPEC §12), pays
 from the deterministic dev `community` allocation, matching the mock, and
@@ -911,7 +911,8 @@ when this section was written.
 4. The node validates `issue`, `mint`, `burn`, `transfer`, and `asset_receive`,
    including max-supply caps, transfer policy, and the escalating issuance burn.
 5. `balanceOf` answers in a single call, from `holders`.
-6. `packages/core/test/mock-server.test.ts` and `packages/kei/test/over-http.test.ts`
-   pass against `kei-node` with only the URL changed.
+6. `packages/core/test/m2-node.test.ts` and `packages/kei/test/over-http.test.ts`
+   pass unchanged against both `MockNode` and `kei-node`; `KEI_NODE_URL` is the
+   only switch. The node CI starts a clean dev node and runs those exact files.
 
 (6) is the one that matters. The others are things the mock already does.
