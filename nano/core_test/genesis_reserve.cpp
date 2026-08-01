@@ -1,4 +1,5 @@
 #include <nano/lib/blockbuilders.hpp>
+#include <nano/lib/work.hpp>
 #include <nano/secure/ledger.hpp>
 #include <nano/secure/store.hpp>
 #include <nano/test_common/ledger.hpp>
@@ -6,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <limits>
 
 namespace
 {
@@ -139,4 +141,35 @@ TEST (genesis_reserve, rebuilding_the_weight_cache_keeps_reserve_excluded)
 	{
 		ASSERT_EQ (circulating_amounts[i], rebuilt.weight (circulating_keys[i]->pub));
 	}
+}
+
+TEST (genesis_reserve, receive_and_rollback_never_give_reserve_weight)
+{
+	nano::test::context::ledger_context context;
+	auto & ledger (context.ledger ());
+	auto & store (context.store ());
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+
+	auto const reserve (nano::dev::genesis_key.pub);
+	auto const sender (nano::dev::team_key.pub);
+	auto const reserve_start (nano::dev::constants.allocation_reserve ());
+	auto const sender_start (nano::dev::constants.allocation_team ());
+	auto const reserve_head (nano::dev::constants.genesis_allocations.back ().send->hash ());
+	auto const sender_head (nano::dev::constants.genesis_allocations.back ().open->hash ());
+
+	auto send = std::make_shared<nano::state_block> (sender, sender_head, sender, nano::amount (sender_start - 1), reserve, nano::dev::team_key.prv, sender, 0);
+	send->block_work_set (*pool.generate (send->root (), nano::dev::constants.work.tier_b ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (store.tx_begin_write (), *send).code);
+
+	auto receive = std::make_shared<nano::state_block> (reserve, reserve_head, nano::account{}, nano::amount (reserve_start + 1), send->hash (), nano::dev::genesis_key.prv, reserve, 0);
+	receive->block_work_set (*pool.generate (receive->root (), nano::dev::constants.work.tier_c ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (store.tx_begin_write (), *receive).code);
+	ASSERT_EQ (0, ledger.weight (reserve));
+	ASSERT_EQ (0, ledger.weight (nano::account{}));
+	ASSERT_EQ (sender_start - 1, ledger.weight (sender));
+
+	ASSERT_FALSE (ledger.rollback (store.tx_begin_write (), receive->hash ()));
+	ASSERT_EQ (0, ledger.weight (reserve));
+	ASSERT_EQ (0, ledger.weight (nano::account{}));
+	ASSERT_EQ (sender_start - 1, ledger.weight (sender));
 }
