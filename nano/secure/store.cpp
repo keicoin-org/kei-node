@@ -150,12 +150,41 @@ void nano::store::initialize (nano::write_transaction const & transaction_a, nan
 {
 	debug_assert (constants.genesis->has_sideband ());
 	debug_assert (account.begin (transaction_a) == account.end ());
-	auto hash_l (constants.genesis->hash ());
-	block.put (transaction_a, hash_l, *constants.genesis);
-	++ledger_cache_a.block_count;
-	confirmation_height.put (transaction_a, constants.genesis->account (), nano::confirmation_height_info{ 1, constants.genesis->hash () });
-	++ledger_cache_a.cemented_count;
-	ledger_cache_a.final_votes_confirmation_canary = (constants.final_votes_canary_account == constants.genesis->account () && 1 >= constants.final_votes_canary_height);
+	auto const genesis_hash (constants.genesis->hash ());
+	auto const timestamp (nano::seconds_since_epoch ());
+	block.put (transaction_a, genesis_hash, *constants.genesis);
+
+	// Beta/live have no ceremony data until their offline genesis ceremony has
+	// happened (and ledger_constants refuses their placeholder before reaching
+	// here). The dev network has four fixed sends and matching opens. Installing
+	// those blocks as the immutable initial history is the same special operation
+	// as installing the genesis open itself: ordinary ledger processing begins
+	// only after the reserve has paid the four allocations and become locked.
+	uint64_t reserve_height{ 1 };
+	nano::block_hash reserve_head (genesis_hash);
+	nano::amount reserve_balance (constants.genesis_amount);
+	for (auto const & allocation : constants.genesis_allocations)
+	{
+		++reserve_height;
+		reserve_head = allocation.send->hash ();
+		reserve_balance = allocation.send->balance ();
+		allocation.send->sideband_set (nano::block_sideband (constants.genesis->account (), 0, 0, reserve_height, timestamp, nano::block_details (nano::epoch::epoch_2, true, false, false), nano::epoch::epoch_0));
+		block.put (transaction_a, reserve_head, *allocation.send);
+
+		auto const recipient (allocation.open->account ());
+		auto const open_hash (allocation.open->hash ());
+		allocation.open->sideband_set (nano::block_sideband (recipient, 0, 0, 1, timestamp, nano::block_details (nano::epoch::epoch_2, false, true, false), nano::epoch::epoch_2));
+		block.put (transaction_a, open_hash, *allocation.open);
+		account.put (transaction_a, recipient, { open_hash, recipient, open_hash, allocation.amount, timestamp, 1, nano::epoch::epoch_2 });
+		confirmation_height.put (transaction_a, recipient, nano::confirmation_height_info{ 1, open_hash });
+		ledger_cache_a.rep_weights.representation_put (recipient, allocation.amount);
+	}
+
+	ledger_cache_a.block_count += 1 + (constants.genesis_allocations.size () * 2);
+	ledger_cache_a.cemented_count += 1 + (constants.genesis_allocations.size () * 2);
+	ledger_cache_a.account_count += 1 + constants.genesis_allocations.size ();
+	confirmation_height.put (transaction_a, constants.genesis->account (), nano::confirmation_height_info{ reserve_height, reserve_head });
+	ledger_cache_a.final_votes_confirmation_canary = (constants.final_votes_canary_account == constants.genesis->account () && reserve_height >= constants.final_votes_canary_height);
 	// The epoch the genesis account records has to be the one its own sideband
 	// carries, which for Kei is epoch 2 (nano/secure/common.cpp). These are two
 	// separate writes of the same fact and only this one is read when the next
@@ -163,10 +192,20 @@ void nano::store::initialize (nano::write_transaction const & transaction_a, nan
 	// ledger at epoch 0 no matter what the sideband said — the tiers in
 	// decisions-m2.md §11 stayed unreachable and every opening block a client
 	// signed was refused for insufficient work.
-	account.put (transaction_a, constants.genesis->account (), { hash_l, constants.genesis->account (), constants.genesis->hash (), constants.genesis_amount, nano::seconds_since_epoch (), 1, constants.genesis->sideband ().details.epoch });
-	++ledger_cache_a.account_count;
-	ledger_cache_a.rep_weights.representation_put (constants.genesis->account (), constants.genesis_amount);
-	frontier.put (transaction_a, hash_l, constants.genesis->account ());
+	account.put (transaction_a, constants.genesis->account (), { reserve_head, constants.genesis->representative (), genesis_hash, reserve_balance, timestamp, reserve_height, constants.genesis->sideband ().details.epoch });
+	// No representation entry for reserve: the null representative is not a
+	// bucket holding 90% of supply; reserve Kei contributes zero weight of any
+	// kind. Circulating accounts were added above under their own representatives.
+	if (!constants.is_reserve (constants.genesis->account ()) && !constants.genesis->representative ().is_zero ())
+	{
+		ledger_cache_a.rep_weights.representation_put (constants.genesis->representative (), reserve_balance);
+	}
+	// Every account frontier is a state block after the ceremony. The inherited
+	// frontier table indexes only legacy blocks, so none is inserted here.
+	if (constants.genesis_allocations.empty ())
+	{
+		frontier.put (transaction_a, genesis_hash, constants.genesis->account ());
+	}
 }
 
 std::optional<nano::account_info> nano::account_store::get (const nano::transaction & transaction, const nano::account & account)

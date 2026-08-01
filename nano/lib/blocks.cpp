@@ -1127,7 +1127,10 @@ nano::state_block::state_block (nano::account const & account_a, nano::block_has
 	work (work_a)
 {
 	debug_assert (account_a != nullptr);
-	debug_assert (representative_a != nullptr);
+	// A zero representative is ordinarily useless, but it is the consensus
+	// null representative required for reserve accounts by SPEC §5.7. Ledger
+	// validation decides where it is permitted; block construction must be able
+	// to represent it.
 	debug_assert (link_a.as_account () != nullptr);
 	debug_assert (pub_a != nullptr);
 }
@@ -2005,7 +2008,9 @@ nano::asset_block::asset_block (nano::account const & account_a, nano::block_has
 	work (work_a)
 {
 	debug_assert (account_a != nullptr);
-	debug_assert (representative_a != nullptr);
+	// Reserve asset blocks retain the required null representative. Whether a
+	// given operation is permitted is a ledger rule, not a representability
+	// rule for the block object.
 	debug_assert (pub_a != nullptr);
 }
 

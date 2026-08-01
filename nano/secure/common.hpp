@@ -464,6 +464,19 @@ nano::error_process to_error_process (process_result);
 
 class network_params;
 
+/**
+ * One circulating allocation created by the genesis ceremony. `send` is on
+ * the reserve chain and `open` collects it into the named account. Both are
+ * fixed blocks: store initialisation installs the ceremony as immutable
+ * history, before ordinary reserve locking begins.
+ */
+struct genesis_allocation
+{
+	std::shared_ptr<nano::state_block> send;
+	std::shared_ptr<nano::state_block> open;
+	nano::amount amount;
+};
+
 /** Genesis keys and ledger constants for network variants */
 class ledger_constants
 {
@@ -498,14 +511,20 @@ public:
 	 * is a cheap test the node cannot get wrong, which is what SPEC means by
 	 * refusing "a convention wearing a protocol's clothes".
 	 *
-	 * Empty until the mainnet genesis ceremony fills it: the reserve is 90% of
-	 * all Kei, its custody is multisig, and its key is generated offline, so
-	 * what ships in this repository is an address and never a seed
-	 * (decisions-m2.md §5). A node whose reserve set is empty enforces the
-	 * reserve rules vacuously, which is correct — it has no reserve.
+	 * Dev contains the singleton reserve account named by its reproducible test
+	 * genesis. Beta/live remain empty and unstartable until their offline
+	 * ceremony fills the public address and signed blocks: the reserve is 90%
+	 * of all valuable Kei, its custody is multisig, and its seed never ships
+	 * (decisions-m2.md §5).
 	 */
 	std::vector<nano::account> reserve_accounts;
 	bool is_reserve (nano::account const &) const;
+	/**
+	 * The four ceremony sends and matching opens. Dev carries deterministic,
+	 * publicly reproducible test blocks; beta/live remain empty until their
+	 * offline ceremony output replaces the hard-failing placeholder genesis.
+	 */
+	std::vector<nano::genesis_allocation> genesis_allocations;
 
 	/**
 	 * SPEC §5.7's allocation, in whole Kei. The four circulating allocations
@@ -532,6 +551,12 @@ public:
 namespace dev
 {
 	extern nano::keypair genesis_key;
+	// Published dev-only allocation keys. They fund local tests and must never
+	// be copied to beta/live, whose ceremony keys are generated offline.
+	extern nano::keypair grants_key;
+	extern nano::keypair community_key;
+	extern nano::keypair bounty_key;
+	extern nano::keypair team_key;
 	extern nano::network_params network_params;
 	extern nano::ledger_constants & constants;
 	extern std::shared_ptr<nano::block> & genesis;

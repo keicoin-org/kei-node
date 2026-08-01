@@ -5,8 +5,7 @@ reproduce a block whose signature is already known, so `verify` does exactly
 that against the inherited dev genesis before anything is generated.
 """
 import hashlib
-import os
-import sys
+import json
 
 # ---------------------------------------------------------------- ed25519-blake2b
 # Standard ed25519 with SHA-512 replaced by BLAKE2b-512, which is what nano uses.
@@ -148,11 +147,16 @@ def work_value(root, nonce_le):
 
 
 def mine(root, threshold):
+    # Start from zero so the checked-in dev ceremony is reproducible byte for
+    # byte. Work is not part of a block hash or signature, but deterministic
+    # work makes auditing generated literals substantially easier.
+    nonce_value = 0
     while True:
-        nonce = os.urandom(8)
+        nonce = nonce_value.to_bytes(8, "little")
         if work_value(root, nonce) >= threshold:
             # Nano prints work as the big-endian hex of the little-endian nonce.
             return nonce[::-1].hex()
+        nonce_value += 1
 
 
 def verify():
@@ -168,10 +172,6 @@ def verify():
     assert sig == expect_sig, f"signature mismatch:\n got {sig}\n want {expect_sig}"
     print("verify: reproduced the inherited dev genesis public key and signature")
     print("verify: address under kei_ prefix is", encode_account(pk))
-
-
-if __name__ == "__main__":
-    verify()
 
 
 # ------------------------------------------------------------------ generation
@@ -198,3 +198,99 @@ def gen_dev():
         "signature": sig,
         "work": work,
     }
+
+
+def state_hash(account, previous, representative, balance, link):
+    h = hashlib.blake2b(digest_size=32)
+    h.update(KEI_DOMAIN)
+    h.update((6).to_bytes(32, "big"))  # block_type::state
+    h.update(account)
+    h.update(previous)
+    h.update(representative)
+    h.update(balance.to_bytes(16, "big"))
+    h.update(link)
+    return h.digest()
+
+
+def signed_state(keys, previous, representative, balance, link, threshold):
+    block_hash = state_hash(keys["public"], previous, representative, balance, link)
+    root = previous if previous != bytes(32) else keys["public"]
+    return {
+        "type": "state",
+        "account": encode_account(keys["public"]),
+        "previous": previous.hex().upper(),
+        "representative": encode_account(representative),
+        "balance": str(balance),
+        "link": link.hex().upper(),
+        "link_as_account": encode_account(link),
+        "signature": signature(block_hash, keys["private"], keys["public"]).hex().upper(),
+        "work": mine(root, threshold),
+        "hash": block_hash.hex().upper(),
+    }
+
+
+def phrase_key(phrase):
+    private = hashlib.blake2b(phrase.encode(), digest_size=32).digest()
+    return {"private": private, "public": publickey(private)}
+
+
+def gen_dev_ceremony():
+    """The complete deterministic M2 allocation for the valueless dev chain."""
+    reserve = phrase_key("kei-dev-genesis")
+    allocations = [
+        ("grants", 37_000_000_000, phrase_key("kei-dev-grants")),
+        ("community", 28_000_000_000, phrase_key("kei-dev-community")),
+        ("bounty", 18_000_000_000, phrase_key("kei-dev-bounty")),
+        ("team", 17_000_000_000, phrase_key("kei-dev-team")),
+    ]
+    total = 1_000_000_000_000 * 10**18
+    zero = bytes(32)
+
+    genesis_hash = open_hash(reserve["public"], zero, reserve["public"], domain=KEI_DOMAIN)
+    genesis = {
+        "type": "open",
+        "source": reserve["public"].hex().upper(),
+        "representative": encode_account(zero),
+        "account": encode_account(reserve["public"]),
+        "work": mine(reserve["public"], 0xFE00000000000000),
+        "signature": signature(genesis_hash, reserve["private"], reserve["public"]).hex().upper(),
+        "hash": genesis_hash.hex().upper(),
+    }
+
+    previous = genesis_hash
+    balance = total
+    entries = []
+    for role, kei, recipient in allocations:
+        amount = kei * 10**18
+        balance -= amount
+        send = signed_state(
+            reserve, previous, zero, balance, recipient["public"], 0xFFC0000000000000
+        )
+        open_block = signed_state(
+            recipient, zero, recipient["public"], amount, bytes.fromhex(send["hash"]),
+            0xF000000000000000,
+        )
+        entries.append({
+            "role": role,
+            "private": recipient["private"].hex().upper(),
+            "public": recipient["public"].hex().upper(),
+            "account": encode_account(recipient["public"]),
+            "amount": str(amount),
+            "send": send,
+            "open": open_block,
+        })
+        previous = bytes.fromhex(send["hash"])
+
+    assert balance == 900_000_000_000 * 10**18
+    return {
+        "reserve_private": reserve["private"].hex().upper(),
+        "reserve_public": reserve["public"].hex().upper(),
+        "reserve_account": encode_account(reserve["public"]),
+        "genesis": genesis,
+        "allocations": entries,
+    }
+
+
+if __name__ == "__main__":
+    verify()
+    print(json.dumps(gen_dev_ceremony(), indent=2))

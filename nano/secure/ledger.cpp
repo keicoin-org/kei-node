@@ -1234,10 +1234,17 @@ void nano::ledger::initialize (nano::generate_cache const & generate_cache_a)
 			decltype (this->cache.rep_weights) rep_weights_l;
 			for (; i != n; ++i)
 			{
+				nano::account const & account (i->first);
 				nano::account_info const & info (i->second);
 				block_count_l += info.block_count;
 				++account_count_l;
-				rep_weights_l.representation_add (info.representative, info.balance.number ());
+				// Reserve membership is immutable genesis data. Rebuilding the
+				// cache must preserve the same exclusion as first startup, instead
+				// of quietly assigning 90% of supply to the null representative.
+				if (!this->constants.is_reserve (account) && !info.representative.is_zero ())
+				{
+					rep_weights_l.representation_add (info.representative, info.balance.number ());
+				}
 			}
 			this->cache.block_count += block_count_l;
 			this->cache.account_count += account_count_l;

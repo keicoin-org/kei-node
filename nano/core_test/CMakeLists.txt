@@ -24,6 +24,7 @@ add_executable(
   epochs.cpp
   frontiers_confirmation.cpp
   gap_cache.cpp
+	genesis_reserve.cpp
   ipc.cpp
   issuance_burn.cpp
   json_response.cpp
