@@ -57,7 +57,7 @@ get_env_threshold_or_default ("NANO_TEST_TIER_A", 0xffffffff00000000) // tier A:
 uint64_t nano::work_thresholds::threshold_entry (nano::work_version const version_a, nano::block_type const type_a) const
 {
 	uint64_t result{ std::numeric_limits<uint64_t>::max () };
-	if (type_a == nano::block_type::state)
+	if (type_a == nano::block_type::state || type_a == nano::block_type::asset)
 	{
 		switch (version_a)
 		{
