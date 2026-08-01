@@ -52,7 +52,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keicoin-org/button
-          ref: e859f3d699731ac7d361391e6c7c558791cea58b
+          ref: 834a01550a02f50c91f2878146fa728d7dbb6d1a
           path: button
 
       - name: Set up Bun
@@ -67,7 +67,8 @@ jobs:
       - name: Install Button dependencies
         working-directory: button
         run: |
-          ln -s ../kei-transaction kei-transaction
+          (cd ../kei-transaction/packages/kei && bun link)
+          bun link kei-transaction
           bun install --frozen-lockfile
 
       # gcc-12 rather than whatever ubuntu-latest ships. RocksDB 7.8.3 is

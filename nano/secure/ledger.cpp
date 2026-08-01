@@ -10,6 +10,8 @@
 
 #include <cryptopp/words.h>
 
+#include <limits>
+
 namespace
 {
 /** SPEC §5.5 domain-separated, order-independent Merkle verification. */
@@ -885,12 +887,14 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			}
 			// maxSupply caps circulating supply, so burning frees headroom
 			// (SPEC §5.6.6).
-			if (!asset.uncapped () && asset.circulating.number () + amount > asset.max_supply.number ())
+			auto const circulating (asset.circulating.number ());
+			auto const arithmetic_room (std::numeric_limits<nano::uint128_t>::max () - circulating);
+			if (amount > arithmetic_room || (!asset.uncapped () && amount > asset.max_supply.number () - circulating))
 			{
 				result.code = nano::process_result::over_max_supply;
 				return;
 			}
-			asset.circulating = asset.circulating.number () + amount;
+			asset.circulating = circulating + amount;
 			asset_dirty = true;
 			receivable_to = block_a.hashables.link.as_account ();
 			receivable = nano::asset_pending_info (block_a.hashables.account, asset_id, amount, block_a.hashables.payload.memo);
@@ -1080,7 +1084,9 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 				result.code = nano::process_result::bad_claim_proof;
 				return;
 			}
-			if (!asset.uncapped () && asset.circulating.number () + amount > asset.max_supply.number ())
+			auto const circulating (asset.circulating.number ());
+			auto const arithmetic_room (std::numeric_limits<nano::uint128_t>::max () - circulating);
+			if (amount > arithmetic_room || (!asset.uncapped () && amount > asset.max_supply.number () - circulating))
 			{
 				result.code = nano::process_result::over_max_supply;
 				return;
@@ -1092,7 +1098,7 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 				return;
 			}
 			credit = nano::amount (held + amount);
-			asset.circulating = asset.circulating.number () + amount;
+			asset.circulating = circulating + amount;
 			asset_dirty = true;
 			record_claim = true;
 			break;
