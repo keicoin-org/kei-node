@@ -48,6 +48,17 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable --now kei-rpc-gateway
-curl -fsS --max-time 5 "http://127.0.0.1:${port}/healthz"
+ready=0
+for _ in $(seq 1 25); do
+  if curl -fsS --max-time 5 "http://127.0.0.1:${port}/healthz"; then
+    ready=1
+    break
+  fi
+  sleep 0.2
+done
+if [[ "${ready}" != 1 ]]; then
+  systemctl status kei-rpc-gateway --no-pager -n 30 >&2 || true
+  exit 1
+fi
 echo
 echo "gateway installed; rollback copies (if any): ${backup}"
