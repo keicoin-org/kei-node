@@ -860,6 +860,39 @@ the §5.6.4 swap legs.** `asset_op_valid` stays bounded at `asset_receive`, so a
 reserved number is still rejected on the wire and reserving costs nothing until
 the op exists.
 
+## 19. A third M4 candidate exists, prototyped and parked
+
+§17 named two candidate routes for making a memo'd Kei payment representable —
+reinterpret `asset_id` zero inside `transfer`/`asset_receive`, or give `state`
+blocks a memo field — and pushed both to M4. A third was built and considered
+for landing in M2 instead: `kei_transfer`, a dedicated `asset_op` sibling to
+`transfer` that always names `asset_id` zero, mutates `balance` at send time
+like a state send, and carries an explicit discriminator on its receivable
+(`asset_pending_info::via_kei_transfer`) so `asset_receive` credits `balance`
+directly rather than `holdings` — avoiding the silent-sentinel failure mode
+that ruled out the first route, without reopening §8 the way the second does.
+
+**Not taken for M2.** It reuses `asset`-typed blocks and `asset_pending_info` —
+storage this doc keeps deliberately separate from Kei's own chain-balance
+ledger — to carry balance-moving operations, which is exactly the boundary §6
+and §9 lean on: every asset op but `issue` is `new_balance == previous_balance`
+by construction, and that invariant is what lets anything reading `balance`
+trust it only moves on `state` blocks plus one bounded, well-known exception.
+A discriminator field on a shared receivable type is more honest than an
+implicit `asset_id == 0` branch, but it is still two ledgers sharing one store,
+told apart at runtime instead of by type — and it lands with zero
+`ledger_processor` integration coverage on the one path (#8) just finished
+proving needs it most: rollback of a balance-moving op. Landing it now would
+mean landing that risk untested, right after closing it for the other five ops.
+
+The prototype is real and complete — `feat/kei-transfer-asset-op`
+(kei-node) and `sdk-kei-transfer` (kei-transaction), both open as draft PRs,
+neither merged. §17 stands for M2: `pay({ memo })` errors, `onPayment`'s block
+hash is the correlation mechanism until M4. When M4 actually arrives, this is
+a third option to weigh against §17's original two — with the ledger's asset
+paths, and their rollback coverage, in a very different state than they were
+when this section was written.
+
 ---
 
 ## Definition of done for M2
