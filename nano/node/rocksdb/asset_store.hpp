@@ -63,6 +63,20 @@ namespace rocksdb
 		nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_begin (nano::transaction const &, nano::asset_key const &) const override;
 		nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_begin (nano::transaction const &) const override;
 		nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_end () const override;
+
+		void lock_put (nano::write_transaction const &, nano::block_hash const &, nano::asset_lock_info const &) override;
+		bool lock_get (nano::transaction const &, nano::block_hash const &, nano::asset_lock_info &) override;
+		void lock_del (nano::write_transaction const &, nano::block_hash const &) override;
+		bool lock_exists (nano::transaction const &, nano::block_hash const &) override;
+		nano::store_iterator<nano::block_hash, nano::asset_lock_info> locks_begin (nano::transaction const &, nano::block_hash const &) const override;
+		nano::store_iterator<nano::block_hash, nano::asset_lock_info> locks_begin (nano::transaction const &) const override;
+		nano::store_iterator<nano::block_hash, nano::asset_lock_info> locks_end () const override;
+
+		void offer_put (nano::write_transaction const &, nano::uint256_union const &, nano::block_hash const &, nano::account const &) override;
+		void offer_del (nano::write_transaction const &, nano::uint256_union const &, nano::block_hash const &) override;
+		nano::store_iterator<nano::asset_key, nano::account> offers_begin (nano::transaction const &, nano::asset_key const &) const override;
+		nano::store_iterator<nano::asset_key, nano::account> offers_begin (nano::transaction const &) const override;
+		nano::store_iterator<nano::asset_key, nano::account> offers_end () const override;
 	};
 }
 }

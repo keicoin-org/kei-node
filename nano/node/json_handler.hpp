@@ -41,6 +41,10 @@ public:
 	void asset_holders ();
 	void asset_commit ();
 	void asset_claims ();
+	/** The market's read model: a scan of open `swap_offer`s for one asset (SPEC §9.3). */
+	void asset_offers ();
+	/** One offer's full lock record, open or settled (SPEC §9.2). */
+	void asset_offer ();
 	/** The one-account, Kei-and-assets shape of `accounts_receivable`. */
 	void kei_receivables ();
 	void work_thresholds ();

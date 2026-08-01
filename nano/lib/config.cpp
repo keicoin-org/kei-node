@@ -123,6 +123,13 @@ uint64_t nano::work_thresholds::threshold_asset (nano::asset_op const op_a) cons
 		case nano::asset_op::commit_close:
 			return tier_a;
 		case nano::asset_op::transfer:
+		// SPEC §5.6.4 puts all three swap legs at tier B, alongside `send` and
+		// `transfer`: each of them moves value between two parties, and an
+		// offer nobody accepts still costs the offerer their own asset until
+		// they cancel, so the spam it buys is self-funded.
+		case nano::asset_op::swap_offer:
+		case nano::asset_op::swap_accept:
+		case nano::asset_op::swap_cancel:
 			return tier_b ();
 		case nano::asset_op::burn:
 		case nano::asset_op::asset_receive:

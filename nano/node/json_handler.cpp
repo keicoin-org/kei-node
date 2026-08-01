@@ -3650,6 +3650,12 @@ void nano::json_handler::process ()
 							case nano::process_result::commit_closed:
 							case nano::process_result::already_claimed:
 							case nano::process_result::bad_claim_proof:
+							case nano::process_result::no_such_offer:
+							case nano::process_result::offer_consumed:
+							case nano::process_result::not_offerer:
+							case nano::process_result::swap_terms_mismatch:
+							case nano::process_result::swap_not_counterparty:
+							case nano::process_result::self_swap:
 							{
 								rpc_l->ec = nano::to_error_process (result.code);
 								break;
@@ -5887,6 +5893,87 @@ void nano::json_handler::asset_claims ()
 	response_errors ();
 }
 
+namespace
+{
+void asset_lock_to_json (boost::property_tree::ptree & tree_a, nano::block_hash const & offer_a, nano::asset_lock_info const & lock_a)
+{
+	tree_a.put ("offer", offer_a.to_string ());
+	tree_a.put ("offerer", lock_a.offerer.to_account ());
+	tree_a.put ("asset", lock_a.asset_id.to_string ());
+	tree_a.put ("amount", lock_a.amount.to_string_dec ());
+	tree_a.put ("wantAsset", lock_a.want_asset.to_string ());
+	tree_a.put ("wantAmount", lock_a.want_amount.to_string_dec ());
+	if (!lock_a.counterparty.is_zero ())
+	{
+		tree_a.put ("to", lock_a.counterparty.to_account ());
+	}
+	if (lock_a.expires_at != 0)
+	{
+		nano::json::put_number (tree_a, "expiresAt", lock_a.expires_at);
+	}
+	nano::json::put_boolean (tree_a, "open", lock_a.open ());
+	if (!lock_a.open ())
+	{
+		tree_a.put ("settledBy", lock_a.settled_by.to_string ());
+	}
+}
+}
+
+void nano::json_handler::asset_offers ()
+{
+	nano::uint256_union id;
+	if (id.decode_hex (request.get<std::string> ("asset", "")))
+	{
+		ec = nano::error_common::bad_asset_id;
+	}
+	auto const count (count_optional_impl ());
+	if (!ec)
+	{
+		boost::property_tree::ptree offers;
+		auto transaction (node.store.tx_begin_read ());
+		uint64_t returned (0);
+		// The market's whole read model (SPEC §9.3): every entry here is a
+		// `swap_offer` block that is still open, and nothing else ever appears.
+		for (auto i (node.store.asset.offers_begin (transaction, nano::offer_key (id, 0))), n (node.store.asset.offers_end ()); i != n && i->first.first == id && returned < count; ++i, ++returned)
+		{
+			boost::property_tree::ptree entry;
+			entry.put ("offer", i->first.second.to_string ());
+			entry.put ("offerer", i->second.to_account ());
+			offers.push_back (std::make_pair ("", entry));
+		}
+		nano::json::add_array (response_l, "offers", offers);
+	}
+	response_errors ();
+}
+
+void nano::json_handler::asset_offer ()
+{
+	nano::block_hash offer;
+	if (offer.decode_hex (request.get<std::string> ("offer", "")))
+	{
+		ec = nano::error_common::bad_root;
+	}
+	if (!ec)
+	{
+		auto transaction (node.store.tx_begin_read ());
+		nano::asset_lock_info lock;
+		if (!node.store.asset.lock_get (transaction, offer, lock))
+		{
+			boost::property_tree::ptree tree;
+			asset_lock_to_json (tree, offer, lock);
+			response_l.add_child ("offer", tree);
+		}
+		else
+		{
+			// No `swap_offer` with that hash was ever processed here — the same
+			// "absent, not an error" rule `asset_commit` follows for a root
+			// nobody published.
+			nano::json::put_null (response_l, "offer");
+		}
+	}
+	response_errors ();
+}
+
 void nano::json_handler::kei_receivables ()
 {
 	auto account (account_impl ());
@@ -6184,6 +6271,8 @@ ipc_json_handler_no_arg_func_map create_ipc_json_handler_no_arg_func_map ()
 	no_arg_funcs.emplace ("asset_holders", &nano::json_handler::asset_holders);
 	no_arg_funcs.emplace ("asset_commit", &nano::json_handler::asset_commit);
 	no_arg_funcs.emplace ("asset_claims", &nano::json_handler::asset_claims);
+	no_arg_funcs.emplace ("asset_offers", &nano::json_handler::asset_offers);
+	no_arg_funcs.emplace ("asset_offer", &nano::json_handler::asset_offer);
 	no_arg_funcs.emplace ("work_thresholds", &nano::json_handler::work_thresholds);
 	no_arg_funcs.emplace ("faucet", &nano::json_handler::faucet);
 	no_arg_funcs.emplace ("work_peer_add", &nano::json_handler::work_peer_add);

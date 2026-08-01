@@ -489,6 +489,12 @@ nano::process_return nano::block_processor::process_one (nano::write_transaction
 		case nano::process_result::commit_closed:
 		case nano::process_result::already_claimed:
 		case nano::process_result::bad_claim_proof:
+		case nano::process_result::no_such_offer:
+		case nano::process_result::offer_consumed:
+		case nano::process_result::not_offerer:
+		case nano::process_result::swap_terms_mismatch:
+		case nano::process_result::swap_not_counterparty:
+		case nano::process_result::self_swap:
 		{
 			// The asset rejections carry a message naming what the signer did
 			// wrong, so log that rather than restating the code.

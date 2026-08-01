@@ -1381,7 +1381,7 @@ void nano::state_block::signature_set (nano::signature const & signature_a)
 
 bool nano::asset_op_valid (uint8_t raw_a)
 {
-	return raw_a <= static_cast<uint8_t> (nano::asset_op::claim);
+	return raw_a <= static_cast<uint8_t> (nano::asset_op::swap_cancel);
 }
 
 char const * nano::asset_op_to_string (nano::asset_op op_a)
@@ -1404,6 +1404,12 @@ char const * nano::asset_op_to_string (nano::asset_op op_a)
 			return "commit_close";
 		case nano::asset_op::claim:
 			return "claim";
+		case nano::asset_op::swap_offer:
+			return "swap_offer";
+		case nano::asset_op::swap_accept:
+			return "swap_accept";
+		case nano::asset_op::swap_cancel:
+			return "swap_cancel";
 	}
 	return "invalid";
 }
@@ -1442,6 +1448,18 @@ bool nano::asset_op_from_string (std::string const & text_a, nano::asset_op & op
 	else if (text_a == "claim")
 	{
 		op_a = nano::asset_op::claim;
+	}
+	else if (text_a == "swap_offer")
+	{
+		op_a = nano::asset_op::swap_offer;
+	}
+	else if (text_a == "swap_accept")
+	{
+		op_a = nano::asset_op::swap_accept;
+	}
+	else if (text_a == "swap_cancel")
+	{
+		op_a = nano::asset_op::swap_cancel;
 	}
 	else
 	{
@@ -1714,7 +1732,7 @@ nano::uint256_union nano::asset_claim_root (nano::uint256_union const & leaf_a, 
 
 bool nano::asset_payload::operator== (nano::asset_payload const & other_a) const
 {
-	return name == other_a.name && symbol == other_a.symbol && decimals == other_a.decimals && max_supply == other_a.max_supply && transfer == other_a.transfer && swap == other_a.swap && description == other_a.description && image == other_a.image && kind == other_a.kind && memo == other_a.memo && count == other_a.count && proof == other_a.proof;
+	return name == other_a.name && symbol == other_a.symbol && decimals == other_a.decimals && max_supply == other_a.max_supply && transfer == other_a.transfer && swap == other_a.swap && description == other_a.description && image == other_a.image && kind == other_a.kind && memo == other_a.memo && count == other_a.count && proof == other_a.proof && want_asset == other_a.want_asset && want_amount == other_a.want_amount && expires_at == other_a.expires_at;
 }
 
 void nano::asset_payload::serialize (nano::stream & stream_a, nano::asset_op op_a) const
@@ -1752,9 +1770,19 @@ void nano::asset_payload::serialize (nano::stream & stream_a, nano::asset_op op_
 			}
 			break;
 		}
+		case nano::asset_op::swap_offer:
+			// The wanted side of the trade. `expires_at` is advisory and the
+			// node never reads it again, but it is signed, so a client cannot
+			// be shown a listing whose deadline the offerer never stated.
+			nano::write (stream_a, want_asset.bytes);
+			nano::write (stream_a, want_amount);
+			nano::write (stream_a, boost::endian::native_to_big (expires_at));
+			break;
 		case nano::asset_op::burn:
 		case nano::asset_op::asset_receive:
 		case nano::asset_op::commit_close:
+		case nano::asset_op::swap_accept:
+		case nano::asset_op::swap_cancel:
 			break;
 	}
 }
@@ -1773,7 +1801,7 @@ bool nano::asset_payload::deserialize (nano::stream & stream_a, nano::asset_op o
 	// encoding rather than the ordinary case.
 	if (size_a == 0)
 	{
-		return op_a != nano::asset_op::burn && op_a != nano::asset_op::asset_receive && op_a != nano::asset_op::commit_close;
+		return op_a != nano::asset_op::burn && op_a != nano::asset_op::asset_receive && op_a != nano::asset_op::commit_close && op_a != nano::asset_op::swap_accept && op_a != nano::asset_op::swap_cancel;
 	}
 
 	std::vector<uint8_t> bytes;
@@ -1846,9 +1874,21 @@ bool nano::asset_payload::deserialize (nano::stream & stream_a, nano::asset_op o
 				}
 				break;
 			}
+			case nano::asset_op::swap_offer:
+				nano::read (payload_stream, want_asset.bytes);
+				nano::read (payload_stream, want_amount);
+				nano::read (payload_stream, expires_at);
+				boost::endian::big_to_native_inplace (expires_at);
+				// An offer that wants nothing is a gift with a lock on it, and
+				// the ledger says so too — but a block that cannot describe a
+				// trade should not parse into a valid-looking payload first.
+				error = want_amount.is_zero ();
+				break;
 			case nano::asset_op::burn:
 			case nano::asset_op::asset_receive:
 			case nano::asset_op::commit_close:
+			case nano::asset_op::swap_accept:
+			case nano::asset_op::swap_cancel:
 				break;
 		}
 	}
@@ -2086,6 +2126,51 @@ bool nano::asset_hashables::deserialize_op_json (boost::property_tree::ptree con
 			error = error || payload.proof.size () > nano::asset_payload::max_proof;
 			break;
 		}
+		case nano::asset_op::swap_offer:
+		{
+			// The offered side is the fixed header's own pair, because the
+			// offer is what debits this account — exactly as a transfer does
+			// (decisions-m5.md §2).
+			error = asset_id.decode_hex (op_a.get<std::string> ("asset"));
+			error = error || amount.decode_dec (op_a.get<std::string> ("amount"));
+			error = error || payload.want_asset.decode_hex (op_a.get<std::string> ("wantAsset"));
+			error = error || payload.want_amount.decode_dec (op_a.get<std::string> ("wantAmount"));
+			// Absent `to` is an offer open to anyone, which is the listing
+			// SPEC §9.3 calls a sale. It is not the same statement as an offer
+			// to the zero account, which nobody can sign for.
+			auto const to_l (op_a.get<std::string> ("to", ""));
+			if (!to_l.empty ())
+			{
+				nano::account to;
+				error = error || to.decode_account (to_l);
+				link = to;
+			}
+			payload.expires_at = op_a.get<uint64_t> ("expiresAt", 0);
+			break;
+		}
+		case nano::asset_op::swap_accept:
+		{
+			// The accepter restates what they are paying. Without it B signs a
+			// block whose cost is written on somebody else's chain, and a lock
+			// the offerer replaced under them would change what B owed
+			// (decisions-m5.md §4).
+			nano::block_hash offer;
+			error = offer.decode_hex (op_a.get<std::string> ("offer"));
+			link = offer;
+			error = error || asset_id.decode_hex (op_a.get<std::string> ("asset"));
+			error = error || amount.decode_dec (op_a.get<std::string> ("amount"));
+			break;
+		}
+		case nano::asset_op::swap_cancel:
+		{
+			// The offer hash is the whole statement, exactly as the root is for
+			// `commit_close`: a canceller recovers their own asset and has
+			// nothing to agree to.
+			nano::block_hash offer;
+			error = offer.decode_hex (op_a.get<std::string> ("offer"));
+			link = offer;
+			break;
+		}
 	}
 	return error;
 }
@@ -2180,6 +2265,36 @@ void nano::asset_hashables::serialize_op_json (boost::property_tree::ptree & op_
 			// A one-leaf drop has no siblings, and an array that collapses to ""
 			// when empty is a different type to whatever parses this.
 			nano::json::add_array (op_a, "proof", proof_l);
+			break;
+		}
+		case nano::asset_op::swap_offer:
+		{
+			op_a.put ("asset", asset_id.to_string ());
+			op_a.put ("amount", amount.to_string_dec ());
+			op_a.put ("wantAsset", payload.want_asset.to_string ());
+			op_a.put ("wantAmount", payload.want_amount.to_string_dec ());
+			if (!link.is_zero ())
+			{
+				// Absent means open to anyone, which is not the same statement
+				// as naming the zero account, so an open offer omits the key.
+				op_a.put ("to", link.as_account ().to_account ());
+			}
+			if (payload.expires_at != 0)
+			{
+				nano::json::put_number (op_a, "expiresAt", payload.expires_at);
+			}
+			break;
+		}
+		case nano::asset_op::swap_accept:
+		{
+			op_a.put ("offer", link.as_block_hash ().to_string ());
+			op_a.put ("asset", asset_id.to_string ());
+			op_a.put ("amount", amount.to_string_dec ());
+			break;
+		}
+		case nano::asset_op::swap_cancel:
+		{
+			op_a.put ("offer", link.as_block_hash ().to_string ());
 			break;
 		}
 	}

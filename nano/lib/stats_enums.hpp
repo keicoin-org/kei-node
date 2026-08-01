@@ -125,6 +125,12 @@ enum class detail : uint8_t
 	commit_closed,
 	already_claimed,
 	bad_claim_proof,
+	no_such_offer,
+	offer_consumed,
+	not_offerer,
+	swap_terms_mismatch,
+	swap_not_counterparty,
+	self_swap,
 
 	// message specific
 	not_a_type,

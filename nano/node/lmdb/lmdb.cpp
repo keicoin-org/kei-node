@@ -234,6 +234,10 @@ void nano::lmdb::store::open_databases (bool & error_a, nano::transaction const 
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "asset_commits", flags, &asset_store.asset_commits_handle) != 0;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "asset_claims", flags, &asset_store.asset_claims_handle) != 0;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "asset_claim_roots", flags, &asset_store.asset_claim_roots_handle) != 0;
+	// M5's two (decisions-m5.md §6). Same story: new tables that were never
+	// written before, so an M4 database gains them empty and needs no upgrade.
+	error_a |= mdb_dbi_open (env.tx (transaction_a), "swap_locks", flags, &asset_store.swap_locks_handle) != 0;
+	error_a |= mdb_dbi_open (env.tx (transaction_a), "swap_offers", flags, &asset_store.swap_offers_handle) != 0;
 
 	auto version_l = version.get (transaction_a);
 	if (version_l < 19)
@@ -811,6 +815,8 @@ void nano::lmdb::store::upgrade_v22_to_v23 (nano::write_transaction const & tran
 	release_assert (!mdb_dbi_open (env.tx (transaction_a), "asset_commits", MDB_CREATE, &asset_store.asset_commits_handle));
 	release_assert (!mdb_dbi_open (env.tx (transaction_a), "asset_claims", MDB_CREATE, &asset_store.asset_claims_handle));
 	release_assert (!mdb_dbi_open (env.tx (transaction_a), "asset_claim_roots", MDB_CREATE, &asset_store.asset_claim_roots_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "swap_locks", MDB_CREATE, &asset_store.swap_locks_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "swap_offers", MDB_CREATE, &asset_store.swap_offers_handle));
 	version.put (transaction_a, 23);
 	logger.always_log ("Finished creating the asset tables");
 }
@@ -930,6 +936,10 @@ MDB_dbi nano::lmdb::store::table_to_dbi (tables table_a) const
 			return asset_store.asset_claims_handle;
 		case tables::asset_claim_roots:
 			return asset_store.asset_claim_roots_handle;
+		case tables::swap_locks:
+			return asset_store.swap_locks_handle;
+		case tables::swap_offers:
+			return asset_store.swap_offers_handle;
 		case tables::online_weight:
 			return online_weight_store.online_weight_handle;
 		case tables::meta:
