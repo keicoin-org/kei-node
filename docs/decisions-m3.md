@@ -18,7 +18,11 @@ Cloudflare terminates the public certificate and connects to the gateway over
 TLS in Full mode. The origin key is generated on the host, mode `0640`, and is
 never committed or printed. The gateway does not serve plaintext RPC.
 
-The gateway applies three faucet bounds before a request reaches the node:
+General RPC is capped at 1,200 requests per Cloudflare edge per minute and 3,000
+globally per minute, with at most 32 requests in flight. The edge ceiling is
+deliberately higher than one user's allowance because Cloudflare multiplexes
+many users through an origin address. The gateway also applies three faucet
+bounds before a request reaches the node:
 
 - at most 10,000 testnet Kei in one grant;
 - two grants per destination account per day and twenty per client per hour;

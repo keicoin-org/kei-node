@@ -164,7 +164,11 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
         if not self.state.limiter.allow("global", Limit(3_000, 60)):
             self._json(429, {"error": "The public testnet is busy; retry in a minute"})
             return
-        if not self.state.limiter.allow("client:" + client, Limit(180, 60)):
+        # Cloudflare origin connections identify an edge, not one end user.
+        # Keep a per-edge ceiling high enough for several wallets polling at
+        # once; the global, concurrency, body, action and faucet limits remain
+        # the hard public bounds.
+        if not self.state.limiter.allow("client:" + client, Limit(1_200, 60)):
             self._json(429, {"error": "Too many RPC requests; retry in a minute"})
             return
         if action == "faucet" and not self._allow_faucet(request, client):
