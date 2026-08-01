@@ -313,7 +313,23 @@ std::shared_ptr<nano::block> nano::json_handler::block_impl (bool signature_work
 	if (!ec)
 	{
 		boost::property_tree::ptree block_l;
-		if (json_block_l)
+		// A block arrives one of two ways, and which one is readable from the
+		// request rather than declared by it. Nano sends `block` as a *string*
+		// of JSON and opts into an object with `json_block`; rpc.md's `process`
+		// sends the object, with no such flag — `{ "action": "process",
+		// "block": { "type": "state", ... } }` — because every other action in
+		// that contract nests its objects too.
+		//
+		// Requiring the flag made every block the SDK signed fail as "Block is
+		// invalid": `get<std::string>` on a subtree yields an empty string, and
+		// an empty string is not JSON. The block was well-formed and correctly
+		// signed, and the node never got far enough to look at it.
+		//
+		// A subtree has children and a string does not, so accepting whichever
+		// arrived costs one test and keeps the inherited form working for the
+		// Nano tooling that still sends it.
+		auto block_node (request.get_child_optional ("block"));
+		if (json_block_l || (block_node.is_initialized () && !block_node->empty ()))
 		{
 			block_l = request.get_child ("block");
 		}
@@ -5861,6 +5877,91 @@ void nano::json_handler::work_thresholds ()
 	response_errors ();
 }
 
+void nano::json_handler::faucet ()
+{
+	// Testnet only (rpc.md, SPEC §12). This action signs with a key that is
+	// published rather than held: §14 derives the dev genesis from
+	// blake2b-256("kei-dev-genesis") precisely so that anyone can regenerate it
+	// and check the block against it. On a network where Kei is worth anything
+	// that makes this a mint with no vote behind it. `HttpNode` already declines
+	// to call it on mainnet, but a rule enforced only in the client is not a
+	// rule, so the refusal is the node's.
+	if (!node.network_params.network.is_dev_network ())
+	{
+		ec = nano::error_rpc::faucet_disabled;
+	}
+	auto destination (account_impl ());
+	// `amount` is optional, and MockLedger pays 10 Kei when it is absent
+	// (`mock/ledger.ts`) — so the SDK omitting it has to mean the same here.
+	nano::amount amount (nano::BAN_ratio * 10);
+	auto amount_text (request.get_optional<std::string> ("amount"));
+	if (!ec && amount_text.is_initialized () && amount.decode_dec (amount_text.get ()))
+	{
+		ec = nano::error_common::invalid_amount;
+	}
+	if (!ec)
+	{
+		// Two calls that read the same frontier build two blocks with the same
+		// `previous`, which forks the one account every test funds from. The
+		// conformance suite funds several clients against one node, so this is
+		// reachable rather than theoretical; serialising the whole
+		// read-build-process is the cheap fix, and a testnet faucet has no
+		// throughput worth protecting.
+		static nano::mutex faucet_mutex;
+		nano::lock_guard<nano::mutex> lock (faucet_mutex);
+
+		// The dev genesis account, because it is the only funded one. §5's four
+		// circulating allocations are sends the §5.7 ceremony has not produced
+		// yet (§16), so there is no `community` account to pay from the way the
+		// mock does — when the ceremony lands, this moves to it.
+		auto const & source (nano::dev::genesis_key);
+		std::shared_ptr<nano::state_block> block;
+		{
+			auto transaction (node.store.tx_begin_read ());
+			nano::account_info info;
+			if (node.store.account.get (transaction, source.pub, info))
+			{
+				ec = nano::error_common::account_not_found;
+			}
+			else if (info.balance.number () < amount.number ())
+			{
+				ec = nano::error_rpc::faucet_insufficient;
+			}
+			else
+			{
+				block = std::make_shared<nano::state_block> (source.pub, info.head, info.representative, nano::amount (info.balance.number () - amount.number ()), destination, source.prv, source.pub, 0);
+			}
+		}
+		if (!ec)
+		{
+			// The block-taking overload picks the base difficulty, which is the
+			// maximum over every tier (§11) — a faucet send is tier B, so this
+			// is more work than it needs and always enough.
+			auto work (node.work_generate_blocking (*block));
+			if (!work.is_initialized ())
+			{
+				ec = nano::error_common::failure_work_generation;
+			}
+			else
+			{
+				block->block_work_set (*work);
+				auto result (node.process_local (block));
+				if (!result.has_value () || result->code != nano::process_result::progress)
+				{
+					ec = nano::error_rpc::generic;
+				}
+				else
+				{
+					// The Kei lands as receivable like everything else
+					// (SPEC §5.6.3) — the caller signs for it themselves.
+					response_l.put ("hash", block->hash ().to_string ());
+				}
+			}
+		}
+	}
+	response_errors ();
+}
+
 namespace
 {
 void construct_json (nano::container_info_component * component, boost::property_tree::ptree & parent)
@@ -6013,6 +6114,7 @@ ipc_json_handler_no_arg_func_map create_ipc_json_handler_no_arg_func_map ()
 	no_arg_funcs.emplace ("asset_balance", &nano::json_handler::asset_balance);
 	no_arg_funcs.emplace ("asset_holders", &nano::json_handler::asset_holders);
 	no_arg_funcs.emplace ("work_thresholds", &nano::json_handler::work_thresholds);
+	no_arg_funcs.emplace ("faucet", &nano::json_handler::faucet);
 	no_arg_funcs.emplace ("work_peer_add", &nano::json_handler::work_peer_add);
 	no_arg_funcs.emplace ("work_peers", &nano::json_handler::work_peers);
 	no_arg_funcs.emplace ("work_peers_clear", &nano::json_handler::work_peers_clear);

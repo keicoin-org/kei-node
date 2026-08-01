@@ -187,6 +187,10 @@ std::string nano::error_rpc_messages::message (int ev) const
 			return "Lazy bootstrap is disabled";
 		case nano::error_rpc::disabled_bootstrap_legacy:
 			return "Legacy bootstrap is disabled";
+		case nano::error_rpc::faucet_disabled:
+			return "There is no faucet on this network. Send Kei to the address instead.";
+		case nano::error_rpc::faucet_insufficient:
+			return "The faucet account cannot cover that amount";
 		case nano::error_rpc::invalid_balance:
 			return "Invalid balance number";
 		case nano::error_rpc::invalid_destinations:
