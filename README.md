@@ -24,11 +24,11 @@ token primitive** and a Kei genesis.
 > and runs the SDK-owned M2 contract over HTTP — [`conformance/`](conformance/).
 > The exact same files run against `MockNode` or the native node; only
 > `KEI_NODE_URL` changes.
-> Getting there fixed three defects that made the node unusable by any client and
-> that compiling could not have found: `process` could not read the block shape
-> the contract sends, §11's work tiers were advertised but not enforced so every
-> client's opening block was refused, and a bad signature cost fifteen seconds
-> and reported "Stopped".
+> Getting there fixed four defects that compiling could not have found:
+> `process` could not read the block shape the contract sends, state accounts
+> started below the epoch where §11's advertised work tiers apply, asset work
+> was rejected at a legacy ingress threshold before its A/B/C rule ran, and a
+> bad signature cost fifteen seconds and reported "Stopped".
 >
 > **Not finished** (§16, §17): `commit`/`claim` remain M4 and live in separate
 > M4 suites rather than weakening M2's gate. Kei-payment memos are likewise

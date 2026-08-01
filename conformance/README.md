@@ -9,6 +9,9 @@ when it is set:
 
 The assertions live only in `kei-transaction`; this repository has no copied
 test that can drift from them. [`run-m2.sh`](run-m2.sh) is only a launcher.
+The shared history case exercises the faucet's state-open community account;
+`rpc.account_history_block_shape` separately covers the reserve's inherited
+legacy `open`, so the two wire shapes cannot accidentally be conflated.
 
 Commit and claim are M4 by the boundary in `docs/decisions-m2.md` section 0.
 Their SDK coverage remains executable against the mock in `m4-node.test.ts` and

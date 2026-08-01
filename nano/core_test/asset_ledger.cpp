@@ -127,8 +127,8 @@ TEST (asset_ledger, work_tiers_clear_ingress_before_ledger_enforces_the_exact_ti
 	auto & ledger = ctx.ledger ();
 	auto & store = ctx.store ();
 	auto const payload (issuance ("GEM", nano::transfer_policy::open, 1000));
-	auto const genesis_asset_id (nano::derive_asset_id (nano::dev::genesis_key.pub, payload.symbol));
-	auto issue (signed_asset (pool, nano::dev::genesis_key, nano::dev::genesis->hash (), nano::amount (after_issuing (1)), nano::asset_op::issue, genesis_asset_id, 0, 0, payload));
+	auto const team_asset_id (nano::derive_asset_id (nano::dev::team_key.pub, payload.symbol));
+	auto issue (signed_asset (pool, nano::dev::team_key, nano::dev::constants.genesis_allocations.back ().open->hash (), nano::amount (after_issuing (1)), nano::asset_op::issue, team_asset_id, 0, 0, payload));
 
 	uint64_t tier_c_only{ 0 };
 	auto const tier_c (nano::dev::network_params.work.tier_c ());

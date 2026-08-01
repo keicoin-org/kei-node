@@ -1194,11 +1194,21 @@ TEST (rpc, account_history_block_shape)
 		ASSERT_FALSE (newest.get<std::string> ("representative").empty ());
 		ASSERT_FALSE (newest.get<std::string> ("balance").empty ());
 		ASSERT_FALSE (newest.get<std::string> ("work").empty ());
+	}
 
-		// The oldest block is the inherited legacy open, not a state-open.
-		// Adding its semantic subtype to the response must not alter the block
-		// itself or the genesis hash.
-		auto & oldest (history_node.back ().second);
+	// The mutable team fixture opens with a state block. Query the locked
+	// reserve separately to prove the inherited legacy open gets the same
+	// semantic subtype without changing its bytes or genesis hash.
+	boost::property_tree::ptree reserve_request;
+	reserve_request.put ("action", "account_history");
+	reserve_request.put ("account", nano::dev::genesis->account ().to_account ());
+	reserve_request.put ("count", 100);
+	reserve_request.put ("shape", "block");
+	{
+		auto response (wait_response (system, rpc_ctx, reserve_request, 10s));
+		auto & reserve_history (response.get_child ("history"));
+		ASSERT_GT (reserve_history.size (), 1);
+		auto & oldest (reserve_history.back ().second);
 		ASSERT_EQ ("open", oldest.get<std::string> ("type"));
 		ASSERT_EQ ("open", oldest.get<std::string> ("subtype"));
 	}

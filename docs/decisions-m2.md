@@ -769,6 +769,16 @@ which had it hardcoded. Fixing only the first changed nothing, which is how the
 second was found. No block hash moves — the sideband is not hashed, and the §14
 vectors still pass.
 
+**Asset work also had a second gate that used the wrong floor.** The block
+processor admits work cheaply before the ledger knows which asset operation it
+is. It treated every non-state block as a legacy block and required `epoch_1`,
+so valid tier-C `burn` and `asset_receive` work was rejected before
+`ledger_processor::asset_block` could apply the operation's A/B/C threshold.
+Asset blocks now enter at the global tier-C floor, exactly like state blocks;
+the ledger still enforces the higher tier for `issue`, `mint`, and `transfer`.
+The executed `asset_ledger.*` regression proves both halves, and the exact SDK
+loop found the defect by failing 9/10 against a real node before passing 10/10.
+
 **A bad signature cost fifteen seconds and said nothing.** State blocks whose
 signature fails verification are dropped rather than queued, so `process_one`
 never saw them and the promise `add_blocking` waits on was never settled: the
