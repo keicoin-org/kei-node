@@ -156,7 +156,14 @@ void nano::store::initialize (nano::write_transaction const & transaction_a, nan
 	confirmation_height.put (transaction_a, constants.genesis->account (), nano::confirmation_height_info{ 1, constants.genesis->hash () });
 	++ledger_cache_a.cemented_count;
 	ledger_cache_a.final_votes_confirmation_canary = (constants.final_votes_canary_account == constants.genesis->account () && 1 >= constants.final_votes_canary_height);
-	account.put (transaction_a, constants.genesis->account (), { hash_l, constants.genesis->account (), constants.genesis->hash (), constants.genesis_amount, nano::seconds_since_epoch (), 1, nano::epoch::epoch_0 });
+	// The epoch the genesis account records has to be the one its own sideband
+	// carries, which for Kei is epoch 2 (nano/secure/common.cpp). These are two
+	// separate writes of the same fact and only this one is read when the next
+	// block on the chain is validated, so leaving it at epoch 0 kept the whole
+	// ledger at epoch 0 no matter what the sideband said — the tiers in
+	// decisions-m2.md §11 stayed unreachable and every opening block a client
+	// signed was refused for insufficient work.
+	account.put (transaction_a, constants.genesis->account (), { hash_l, constants.genesis->account (), constants.genesis->hash (), constants.genesis_amount, nano::seconds_since_epoch (), 1, constants.genesis->sideband ().details.epoch });
 	++ledger_cache_a.account_count;
 	ledger_cache_a.rep_weights.representation_put (constants.genesis->account (), constants.genesis_amount);
 	frontier.put (transaction_a, hash_l, constants.genesis->account ());
