@@ -1376,7 +1376,7 @@ void nano::state_block::signature_set (nano::signature const & signature_a)
 
 bool nano::asset_op_valid (uint8_t raw_a)
 {
-	return raw_a <= static_cast<uint8_t> (nano::asset_op::asset_receive);
+	return raw_a <= static_cast<uint8_t> (nano::asset_op::kei_transfer);
 }
 
 char const * nano::asset_op_to_string (nano::asset_op op_a)
@@ -1393,6 +1393,8 @@ char const * nano::asset_op_to_string (nano::asset_op op_a)
 			return "transfer";
 		case nano::asset_op::asset_receive:
 			return "asset_receive";
+		case nano::asset_op::kei_transfer:
+			return "kei_transfer";
 	}
 	return "invalid";
 }
@@ -1419,6 +1421,10 @@ bool nano::asset_op_from_string (std::string const & text_a, nano::asset_op & op
 	else if (text_a == "asset_receive")
 	{
 		op_a = nano::asset_op::asset_receive;
+	}
+	else if (text_a == "kei_transfer")
+	{
+		op_a = nano::asset_op::kei_transfer;
 	}
 	else
 	{
@@ -1634,6 +1640,7 @@ void nano::asset_payload::serialize (nano::stream & stream_a, nano::asset_op op_
 			break;
 		case nano::asset_op::mint:
 		case nano::asset_op::transfer:
+		case nano::asset_op::kei_transfer:
 			write_payload_string (stream_a, memo);
 			break;
 		case nano::asset_op::burn:
@@ -1689,6 +1696,7 @@ bool nano::asset_payload::deserialize (nano::stream & stream_a, nano::asset_op o
 			}
 			case nano::asset_op::mint:
 			case nano::asset_op::transfer:
+			case nano::asset_op::kei_transfer:
 				error = read_payload_string (payload_stream, memo, nano::asset_payload::max_memo);
 				break;
 			case nano::asset_op::burn:
@@ -1892,6 +1900,19 @@ bool nano::asset_hashables::deserialize_op_json (boost::property_tree::ptree con
 			link = source;
 			break;
 		}
+		case nano::asset_op::kei_transfer:
+		{
+			// No `asset` key on the wire — it always names Kei itself, never a
+			// real asset, so asset_id stays the zero this function already
+			// cleared it to above (decisions-m2.md, the kei_transfer entry).
+			nano::account to;
+			error = to.decode_account (op_a.get<std::string> ("to"));
+			error = error || amount.decode_dec (op_a.get<std::string> ("amount"));
+			link = to;
+			payload.memo = op_a.get<std::string> ("memo", "");
+			error = error || payload.memo.size () > nano::asset_payload::max_memo;
+			break;
+		}
 	}
 	return error;
 }
@@ -1956,6 +1977,17 @@ void nano::asset_hashables::serialize_op_json (boost::property_tree::ptree & op_
 		case nano::asset_op::asset_receive:
 		{
 			op_a.put ("link", link.as_block_hash ().to_string ());
+			break;
+		}
+		case nano::asset_op::kei_transfer:
+		{
+			// No `asset` key — see deserialize_op_json.
+			op_a.put ("to", link.as_account ().to_account ());
+			op_a.put ("amount", amount.to_string_dec ());
+			if (!payload.memo.empty ())
+			{
+				op_a.put ("memo", payload.memo);
+			}
 			break;
 		}
 	}

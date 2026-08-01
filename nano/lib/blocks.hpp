@@ -32,21 +32,36 @@ enum class block_type : uint8_t
 	// keeps its number and its meaning, per decisions-m2.md §2.
 	asset = 7
 };
-// The five asset operations M2 validates (decisions-m2.md §0, §7, §11).
+// The six asset operations M2 validates (decisions-m2.md §0, §7, §11, and the
+// kei_transfer entry). Five are SPEC's original set; kei_transfer is the
+// node's own addition, giving a memo'd native-Kei payment a first-class wire
+// representation instead of a bypass keyed off asset_id 0 (decisions-m2.md,
+// the kei_transfer entry).
+//
 // commit/commit_close/claim and the swap legs land with M4 and M5 and are
-// deliberately not members of this enum yet. Their numbers are reserved rather
-// than merely deferred, because the op byte is hashed and renumbering later
-// invalidates every vector and signature made against the earlier guess:
-// 5 = commit, 6 = commit_close, 7 = claim, 8 upward = the SPEC §5.6.4 swap
-// legs. See decisions-m2.md §18. asset_op_valid stays bounded at
-// asset_receive, so a reserved number is still rejected on the wire.
+// deliberately not members of this enum yet. §18 originally reserved 5, 6, 7
+// for them and 8 upward for the swap legs, because the op byte is hashed and
+// renumbering later invalidates every vector and signature made against the
+// earlier guess. kei_transfer took 5 instead of a number past the reserved
+// range: the SDK had already shipped ASSET_OP.kei_transfer = 5 by the time
+// this was decided, and matching an already-hashed wire value wins over
+// preserving §18's original numbering (see decisions-m2.md, the kei_transfer
+// entry, for the full account). Renumbered: 6 = commit, 7 = commit_close,
+// 8 = claim, 9 upward = the SPEC §5.6.4 swap legs. asset_op_valid stays
+// bounded at kei_transfer, so a reserved number is still rejected on the
+// wire.
 enum class asset_op : uint8_t
 {
 	issue = 0,
 	mint = 1,
 	burn = 2,
 	transfer = 3,
-	asset_receive = 4
+	asset_receive = 4,
+	// Moves native Kei, with a memo — the asset-family sibling of a `state`
+	// send (decisions-m2.md, the kei_transfer entry). Always names asset_id
+	// zero, never a real asset, and — unlike every other asset op but
+	// `issue` — mutates `balance` at send time.
+	kei_transfer = 5
 };
 /**
  * The domain separator every Kei block hash begins with, so that no Nano or
@@ -98,8 +113,8 @@ char const * asset_kind_to_string (nano::asset_kind);
  * memo too, because §8 puts memos on the asset block and a `transfer` is where
  * a memo is worth having — the shop in the Button demo correlates an order to
  * an arrival, and doing that by amount and timing is racy. The payload is
- * therefore op-keyed: issuance metadata for `issue`, a memo for `mint` and
- * `transfer`, and empty for `burn` and `asset_receive`.
+ * therefore op-keyed: issuance metadata for `issue`, a memo for `mint`,
+ * `transfer`, and `kei_transfer`, and empty for `burn` and `asset_receive`.
  *
  * The encoding is canonical, and it is what gets hashed — there is deliberately
  * no separate "raw bytes" representation to keep in step with the parsed one.
@@ -128,7 +143,7 @@ public:
 	std::string image;
 	nano::asset_kind kind{ nano::asset_kind::unspecified };
 
-	// `mint` and `transfer` only (decisions-m2.md §8).
+	// `mint`, `transfer`, and `kei_transfer` only (decisions-m2.md §8).
 	std::string memo;
 
 	// Bounds, enforced here so a block that cannot be stored cannot be parsed
@@ -519,12 +534,15 @@ public:
 	// Carried, so an asset block never silently changes delegation.
 	nano::account representative;
 	// The account's Kei balance, unchanged from its predecessor — except on
-	// `issue`, which burns Kei (decisions-m2.md §7, §12), and where this
-	// field is how the burn is expressed.
+	// `issue`, which burns Kei (decisions-m2.md §7, §12), and `kei_transfer`,
+	// which moves it exactly like a `state` send (decisions-m2.md, the
+	// kei_transfer entry). Both are where this field carries the change.
 	nano::amount balance;
-	// issue | mint | burn | transfer | asset_receive
+	// issue | mint | burn | transfer | asset_receive | kei_transfer
 	nano::asset_op op;
 	// H(issuer_pubkey ‖ symbol) — derived, never assigned (§5.6.1).
+	// `kei_transfer` is the one op that does not derive it: this field is
+	// always zero, because it names Kei itself rather than a real asset.
 	nano::uint256_union asset_id;
 	// Units, in the asset's own decimals. Zero for `issue`.
 	nano::amount amount;

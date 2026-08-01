@@ -153,6 +153,7 @@ namespace rocksdb
 		bool do_upgrades (nano::write_transaction const &);
 		void upgrade_v21_to_v22 (nano::write_transaction const &);
 		void upgrade_v22_to_v23 (nano::write_transaction const &);
+		void upgrade_v23_to_v24 (nano::write_transaction const &);
 
 		void construct_column_family_mutexes ();
 		::rocksdb::Options get_db_options ();

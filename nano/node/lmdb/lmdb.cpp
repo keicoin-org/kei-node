@@ -317,6 +317,9 @@ bool nano::lmdb::store::do_upgrades (nano::write_transaction & transaction_a, na
 			upgrade_v22_to_v23 (transaction_a);
 			[[fallthrough]];
 		case 23:
+			upgrade_v23_to_v24 (transaction_a);
+			[[fallthrough]];
+		case 24:
 			break;
 		default:
 			logger.always_log (boost::str (boost::format ("The version of the ledger (%1%) is too high for this node") % version_l));
@@ -803,6 +806,24 @@ void nano::lmdb::store::upgrade_v22_to_v23 (nano::write_transaction const & tran
 	release_assert (!mdb_dbi_open (env.tx (transaction_a), "issued", MDB_CREATE, &asset_store.issued_handle));
 	version.put (transaction_a, 23);
 	logger.always_log ("Finished creating the asset tables");
+}
+
+void nano::lmdb::store::upgrade_v23_to_v24 (nano::write_transaction const & transaction_a)
+{
+	logger.always_log ("Preparing v23 to v24 database upgrade...");
+	// nano::asset_pending_info gained `via_kei_transfer` (decisions-m2.md, the
+	// kei_transfer entry), which changed its on-disk shape. Existing
+	// `asset_pending` entries are not rewritten: M2 has not run past a single
+	// local dev node (§0) and no genesis ceremony has produced a real chain
+	// (§16), so this is a development database, not one carrying real value.
+	// A stale-format entry also fails closed rather than being misread —
+	// deserialize() comes up one byte short, throws, and pending_get() reports
+	// it as not found rather than returning a wrong value — so the worst case
+	// for a developer upgrading in place is an uncollected receivable that
+	// stops being collectible, the same loss a routine dev-ledger wipe between
+	// milestones already causes.
+	version.put (transaction_a, 24);
+	logger.always_log ("Finished upgrading asset_pending to the kei_transfer discriminator");
 }
 
 void nano::lmdb::store::upgrade_v21_to_v22 (nano::write_transaction const & transaction_a)

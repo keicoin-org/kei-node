@@ -3620,6 +3620,8 @@ void nano::json_handler::process ()
 							case nano::process_result::too_many_assets:
 							case nano::process_result::reserve_representative:
 							case nano::process_result::reserve_locked:
+							case nano::process_result::bad_kei_transfer_asset:
+							case nano::process_result::kei_transfer_balance_mismatch:
 							{
 								rpc_l->ec = nano::to_error_process (result.code);
 								break;
@@ -5841,6 +5843,15 @@ void nano::json_handler::kei_receivables ()
 				// one — the SDK matches an order against it (decisions-m1 §5).
 				entry.put ("memo", info.memo);
 			}
+			if (info.via_kei_transfer)
+			{
+				// Read by the SDK to route collection through asset_receive
+				// rather than receive/open, and to credit balance directly
+				// rather than holdings (decisions-m2.md, the kei_transfer
+				// entry). Omitted rather than emitted false, matching how
+				// `memo` is handled just above.
+				nano::json::put_boolean (entry, "viaKeiTransfer", true);
+			}
 			receivables.push_back (std::make_pair ("", entry));
 		}
 		nano::json::add_array (response_l, "receivables", receivables);
@@ -5851,7 +5862,7 @@ void nano::json_handler::kei_receivables ()
 void nano::json_handler::work_thresholds ()
 {
 	// Tiers per SPEC 5.6.4 and decisions-m2.md 11: A is issue/mint, B is
-	// send/transfer, C is receive/asset_receive/burn.
+	// send/transfer/kei_transfer, C is receive/asset_receive/burn.
 	auto const & work (node.network_params.work);
 	boost::property_tree::ptree thresholds;
 	thresholds.put ("A", nano::uint128_t (work.tier_a).convert_to<std::string> ());

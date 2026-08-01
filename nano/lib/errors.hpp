@@ -159,6 +159,8 @@ enum class error_process
 	too_many_assets,
 	reserve_representative,
 	reserve_locked,
+	bad_kei_transfer_asset,
+	kei_transfer_balance_mismatch,
 	other
 };
 

@@ -461,6 +461,8 @@ nano::process_return nano::block_processor::process_one (nano::write_transaction
 		case nano::process_result::too_many_assets:
 		case nano::process_result::reserve_representative:
 		case nano::process_result::reserve_locked:
+		case nano::process_result::bad_kei_transfer_asset:
+		case nano::process_result::kei_transfer_balance_mismatch:
 		{
 			// The asset rejections carry a message naming what the signer did
 			// wrong, so log that rather than restating the code.

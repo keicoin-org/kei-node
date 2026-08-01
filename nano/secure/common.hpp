@@ -220,7 +220,7 @@ class asset_pending_info final
 {
 public:
 	asset_pending_info () = default;
-	asset_pending_info (nano::account const &, nano::uint256_union const &, nano::amount const &, std::string const &);
+	asset_pending_info (nano::account const &, nano::uint256_union const &, nano::amount const &, std::string const &, bool via_kei_transfer = false);
 	void serialize (nano::stream &) const;
 	bool deserialize (nano::stream &);
 	bool operator== (nano::asset_pending_info const &) const;
@@ -229,6 +229,15 @@ public:
 	nano::amount amount{ 0 };
 	/** Carried through so the recipient sees what the sender labelled it (§8). */
 	std::string memo;
+	/**
+	 * True only when this receivable arrived on a `kei_transfer` rather than a
+	 * `mint` or a `transfer` (decisions-m2.md, the kei_transfer entry).
+	 * `asset_receive` reads this to credit the recipient's Kei `balance`
+	 * directly instead of writing a `holdings` entry — a real, named field
+	 * rather than inferring the same thing from `asset_id` being zero, which
+	 * is exactly the implicit-sentinel pattern that entry rejects.
+	 */
+	bool via_kei_transfer{ false };
 };
 
 class endpoint_key final
@@ -440,7 +449,12 @@ enum class process_result
 	bad_asset_payload, // Malformed issuance parameters: name, decimals, max supply, policy
 	too_many_assets, // The account already holds the §7 maximum of 1,024 distinct assets
 	reserve_representative, // A reserve account must name the null representative (SPEC §5.7)
-	reserve_locked // Reserve Kei moves only through a passed on-chain vote (SPEC §5.7)
+	reserve_locked, // Reserve Kei moves only through a passed on-chain vote (SPEC §5.7)
+	// kei_transfer (decisions-m2.md, the kei_transfer entry): a dedicated op
+	// rather than a bypass keyed off asset_id 0, so its failures are named
+	// like every other asset op's rather than folded into an existing one.
+	bad_kei_transfer_asset, // A kei_transfer must name asset_id zero — it moves Kei, not a real asset
+	kei_transfer_balance_mismatch // A kei_transfer, or the asset_receive collecting one, must move balance by exactly the amount named
 };
 class process_return final
 {

@@ -120,6 +120,8 @@ enum class detail : uint8_t
 	too_many_assets,
 	reserve_representative,
 	reserve_locked,
+	bad_kei_transfer_asset,
+	kei_transfer_balance_mismatch,
 
 	// message specific
 	not_a_type,

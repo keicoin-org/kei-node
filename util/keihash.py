@@ -27,6 +27,9 @@ BLOCK_TYPE_ASSET = 7
 
 ASSET_OP_ISSUE = 0
 ASSET_OP_TRANSFER = 3
+ASSET_OP_KEI_TRANSFER = 5
+
+KEI_ASSET = bytes(32)
 
 
 def preamble(block_type):
@@ -122,6 +125,16 @@ def main():
         ASSET_OP_TRANSFER, asset_id, AMOUNT, DESTINATION, payload_string("thanks"),
     )
     print("asset transfer", transfer.hex().upper())
+
+    # kei_transfer always names KEI_ASSET (asset_id zero) and, unlike every
+    # other asset op but issue, decrements balance at send time — the same
+    # amount that left the sender lands in the balance field itself
+    # (decisions-m2.md, the kei_transfer entry).
+    kei_transfer = asset_hash(
+        ACCOUNT, PREVIOUS, ACCOUNT, BALANCE - AMOUNT,
+        ASSET_OP_KEI_TRANSFER, KEI_ASSET, AMOUNT, DESTINATION, payload_string("thanks"),
+    )
+    print("kei_transfer  ", kei_transfer.hex().upper())
 
 
 if __name__ == "__main__":

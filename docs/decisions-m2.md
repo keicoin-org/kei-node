@@ -259,8 +259,8 @@ Proposed layout — fixed header, variable payload:
 | `account` | 32 | Signer. |
 | `previous` | 32 | Links into the account's **one** chain (§5.6.1). |
 | `representative` | 32 | Carried, so an asset block never silently changes delegation. |
-| `balance` | 16 | **The account's Kei balance, unchanged from its predecessor** — §5.6.1's concession to §5.6.8, so a Banano-derived explorer that ignores the asset payload still tracks Kei correctly instead of reporting a broken balance. Except on `issue`, which burns Kei (§12), and where this field is how the burn is expressed. |
-| `op` | 1 | `issue` \| `mint` \| `burn` \| `transfer` \| `asset_receive`. |
+| `balance` | 16 | **The account's Kei balance, unchanged from its predecessor** — §5.6.1's concession to §5.6.8, so a Banano-derived explorer that ignores the asset payload still tracks Kei correctly instead of reporting a broken balance. Except on `issue`, which burns Kei (§12), and `kei_transfer` (§19), which moves it. |
+| `op` | 1 | `issue` \| `mint` \| `burn` \| `transfer` \| `asset_receive` \| `kei_transfer` (§19). |
 | `asset_id` | 32 | `H(issuer_pubkey ‖ symbol)` — derived, never assigned (§5.6.1). |
 | `amount` | 16 | Units, in the asset's own decimals. Zero for `issue`. |
 | `link` | 32 | Counterparty account, or the source block hash for `asset_receive`. |
@@ -299,6 +299,12 @@ have to agree, and `asset_info` has to read those fields anyway.
 **The preamble is the Kei domain, not the block type alone.** §14 replaced the
 bare `uint256(block_type::asset)` preamble with the Kei domain followed by the
 block type, applied to every block type rather than this one.
+
+**A sixth op, added later.** `kei_transfer` (§19) is not one of SPEC's
+original five and is not itself a M2 requirement in the way the other five
+are — it exists so `kei.pay({ memo })` has a wire representation at all. It
+reuses this section's payload machinery unchanged: same memo-carrying
+`payload`, same `payload_len` field, same canonical encoding.
 
 ## 8. Memos ride on the asset send — decisions-m0 §4, option (a)
 
@@ -362,7 +368,7 @@ the sender's storage problem, not the network's permanent per-account cost.
 | Tier | Difficulty | Operations |
 |---|---|---|
 | **A** | Highest | `issue`, `mint` |
-| **B** | Standard (= Banano send) | `send`, `transfer` |
+| **B** | Standard (= Banano send) | `send`, `transfer`, `kei_transfer` (§19) |
 | **C** | Cheap (= Banano receive) | `receive`, `asset_receive`, `burn` |
 
 `commit`, `commit_close`, and the swap legs are in SPEC §5.6.4's table but are
@@ -757,6 +763,14 @@ Testing' })` with a matching `onPayment(({ from, amount, memo }) => …)`. It is
 marquee example of the whole API and it does not run. It has to change now and
 change back at M4.
 
+**Superseded by §19.** This section's answer — `pay({ memo })` is an error for
+M2, and stays one until M4 takes one of the two routes above — did not hold.
+§19 finds a third route, outside the two considered here: a dedicated
+`asset_op`, not a reinterpretation of `transfer` and not a schema change to
+`state`. It costs nothing this section's two routes didn't already pay for
+(the asset block's memo machinery), and it lands in M2. The worked example
+above runs as of §19, not at M4.
+
 ## 18. The deferred op numbers are reserved, not merely deferred
 
 The `asset_op` comment says `commit`/`commit_close` and the swap legs "land with
@@ -771,7 +785,145 @@ the §5.6.4 swap legs.** `asset_op_valid` stays bounded at `asset_receive`, so a
 reserved number is still rejected on the wire and reserving costs nothing until
 the op exists.
 
+**Renumbered by §19.** `kei_transfer` took 5 instead of a number past this
+reservation — see §19 for why matching an already-shipped SDK wire value won
+over preserving the numbering here. Reserved is now 6 = `commit`,
+7 = `commit_close`, 8 = `claim`, 9 upward = the swap legs. `asset_op_valid`
+stays bounded at `kei_transfer`, not `asset_receive`, so the same guarantee —
+a reserved number is rejected on the wire — still holds.
+
 ---
+
+## 19. `kei_transfer` — a memo'd Kei payment gets a wire representation in M2, not M4
+
+§17 closed with `pay({ memo })` erroring out for the rest of M2 and named two
+routes for making it representable, both pushed to M4: reinterpret Kei as
+`asset_id` zero inside `transfer`/`asset_receive`, or give `state` blocks a
+memo field of their own. Neither is free — the first needs a carve-out in
+§5.6.1's "derived, never assigned", the second makes `state_hashables::size`
+stop being a constant — and neither shipped, because SPEC §6.7's own worked
+example runs `kei.pay({ to, amount, memo })` and a milestone that cannot run
+its own marquee example is worth revisiting before declaring it done.
+
+**The problem, restated precisely.** `kei.pay()` builds a `state` send. §8
+put memos on the `asset`-family block and left `state` alone, so a `state`
+send has no field to carry one — and `wire.ts`'s `nodeLayoutGap()` correctly
+refuses to hash a `state` block that tries. `asset`/`transfer` is not a route
+either: `asset_id` is `H(issuer_pubkey ‖ symbol)` (§5.6.1) and Kei has no
+issuance block, so there is no id to name honestly.
+
+**Four options, this time including the two §17 already turned down:**
+
+- **(A) Special-case `asset_id = 0` inside `transfer`/`asset_receive`.**
+  Bypass `holdings`/`holders` and touch `balance` instead whenever the named
+  asset happens to be zero. Rejected: `asset_id = 0` is already this doc's
+  shorthand for "native Kei" (§6), but shorthand in prose is not the same
+  thing as a rule the ledger enforces — nothing before this section actually
+  processes an `asset` block naming id zero as anything, so this would be the
+  first code to read that convention and turn it into a silent, undeclared
+  branch. A magic value driving different settlement semantics is exactly the
+  kind of bug that survives review because every individual line looks fine.
+- **(B) Taken. A dedicated `asset_op`, `kei_transfer`,** sibling to
+  `transfer`, so the different settlement behaviour is a real, named,
+  first-class thing in the wire format and the ledger code. It costs one enum
+  value and reuses everything §7 already built: the payload's memo slot, the
+  canonical encoding, the hashing shape.
+- **(C) Reopen §8 and give memo'd Kei payments a block type outside the asset
+  family.** This is §17's second route, restated. Rejected for the same
+  reason §17 gave it: bigger scope than a milestone fix, it contradicts an
+  already-settled decision instead of extending it, and it does not reuse the
+  memo-payload machinery §7/§8 already paid for — (B) gets the same outcome
+  for less.
+- **(D) Drop memo support from `kei.pay()`.** This is what §17 actually did.
+  It is not wrong, exactly — it is honest about what M2 could represent at
+  the time — but SPEC §6.7's worked example is the API's marquee example and
+  it does not run, which is a cost that compounds the longer it is deferred.
+  Once (B) turned out to be a same-milestone change rather than an M4 one,
+  paying that cost through M4 stopped being justified.
+
+**Why (B) over (A) is worth stating twice.** The asset block's `op` field
+already exists to say what kind of movement a block performs; asset_id is
+supposed to say *which asset*, not *which kind of movement, disguised as an
+asset*. Loading a settlement-semantics decision onto a value comparison
+(`asset_id == 0`) is indistinguishable, six months later, from a bug where
+someone forgot to check the asset id. Loading it onto the op byte is
+indistinguishable from nothing, because the op byte's entire job is to say
+what kind of movement this is.
+
+**Two deliberate deviations from the general asset-op rules**, both already
+flagged as amendments where they touch existing sections (§7, the balance
+row of the field table):
+
+1. **`kei_transfer` always names `asset_id = 0`** (32 zero bytes), and a
+   block naming a nonzero id is rejected, not coerced.
+   `ledger_processor::asset_block` checks this explicitly
+   (`nano::process_result::bad_kei_transfer_asset`) rather than trusting the
+   JSON encoder to have zeroed it, because a block can also arrive already
+   serialised — the JSON path never reads an `asset` key for this op, but the
+   binary layout still has 32 bytes where one could name something else, and
+   a hostile peer is not obliged to go through the JSON encoder.
+2. **`kei_transfer` mutates `balance` at send time**, decrementing it by
+   `amount`, exactly like a `state` send. §12 already documents `issue` as
+   the one exception to "every asset op leaves `balance` invariant" — this is
+   the second, and it needed writing down as such rather than left for a
+   reader to infer from the code. Collecting a `kei_transfer` receivable is a
+   *third* instance of the same exception, on the `asset_receive` side: it
+   credits `balance` directly instead of leaving it invariant the way
+   collecting a real asset does.
+3. **The receivable carries an explicit discriminator**, not an inference
+   from `asset_id` being zero. `nano::asset_pending_info` (the receivable
+   record `mint` and `transfer` already write, `nano/secure/common.hpp`)
+   gained a `via_kei_transfer` bool, defaulted `false` for every existing
+   caller. `asset_receive` reads this field — not `asset_id` — to decide
+   whether collecting credits `balance` or writes a `holdings` entry. This is
+   the field option (A) would not have needed, and its absence is exactly
+   what would have made (A) a bypass instead of a decision: a real,
+   named field that says what a receivable is, rather than a value chosen for
+   an unrelated reason (which asset) being read for a second, undeclared one
+   (which settlement path).
+
+**A third, self-imposed deviation, found while implementing rather than
+planned going in: the reserve lock extends to `kei_transfer`.** §6's reserve
+rules block a reserve account from naming a real representative and (per
+§16's documented divergence from `MockLedger`) from issuing. `kei_transfer`
+moves Kei exactly like a `state` send, so it is exactly the kind of
+uncontrolled-supply-change §5.7 forbids the reserve from doing without a
+vote — a reserve account is now locked out of `kei_transfer` the same way it
+is locked out of a `state` send, in `ledger_processor::asset_block`'s reserve
+check. `MockLedger` does not yet check this (it locks reserve-Kei only on a
+`state` `send`, the same gap §16 already notes for `issue`), so this is a
+third instance of the node being deliberately stricter than the mock, not a
+second copy of the first.
+
+**The op number collides with §18's reservation, and §18 is amended rather
+than kept.** §18 reserved 5 for `commit`. By the time this section was
+written, `packages/core/src/wire.ts` in kei-transaction had already shipped
+`ASSET_OP.kei_transfer = 5` — the sibling repo's implementation landed first,
+and an op byte is hashed, so matching an already-signed wire value wins over
+preserving a reservation nothing had been built against yet.
+**`kei_transfer = 5`.** Reserved is now 6 = `commit`, 7 = `commit_close`,
+8 = `claim`, 9 upward = the SPEC §5.6.4 swap legs — everything §18 reserved,
+shifted up by one. `asset_op_valid` moves its bound from `asset_receive` to
+`kei_transfer` accordingly, so the same property §18 wanted — a reserved
+number still rejected on the wire — holds under the new numbering.
+
+**The receivable's on-disk shape changed, and the store version says so.**
+Appending `via_kei_transfer` to `nano::asset_pending_info` changes what
+`asset_pending` entries look like on disk. `version_current` moves from 23 to
+24 (`nano/secure/store.hpp`), with an `upgrade_v23_to_v24` on both backends
+that logs the change and rewrites nothing: M2 has not run past a single local
+dev node (§0) and no genesis ceremony has produced a real chain (§16), so
+there is no deployment where an existing `asset_pending` entry represents
+real value, and a stale-format entry fails closed — `deserialize()` comes up
+one byte short and throws, which `pending_get()` already treats as "not
+found" rather than misreading it as something else. The worst case for a
+developer upgrading a dev database in place is an uncollected receivable that
+stops being collectible, which a routine dev-ledger wipe between milestones
+already does.
+
+**The `asset_op` table (§7) and the work-tier table (§11) both gained a
+sixth entry and a `kei_transfer` row respectively**, in place rather than
+argued twice.
 
 ## Definition of done for M2
 

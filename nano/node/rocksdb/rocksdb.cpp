@@ -272,6 +272,9 @@ bool nano::rocksdb::store::do_upgrades (nano::write_transaction const & transact
 			upgrade_v22_to_v23 (transaction_a);
 			[[fallthrough]];
 		case 23:
+			upgrade_v23_to_v24 (transaction_a);
+			[[fallthrough]];
+		case 24:
 			break;
 		default:
 			logger.always_log (boost::str (boost::format ("The version of the ledger (%1%) is too high for this node") % version_l));
@@ -290,6 +293,18 @@ void nano::rocksdb::store::upgrade_v22_to_v23 (nano::write_transaction const & t
 	// create_column_families () when the database is opened.
 	version.put (transaction_a, 23);
 	logger.always_log ("Finished creating the asset tables");
+}
+
+void nano::rocksdb::store::upgrade_v23_to_v24 (nano::write_transaction const & transaction_a)
+{
+	logger.always_log ("Preparing v23 to v24 database upgrade...");
+	// nano::asset_pending_info gained `via_kei_transfer` (decisions-m2.md, the
+	// kei_transfer entry), which changed its on-disk shape. See the LMDB
+	// upgrade of the same name for why existing asset_pending entries are not
+	// rewritten: this is a development database, not one carrying real value,
+	// and a stale-format entry fails closed rather than being misread.
+	version.put (transaction_a, 24);
+	logger.always_log ("Finished upgrading asset_pending to the kei_transfer discriminator");
 }
 
 void nano::rocksdb::store::upgrade_v21_to_v22 (nano::write_transaction const & transaction_a)

@@ -939,6 +939,24 @@ TEST (block, kei_hash_domain)
 	ASSERT_FALSE (nano::kei_block_domain ().is_zero ());
 }
 
+// asset_op_valid stays bounded at kei_transfer, the highest op M2 defines —
+// so 6 upward (reserved for commit/commit_close/claim/the swap legs,
+// decisions-m2.md §18) is still rejected on the wire even though it is not
+// yet a member of the enum.
+TEST (asset_op, valid_bounded_at_kei_transfer)
+{
+	ASSERT_TRUE (nano::asset_op_valid (static_cast<uint8_t> (nano::asset_op::kei_transfer)));
+	ASSERT_FALSE (nano::asset_op_valid (static_cast<uint8_t> (nano::asset_op::kei_transfer) + 1));
+}
+
+TEST (asset_op, kei_transfer_string_round_trips)
+{
+	ASSERT_STREQ ("kei_transfer", nano::asset_op_to_string (nano::asset_op::kei_transfer));
+	nano::asset_op op;
+	ASSERT_FALSE (nano::asset_op_from_string ("kei_transfer", op));
+	ASSERT_EQ (nano::asset_op::kei_transfer, op);
+}
+
 TEST (asset_block, serialize)
 {
 	nano::keypair key1;
@@ -1024,6 +1042,80 @@ TEST (asset_block, serialize_json)
 	ASSERT_EQ ("mint", tree1.get_child ("op").get<std::string> ("kind"));
 	ASSERT_EQ (recipient.pub.to_account (), tree1.get_child ("op").get<std::string> ("to"));
 	ASSERT_EQ ("order-4417", tree1.get_child ("op").get<std::string> ("memo"));
+}
+
+// kei_transfer names no `asset` key in JSON at all, because it never means a
+// real asset — asset_id is the zero this function clears it to, not something
+// a caller supplies (decisions-m2.md, the kei_transfer entry). Contrast
+// `serialize_json` above, where mint's `asset` key is required.
+TEST (asset_block, kei_transfer_serialize_json)
+{
+	nano::keypair key1;
+	nano::keypair recipient;
+	nano::asset_payload payload;
+	payload.memo = "for the sword";
+	nano::asset_block block1 (key1.pub, 0, key1.pub, 999, nano::asset_op::kei_transfer, 0, 100, recipient.pub, payload, key1.prv, key1.pub, 6);
+	std::string string1;
+	block1.serialize_json (string1);
+	ASSERT_NE (0, string1.size ());
+	boost::property_tree::ptree tree1;
+	std::stringstream istream (string1);
+	boost::property_tree::read_json (istream, tree1);
+	bool error (false);
+	nano::asset_block block2 (error, tree1);
+	ASSERT_FALSE (error);
+	ASSERT_EQ (block1, block2);
+	ASSERT_TRUE (block2.hashables.asset_id.is_zero ());
+	ASSERT_EQ ("kei_transfer", tree1.get_child ("op").get<std::string> ("kind"));
+	ASSERT_EQ (recipient.pub.to_account (), tree1.get_child ("op").get<std::string> ("to"));
+	ASSERT_EQ ("for the sword", tree1.get_child ("op").get<std::string> ("memo"));
+	ASSERT_FALSE (static_cast<bool> (tree1.get_child ("op").get_child_optional ("asset")));
+}
+
+// Same account/previous/representative/link/memo as a `transfer`, but a
+// different op byte and a different balance (kei_transfer decrements it,
+// transfer does not) — both are covered by the hash, so the two must not
+// collide (decisions-m2.md, the kei_transfer entry).
+TEST (asset_block, kei_transfer_distinct_from_transfer)
+{
+	nano::keypair key1;
+	nano::keypair recipient;
+	nano::asset_payload payload;
+	payload.memo = "thanks";
+	auto const id (nano::derive_asset_id (key1.pub, "GEM"));
+	nano::asset_block transfer (key1.pub, 0, key1.pub, 1000, nano::asset_op::transfer, id, 100, recipient.pub, payload, key1.prv, key1.pub, 6);
+	nano::asset_block kei_transfer (key1.pub, 0, key1.pub, 900, nano::asset_op::kei_transfer, 0, 100, recipient.pub, payload, key1.prv, key1.pub, 6);
+	ASSERT_NE (transfer.hash (), kei_transfer.hash ());
+}
+
+// The memo round-trips through the payload exactly as it does for mint and
+// transfer (asset_payload, memo_round_trips_on_transfer above) — kei_transfer
+// is a third memo-carrying op, not a special case of the encoding.
+TEST (asset_payload, memo_round_trips_on_kei_transfer)
+{
+	nano::asset_payload payload;
+	payload.memo = "Sword of a Thousand Truths";
+	auto const bytes (payload.to_bytes (nano::asset_op::kei_transfer));
+	nano::bufferstream stream (bytes.data (), bytes.size ());
+	nano::asset_payload parsed;
+	ASSERT_FALSE (parsed.deserialize (stream, nano::asset_op::kei_transfer, bytes.size ()));
+	ASSERT_EQ (payload.memo, parsed.memo);
+}
+
+// A kei_transfer naming a nonzero asset id is malformed on its face — reading
+// and writing raw fields directly (bypassing the JSON layer's zeroing) is the
+// only way to construct one, which is exactly the shape a hostile peer could
+// send over the wire (decisions-m2.md, the kei_transfer entry: "reject, do
+// not silently coerce"). This test pins the field, not the ledger rejection —
+// `ledger_processor::asset_block` is what actually refuses it, and nothing in
+// this binary exercises the ledger (see nano/secure/ledger.cpp).
+TEST (asset_block, kei_transfer_can_carry_a_nonzero_asset_id_on_the_wire)
+{
+	nano::keypair key1;
+	nano::asset_payload payload;
+	auto const id (nano::derive_asset_id (key1.pub, "GEM"));
+	nano::asset_block block (key1.pub, 0, key1.pub, 1000, nano::asset_op::kei_transfer, id, 100, key1.pub, payload, key1.prv, key1.pub, 6);
+	ASSERT_EQ (id, block.hashables.asset_id);
 }
 
 // An `issue` names no asset id in JSON, because the id is H(issuer ‖ symbol) —
@@ -1131,4 +1223,15 @@ TEST (block, kei_hash_vectors)
 	transfer_payload.memo = "thanks";
 	nano::asset_block transfer (account, previous, account, balance, nano::asset_op::transfer, id, amount, destination, transfer_payload, signer.prv, signer.pub, 6);
 	ASSERT_EQ ("05D77C0F64906C2FC5571B3982223A51A2B376F9D9F6AA259AC438181DBA2345", transfer.hash ().to_string ());
+
+	// kei_transfer always names asset_id zero and, unlike every other asset op
+	// but issue, decrements balance at send time (decisions-m2.md, the
+	// kei_transfer entry) — the balance field below is `balance - amount`,
+	// not `balance`. Computed and cross-checked with `util/keihash.py`, the
+	// same third statement of the layout the vectors above are pinned
+	// against.
+	nano::asset_payload kei_transfer_payload;
+	kei_transfer_payload.memo = "thanks";
+	nano::asset_block kei_transfer (account, previous, account, nano::amount (balance.number () - amount.number ()), nano::asset_op::kei_transfer, 0, amount, destination, kei_transfer_payload, signer.prv, signer.pub, 6);
+	ASSERT_EQ ("E4A29BB3405DE2D3D9716B9A06DF902EF60DC4B4F7F6335CF789431A6AD3FC62", kei_transfer.hash ().to_string ());
 }

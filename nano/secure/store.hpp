@@ -923,7 +923,10 @@ public:
 	account_store & account;
 	pending_store & pending;
 	static int constexpr version_minimum{ 14 };
-	static int constexpr version_current{ 23 };
+	// 24: nano::asset_pending_info gained `via_kei_transfer`, changing the
+	// on-disk shape of the asset_pending table (decisions-m2.md, the
+	// kei_transfer entry).
+	static int constexpr version_current{ 24 };
 
 public:
 	online_weight_store & online_weight;

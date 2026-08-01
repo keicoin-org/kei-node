@@ -550,11 +550,12 @@ bool nano::asset_info::uncapped () const
 	return max_supply.is_zero ();
 }
 
-nano::asset_pending_info::asset_pending_info (nano::account const & source_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a, std::string const & memo_a) :
+nano::asset_pending_info::asset_pending_info (nano::account const & source_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a, std::string const & memo_a, bool via_kei_transfer_a) :
 	source (source_a),
 	asset_id (asset_id_a),
 	amount (amount_a),
-	memo (memo_a)
+	memo (memo_a),
+	via_kei_transfer (via_kei_transfer_a)
 {
 }
 
@@ -564,6 +565,7 @@ void nano::asset_pending_info::serialize (nano::stream & stream_a) const
 	nano::write (stream_a, asset_id.bytes);
 	nano::write (stream_a, amount.bytes);
 	write_stored_string (stream_a, memo);
+	nano::write (stream_a, via_kei_transfer);
 }
 
 bool nano::asset_pending_info::deserialize (nano::stream & stream_a)
@@ -575,6 +577,7 @@ bool nano::asset_pending_info::deserialize (nano::stream & stream_a)
 		nano::read (stream_a, asset_id.bytes);
 		nano::read (stream_a, amount.bytes);
 		read_stored_string (stream_a, memo);
+		nano::read (stream_a, via_kei_transfer);
 	}
 	catch (std::runtime_error const &)
 	{
@@ -586,7 +589,7 @@ bool nano::asset_pending_info::deserialize (nano::stream & stream_a)
 
 bool nano::asset_pending_info::operator== (nano::asset_pending_info const & other_a) const
 {
-	return source == other_a.source && asset_id == other_a.asset_id && amount == other_a.amount && memo == other_a.memo;
+	return source == other_a.source && asset_id == other_a.asset_id && amount == other_a.amount && memo == other_a.memo && via_kei_transfer == other_a.via_kei_transfer;
 }
 
 nano::unchecked_info::unchecked_info (std::shared_ptr<nano::block> const & block_a) :
@@ -1009,6 +1012,10 @@ nano::error_process nano::to_error_process (nano::process_result process_result)
 			return nano::error_process::reserve_representative;
 		case process_result::reserve_locked:
 			return nano::error_process::reserve_locked;
+		case process_result::bad_kei_transfer_asset:
+			return nano::error_process::bad_kei_transfer_asset;
+		case process_result::kei_transfer_balance_mismatch:
+			return nano::error_process::kei_transfer_balance_mismatch;
 		case process_result::progress:
 		case process_result::bad_signature:
 		case process_result::old:
@@ -1084,6 +1091,10 @@ nano::stat::detail nano::to_stat_detail (nano::process_result process_result)
 			return nano::stat::detail::reserve_representative;
 		case process_result::reserve_locked:
 			return nano::stat::detail::reserve_locked;
+		case process_result::bad_kei_transfer_asset:
+			return nano::stat::detail::bad_kei_transfer_asset;
+		case process_result::kei_transfer_balance_mismatch:
+			return nano::stat::detail::kei_transfer_balance_mismatch;
 	}
 	debug_assert (false && "There should be always a defined nano::stat::detail that is not _last");
 	return nano::stat::detail::_last;

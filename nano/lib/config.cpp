@@ -121,6 +121,7 @@ uint64_t nano::work_thresholds::threshold_asset (nano::asset_op const op_a) cons
 		case nano::asset_op::mint:
 			return tier_a;
 		case nano::asset_op::transfer:
+		case nano::asset_op::kei_transfer:
 			return tier_b ();
 		case nano::asset_op::burn:
 		case nano::asset_op::asset_receive:

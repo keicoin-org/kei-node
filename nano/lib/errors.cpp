@@ -283,7 +283,7 @@ std::string nano::error_process_messages::message (int ev) const
 		case nano::error_process::issuance_burn_mismatch:
 			return "Issuing the nth asset from an account burns exactly n Kei, and this block's balance does not";
 		case nano::error_process::asset_balance_mismatch:
-			return "An asset block must carry the account's Kei balance unchanged; only issuance changes it";
+			return "An asset block must carry the account's Kei balance unchanged; only issuance and kei_transfer change it";
 		case nano::error_process::bad_asset_payload:
 			return "Malformed issuance parameters";
 		case nano::error_process::too_many_assets:
@@ -292,6 +292,10 @@ std::string nano::error_process_messages::message (int ev) const
 			return "Reserve accounts must name the null representative, so reserve Kei carries no weight of any kind";
 		case nano::error_process::reserve_locked:
 			return "Reserve Kei can only move through a passed on-chain vote";
+		case nano::error_process::bad_kei_transfer_asset:
+			return "A kei_transfer must name asset_id zero; it moves Kei, not a real asset";
+		case nano::error_process::kei_transfer_balance_mismatch:
+			return "A kei_transfer, or the asset_receive collecting one, must move the account's Kei balance by exactly the amount named";
 		case nano::error_process::other:
 			return "Error processing block";
 	}

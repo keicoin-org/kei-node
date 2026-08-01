@@ -232,6 +232,13 @@ public:
 				take_back_receivable (block_a, hash);
 				restore (block_a.hashables.account, asset_id, amount);
 				break;
+			case nano::asset_op::kei_transfer:
+				// Unlike `transfer`, nothing was ever written to `holdings` —
+				// the amount left the sender's Kei `balance` directly, and
+				// that is undone generically below by restoring
+				// `previous_balance`. Only the receivable needs unwinding.
+				take_back_receivable (block_a, hash);
+				break;
 			case nano::asset_op::asset_receive:
 			{
 				// Put the receivable back exactly as it was, which means
@@ -243,17 +250,25 @@ public:
 				release_assert (source_asset != nullptr);
 				asset_id = source_asset->hashables.asset_id;
 				auto const collected (source_asset->hashables.amount.number ());
-				auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
-				debug_assert (held >= collected);
-				if (held == collected)
+				// A kei_transfer receivable never touched `holdings` when it was
+				// collected — it credited `balance` directly, which the generic
+				// `previous_balance` restore below already undoes. Only a real
+				// asset's holdings entry needs unwinding here.
+				bool const via_kei_transfer (source_asset->hashables.op == nano::asset_op::kei_transfer);
+				if (!via_kei_transfer)
 				{
-					ledger.store.asset.balance_del (transaction, block_a.hashables.account, asset_id);
+					auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
+					debug_assert (held >= collected);
+					if (held == collected)
+					{
+						ledger.store.asset.balance_del (transaction, block_a.hashables.account, asset_id);
+					}
+					else
+					{
+						ledger.store.asset.balance_put (transaction, block_a.hashables.account, asset_id, nano::amount (held - collected));
+					}
 				}
-				else
-				{
-					ledger.store.asset.balance_put (transaction, block_a.hashables.account, asset_id, nano::amount (held - collected));
-				}
-				ledger.store.asset.pending_put (transaction, nano::pending_key (block_a.hashables.account, source_hash), nano::asset_pending_info (source_asset->hashables.account, asset_id, collected, source_asset->hashables.payload.memo));
+				ledger.store.asset.pending_put (transaction, nano::pending_key (block_a.hashables.account, source_hash), nano::asset_pending_info (source_asset->hashables.account, asset_id, collected, source_asset->hashables.payload.memo, via_kei_transfer));
 				break;
 			}
 		}
@@ -682,11 +697,12 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			result.code = nano::process_result::reserve_representative;
 			return;
 		}
-		if (block_a.hashables.op == nano::asset_op::issue)
+		if (block_a.hashables.op == nano::asset_op::issue || block_a.hashables.op == nano::asset_op::kei_transfer)
 		{
-			// Issuance destroys Kei (§12). From a reserve account that is
-			// a supply change with no vote behind it, which SPEC §5.7 does not
-			// permit — so the reserve cannot issue.
+			// Issuance destroys Kei (§12) and kei_transfer moves it exactly
+			// like a `state` send (decisions-m2.md, the kei_transfer entry).
+			// Both are a Kei balance change with no vote behind it, which
+			// SPEC §5.7 does not permit — so the reserve cannot do either.
 			//
 			// This is a deliberate divergence from MockLedger, which checks
 			// reserve-locked only on a `send` and would let a reserve account
@@ -722,11 +738,17 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			return;
 		}
 	}
-	else if (new_balance != previous_balance)
+	else if (block_a.hashables.op != nano::asset_op::kei_transfer && block_a.hashables.op != nano::asset_op::asset_receive && new_balance != previous_balance)
 	{
 		// §5.6.1's concession to §5.6.8: a Banano-derived explorer that ignores
 		// the asset payload still tracks Kei correctly instead of reporting a
-		// broken balance.
+		// broken balance. kei_transfer is the second deliberate exception,
+		// alongside issue (decisions-m2.md, the kei_transfer entry): it moves
+		// Kei exactly like a `state` send, checked inside the switch below
+		// once `amount` is validated against `previous_balance`.
+		// asset_receive is deferred the same way, because whether its balance
+		// must stay invariant depends on the receivable it collects, which
+		// is not known until the switch looks it up.
 		result.code = nano::process_result::asset_balance_mismatch;
 		return;
 	}
@@ -879,6 +901,34 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			receivable = nano::asset_pending_info (block_a.hashables.account, asset_id, amount, block_a.hashables.payload.memo);
 			break;
 		}
+		case nano::asset_op::kei_transfer:
+		{
+			// Always names Kei itself, never a real asset — rejected rather
+			// than silently coerced, because coercing a nonzero id here is
+			// exactly the "asset_id 0 as magic sentinel" bypass this op
+			// exists instead of (decisions-m2.md, the kei_transfer entry).
+			if (!asset_id.is_zero ())
+			{
+				result.code = nano::process_result::bad_kei_transfer_asset;
+				return;
+			}
+			if (amount == 0 || block_a.hashables.link.is_zero ())
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			// Unlike every other asset op but issue, this one moves Kei
+			// itself: the block's balance field must decrease by exactly
+			// amount, the same shape issue's burn check takes above.
+			if (previous_balance < amount || new_balance != previous_balance - amount)
+			{
+				result.code = nano::process_result::kei_transfer_balance_mismatch;
+				return;
+			}
+			receivable_to = block_a.hashables.link.as_account ();
+			receivable = nano::asset_pending_info (block_a.hashables.account, asset_id, amount, block_a.hashables.payload.memo, true);
+			break;
+		}
 		case nano::asset_op::asset_receive:
 		{
 			nano::pending_key const key (block_a.hashables.account, block_a.hashables.link.as_block_hash ());
@@ -891,6 +941,26 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 				return;
 			}
 			asset_id = pending.asset_id;
+			if (pending.via_kei_transfer)
+			{
+				// Arrived on a kei_transfer, not a real asset: crediting it
+				// touches the Kei balance field directly, never `holdings` —
+				// read from the receivable's own discriminator, not inferred
+				// from asset_id being zero (decisions-m2.md, the kei_transfer
+				// entry).
+				if (new_balance != previous_balance + pending.amount.number ())
+				{
+					result.code = nano::process_result::kei_transfer_balance_mismatch;
+					return;
+				}
+				collect_receivable = true;
+				break;
+			}
+			if (new_balance != previous_balance)
+			{
+				result.code = nano::process_result::asset_balance_mismatch;
+				return;
+			}
 			if (ledger.store.asset.get (transaction, asset_id, asset))
 			{
 				result.code = nano::process_result::no_such_asset;
@@ -1735,8 +1805,8 @@ public:
 	void asset_block (nano::asset_block const & block_a) override
 	{
 		result[0] = block_a.hashables.previous;
-		// link is a counterparty account for issue/mint/burn/transfer, and only
-		// a dependent block hash for asset_receive (decisions-m2.md §7, §10).
+		// link is a counterparty account for issue/mint/burn/transfer/kei_transfer,
+		// and only a dependent block hash for asset_receive (decisions-m2.md §7, §10).
 		if (block_a.hashables.op == nano::asset_op::asset_receive)
 		{
 			result[1] = block_a.hashables.link.as_block_hash ();
