@@ -42,7 +42,7 @@ class GatewayTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
         upstream_url = f"http://127.0.0.1:{cls.upstream.server_port}"
-        cls.gateway = ThreadingHTTPServer(
+        cls.gateway = gateway.GatewayServer(
             ("127.0.0.1", 0), gateway.handler_for(gateway.GatewayState(upstream_url))
         )
         cls.base = f"http://127.0.0.1:{cls.gateway.server_port}"
@@ -78,6 +78,13 @@ class GatewayTests(unittest.TestCase):
         before = len(Upstream.calls)
         status, body, _ = self.post({"action": "wallet_create"})
         self.assertEqual(status, 403)
+        self.assertIn("not public", str(body["error"]))
+        self.assertEqual(len(Upstream.calls), before)
+
+    def test_unknown_action_keeps_the_node_contract_without_forwarding(self) -> None:
+        before = len(Upstream.calls)
+        status, body, _ = self.post({"action": "definitely_not_an_action"})
+        self.assertEqual(status, 200)
         self.assertIn("not public", str(body["error"]))
         self.assertEqual(len(Upstream.calls), before)
 

@@ -45,6 +45,7 @@ ALLOWED_ACTIONS = frozenset(
 
 MAX_BODY_BYTES = 256 * 1024
 DEFAULT_FAUCET_MAX_RAW = 10_000 * 10**18
+CONTROL_PREFIXES = ("wallet_", "password_", "account_create", "account_move", "send", "receive")
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,31 @@ class GatewayState:
         self.faucet_max_raw = faucet_max_raw
         self.limiter = SlidingWindow()
         self.slots = threading.BoundedSemaphore(32)
+
+
+class GatewayServer(http.server.ThreadingHTTPServer):
+    """Accept TLS connections without serialising their handshakes.
+
+    Wrapping the listening socket makes `accept()` perform each TLS handshake
+    on the one accept loop. Cloudflare opens several origin connections in
+    parallel, so one slow handshake can otherwise produce intermittent 525s.
+    """
+
+    daemon_threads = True
+
+    def __init__(self, address: tuple[str, int], handler: type[GatewayHandler], context: ssl.SSLContext | None = None):
+        self.tls_context = context
+        super().__init__(address, handler)
+
+    def get_request(self):  # type: ignore[no-untyped-def]
+        request, address = self.socket.accept()
+        if self.tls_context:
+            request = self.tls_context.wrap_socket(
+                request,
+                server_side=True,
+                do_handshake_on_connect=False,
+            )
+        return request, address
 
 
 class GatewayHandler(http.server.BaseHTTPRequestHandler):
@@ -127,7 +153,11 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
 
         action = request["action"]
         if action not in ALLOWED_ACTIONS:
-            self._json(403, {"error": "That RPC action is not public"})
+            # Preserve the node contract for a genuinely unknown command (HTTP
+            # 200 with a JSON error), while making inherited control actions a
+            # visible policy refusal. Neither kind is ever forwarded.
+            control = action.startswith(CONTROL_PREFIXES)
+            self._json(403 if control else 200, {"error": "That RPC action is not public"})
             return
 
         client = self.client_address[0]
@@ -235,12 +265,12 @@ def main() -> None:
     if bool(args.tls_cert) != bool(args.tls_key):
         parser.error("--tls-cert and --tls-key must be provided together")
     state = GatewayState(args.upstream, args.faucet_max_raw)
-    server = http.server.ThreadingHTTPServer((args.listen, args.port), handler_for(state))
+    context = None
     if args.tls_cert and args.tls_key:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(args.tls_cert, args.tls_key)
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+    server = GatewayServer((args.listen, args.port), handler_for(state), context)
     server.serve_forever()
 
 
