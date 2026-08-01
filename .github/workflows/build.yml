@@ -45,14 +45,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keicoin-org/kei-transaction
-          ref: 9464c5a
+          ref: 9464c5a42c04f0ab7b7b8d19df23f1d6c9216a6e
           path: kei-transaction
 
       - name: Check out the pinned Button M4 contract
         uses: actions/checkout@v4
         with:
           repository: keicoin-org/button
-          ref: c7f8669
+          ref: c7f866929bddaa37a73af96ca9d7089f037deeb7
           path: button
 
       - name: Set up Bun
