@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import json
 import pathlib
@@ -94,6 +95,42 @@ class GatewayTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertIn("10,000 Kei", str(body["error"]))
+
+    def test_keeps_one_connection_open_across_requests(self) -> None:
+        # Cloudflare pools origin connections. An HTTP/1.0 answer makes it race
+        # the server's close, which truncates about one request in a hundred.
+        connection = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=5)
+        try:
+            for _ in range(3):
+                connection.request(
+                    "POST",
+                    "/rpc",
+                    body=json.dumps({"action": "account_info", "account": "kei_1"}),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.version, 11)
+                self.assertEqual(json.loads(response.read()), {"action": "account_info"})
+                self.assertFalse(response.will_close)
+        finally:
+            connection.close()
+
+    def test_an_oversized_body_closes_rather_than_desyncing(self) -> None:
+        # The body is never read on that path, so a kept-alive connection would
+        # parse its remainder as the next request.
+        connection = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/rpc",
+                body=b"x" * (gateway.MAX_BODY_BYTES + 1),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 413)
+            self.assertTrue(response.will_close)
+        finally:
+            connection.close()
 
     def test_limits_each_faucet_account(self) -> None:
         account = "kei_test_limit_account"

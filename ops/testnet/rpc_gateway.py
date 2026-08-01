@@ -110,6 +110,16 @@ class GatewayServer(http.server.ThreadingHTTPServer):
 
 class GatewayHandler(http.server.BaseHTTPRequestHandler):
     server_version = "KeiTestnetGateway/1"
+    # Cloudflare pools its origin connections and reuses them. Answering
+    # HTTP/1.0 tells it nothing about that, so it kept sending a request into a
+    # socket this end was closing: the body arrived truncated, the JSON parse
+    # failed, and writing the 400 back raised SSLEOFError into an empty
+    # connection. About one request in a hundred died that way, which the SDK
+    # reports as `node-unreachable` — a real network that fails a hundredth of
+    # the time is worse than one that is down, because nothing retries it.
+    protocol_version = "HTTP/1.1"
+    # Keep-alive costs a thread per idle connection, so reap them.
+    timeout = 30
     state: GatewayState
 
     def log_message(self, fmt: str, *args: object) -> None:
@@ -124,7 +134,7 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(204)
         self._cors()
         self.send_header("Access-Control-Max-Age", "86400")
-        self.end_headers()
+        self._flush(b"")
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if self.path == "/healthz":
@@ -139,10 +149,19 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
 
         length_text = self.headers.get("Content-Length", "")
         if not length_text.isdigit() or int(length_text) > MAX_BODY_BYTES:
+            # The body is never read on this path, so whatever follows it on the
+            # socket would be parsed as the next request. Close instead.
+            self.close_connection = True
             self._json(413, {"error": "RPC request body is missing or too large"})
             return
+        declared = int(length_text)
+        request_body = self.rfile.read(declared)
+        if len(request_body) != declared:
+            # A short read means the peer went away mid-request. There is
+            # nobody left to answer.
+            self.close_connection = True
+            return
         try:
-            request_body = self.rfile.read(int(length_text))
             request = json.loads(request_body)
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._json(400, {"error": "RPC request must be JSON"})
@@ -195,8 +214,7 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Cache-Control", "no-store")
                     self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
+                    self._flush(body)
             except (urllib.error.URLError, TimeoutError):
                 self._json(502, {"error": "The testnet node is temporarily unavailable"})
         finally:
@@ -239,8 +257,23 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._flush(body)
+
+    def _flush(self, body: bytes) -> None:
+        """Send headers and body, tolerating a peer that has already left.
+
+        A client that hangs up mid-exchange is ordinary on a public endpoint,
+        and a stack trace per occurrence buries the log this is operated from.
+        """
+        try:
+            if self.close_connection:
+                # Say so, rather than dropping a socket the client still counts
+                # as usable — that is the failure this handler exists to avoid.
+                self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError:  # ssl.SSLError included; it derives from OSError
+            self.close_connection = True
 
 
 def handler_for(state: GatewayState) -> type[GatewayHandler]:
