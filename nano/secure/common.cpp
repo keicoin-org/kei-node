@@ -40,6 +40,14 @@ namespace
 char const * dev_private_key_data = "42E7F3D46B98144DB9B8F6E41A296E280B47652B21C9534D7B9A9439038828D9";
 char const * dev_public_key_data = "A811B68CA7360920F753564C1CFA96D2F62B4DE59F6A59D96774354BF9862FF6"; // kei_3c1jpt8cgfib65uo8oke5mxbfnqp7f8yd9ucd9epgx3obhwredzps1ff9jus
 
+// blake2b-256("kei-dev-<role>"). These are published test keys, like the dev
+// genesis key above: deterministic so the M2 ceremony can be reproduced, and
+// valueless by construction. Beta/live keys never appear in this repository.
+char const * dev_grants_private_key_data = "0841C773075075E09ECEF948FA6DC1A4E1F217A5683DEE2128E522B3B986BD1C";
+char const * dev_community_private_key_data = "A60D1FEF7BB0733197023E23B5A616AAEC82C81395118E418F806F192F5AB4B7";
+char const * dev_bounty_private_key_data = "4FC211FF499F4F09071500D1E62FD33AAD398F3FEC4B456179CED9269FA1C45D";
+char const * dev_team_private_key_data = "0E74FB6ED22BDDE439F45E0FB154029C6308755EDE04EE20578A7DE0A00EFB04";
+
 // The beta and live genesis blocks do not exist yet, and a placeholder is the
 // honest representation of that. The reserve holds 90% of all Kei, its custody
 // is multisig, and its key is generated offline (SPEC 5.7, decisions-m2.md 5),
@@ -67,10 +75,10 @@ std::string const test_public_key_data = nano::get_env_or_default ("NANO_TEST_GE
 char const * dev_genesis_data = R"%%%({
 	"type": "open",
 	"source": "A811B68CA7360920F753564C1CFA96D2F62B4DE59F6A59D96774354BF9862FF6",
-	"representative": "kei_3c1jpt8cgfib65uo8oke5mxbfnqp7f8yd9ucd9epgx3obhwredzps1ff9jus",
+	"representative": "kei_1111111111111111111111111111111111111111111111111111hifc8npp",
 	"account": "kei_3c1jpt8cgfib65uo8oke5mxbfnqp7f8yd9ucd9epgx3obhwredzps1ff9jus",
-	"work": "7326f9346047908d",
-	"signature": "F7CD3895E89FDF82BED141FFF69075AE3D511507E7754FE6369BC158E4B0F321596C0761B7E224A705F077C1B9CED35B252DED7A8607F6AC6219BE8AC327B609"
+	"work": "000000000000003b",
+	"signature": "7FA4300ADA3D2F6CD74D80DD18BE59C0451E769D9418A64B6BA30F5411A8D656C95DFEE9B2E22A2A5FF29088E7BCCA7E636B6CF4BF96E555049AACD552045606"
     })%%%";
 
 char const * beta_genesis_data = placeholder_genesis_data;
@@ -99,6 +107,10 @@ std::string const test_canary_public_key_data = nano::get_env_or_default ("NANO_
 }
 
 nano::keypair nano::dev::genesis_key{ dev_private_key_data };
+nano::keypair nano::dev::grants_key{ dev_grants_private_key_data };
+nano::keypair nano::dev::community_key{ dev_community_private_key_data };
+nano::keypair nano::dev::bounty_key{ dev_bounty_private_key_data };
+nano::keypair nano::dev::team_key{ dev_team_private_key_data };
 nano::network_params nano::dev::network_params{ nano::networks::banano_dev_network };
 nano::ledger_constants & nano::dev::constants{ nano::dev::network_params.ledger };
 std::shared_ptr<nano::block> & nano::dev::genesis = nano::dev::constants.genesis;
@@ -172,6 +184,35 @@ nano::ledger_constants::ledger_constants (nano::work_thresholds & work, nano::ne
 	nano_dev_genesis->sideband_set (nano::block_sideband (nano_dev_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_2, false, false, false, nano::epoch::epoch_2));
 	nano_live_genesis->sideband_set (nano::block_sideband (nano_live_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_2, false, false, false, nano::epoch::epoch_2));
 	nano_test_genesis->sideband_set (nano::block_sideband (nano_test_genesis->account (), 0, genesis_amount, 1, nano::seconds_since_epoch (), nano::epoch::epoch_2, false, false, false, nano::epoch::epoch_2));
+
+	// The dev chain runs the SPEC §5.7 ceremony with deterministic public test
+	// keys. Its genesis account is the singleton reserve account named directly
+	// by the open block; four signed sends and matching opens create the exact
+	// circulating allocation before ordinary ledger processing starts. The
+	// reserve chain carries the null representative from its first block and is
+	// locked after this immutable history. Beta/live deliberately receive none
+	// of this: they remain hard-failed placeholders until the offline ceremony.
+	if (network_a == nano::networks::banano_dev_network)
+	{
+		reserve_accounts.emplace_back (genesis->account ());
+		release_assert (genesis->representative ().is_zero (), "The dev reserve genesis must name the null representative (SPEC 5.7)." );
+
+		auto previous (genesis->hash ());
+		nano::uint128_t balance (genesis_amount);
+		auto add_allocation = [&] (nano::keypair const & recipient, nano::uint128_t const & amount, uint64_t send_work, uint64_t open_work) {
+			balance -= amount;
+			auto send = std::make_shared<nano::state_block> (genesis->account (), previous, nano::account{}, nano::amount (balance), recipient.pub, nano::dev::genesis_key.prv, nano::dev::genesis_key.pub, send_work);
+			auto open = std::make_shared<nano::state_block> (recipient.pub, nano::block_hash{}, recipient.pub, nano::amount (amount), send->hash (), recipient.prv, recipient.pub, open_work);
+			genesis_allocations.push_back ({ send, open, nano::amount (amount) });
+			previous = send->hash ();
+		};
+
+		add_allocation (nano::dev::grants_key, allocation_grants (), 0x13, 0x10);
+		add_allocation (nano::dev::community_key, allocation_community (), 0x82d, 0x3);
+		add_allocation (nano::dev::bounty_key, allocation_bounty (), 0x5b7, 0x12);
+		add_allocation (nano::dev::team_key, allocation_team (), 0xdbe, 0xb);
+		release_assert (balance == allocation_reserve (), "The dev ceremony must leave exactly 900,000,000,000 Kei in reserve (SPEC 5.7)." );
+	}
 
 	nano::link epoch_link_v1;
 	char const * epoch_message_v1 ("epoch v1 block");

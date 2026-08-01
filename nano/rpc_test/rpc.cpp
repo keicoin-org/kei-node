@@ -1147,18 +1147,18 @@ TEST (rpc, account_history_block_shape)
 {
 	nano::test::system system;
 	auto node = add_ipc_enabled_node (system);
-	system.wallet (0)->insert_adhoc (nano::dev::genesis_key.prv);
-	auto change (system.wallet (0)->change_action (nano::dev::genesis_key.pub, nano::dev::genesis_key.pub));
+	system.wallet (0)->insert_adhoc (nano::dev::team_key.prv);
+	auto change (system.wallet (0)->change_action (nano::dev::team_key.pub, nano::dev::team_key.pub));
 	ASSERT_NE (nullptr, change);
-	auto send (system.wallet (0)->send_action (nano::dev::genesis_key.pub, nano::dev::genesis_key.pub, node->config.receive_minimum.number ()));
+	auto send (system.wallet (0)->send_action (nano::dev::team_key.pub, nano::dev::team_key.pub, node->config.receive_minimum.number ()));
 	ASSERT_NE (nullptr, send);
-	auto receive (system.wallet (0)->receive_action (send->hash (), nano::dev::genesis_key.pub, node->config.receive_minimum.number (), send->link ().as_account ()));
+	auto receive (system.wallet (0)->receive_action (send->hash (), nano::dev::team_key.pub, node->config.receive_minimum.number (), send->link ().as_account ()));
 	ASSERT_NE (nullptr, receive);
 	auto const rpc_ctx = add_rpc (system, node);
 
 	boost::property_tree::ptree request;
 	request.put ("action", "account_history");
-	request.put ("account", nano::dev::genesis->account ().to_account ());
+	request.put ("account", nano::dev::team_key.pub.to_account ());
 	request.put ("count", 100);
 
 	// Absent, the answer is the one this endpoint has always given, so nothing
@@ -1187,7 +1187,7 @@ TEST (rpc, account_history_block_shape)
 		ASSERT_EQ ("state", newest.get<std::string> ("type"));
 		ASSERT_EQ ("receive", newest.get<std::string> ("subtype"));
 		// The signer, where the inherited entry's `account` is the counterparty.
-		ASSERT_EQ (nano::dev::genesis->account ().to_account (), newest.get<std::string> ("account"));
+		ASSERT_EQ (nano::dev::team_key.pub.to_account (), newest.get<std::string> ("account"));
 		// The fields a signer needs and the inherited entry does not carry.
 		ASSERT_EQ (receive->previous ().to_string (), newest.get<std::string> ("previous"));
 		ASSERT_EQ (receive->block_signature ().to_string (), newest.get<std::string> ("signature"));
@@ -1209,7 +1209,7 @@ TEST (rpc, account_history_block_shape)
 	// derives one. Block shape cannot honour it, so it says so.
 	request.put ("shape", "block");
 	boost::property_tree::ptree filter_entry;
-	filter_entry.put ("", nano::dev::genesis_key.pub.to_account ());
+	filter_entry.put ("", nano::dev::team_key.pub.to_account ());
 	boost::property_tree::ptree filtered_accounts;
 	filtered_accounts.push_back (std::make_pair ("", filter_entry));
 	request.add_child ("account_filter", filtered_accounts);

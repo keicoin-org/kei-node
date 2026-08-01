@@ -205,17 +205,21 @@ set (§5.7). Membership is then a cheap test the node cannot get wrong, rather
 than a list maintained somewhere else — which SPEC correctly calls *"a convention
 wearing a protocol's clothes."*
 
-**The reserve seed is never a literal in this repository, and neither is the
-genesis it signs.** The tree inherited Banano's genesis blocks and would have
-launched on them; §14 is where that is fixed and where the placeholder that now
-stands in for beta and live is described.
+**Dev runs that structure completely, with published test keys.** Its genesis
+account is the singleton reserve named by the `open` block, starts with the null
+representative, makes four fixed state sends, and leaves exactly 9 × 10^29 raw.
+The grants, community, bounty and team accounts open those sends for exactly
+3.7, 2.8, 1.8 and 1.7 × 10^28 raw. `util/keigen.py` derives every dev key from a
+published `kei-dev-*` phrase and reproduces every block; they are test keys by
+construction and hold nothing of value. Store initialisation installs those nine
+blocks as cemented genesis history, before ordinary reserve locking begins.
 
-**The reserve seed is never a literal in this repository.** decisions-m0 §13 used
-fixed public seeds (`'1'.repeat(64)` and friends) because a mock needs a funded
-faucet and nothing is at stake. That property does not survive contact with a
-real chain: the reserve is 90% of all Kei, its custody is multisig (§5.7), and
-the key is generated offline. What ships in the source is the *address*, which is
-published deliberately so the reserve can be audited.
+**No beta/live seed is a literal in this repository.** Their reserve is 90% of
+all valuable Kei, its custody is multisig (§5.7), and its key is generated
+offline. What eventually ships is the public address and signed ceremony blocks,
+never a seed. Until then their all-zero placeholders still make
+`ledger_constants` refuse startup; deterministic dev data is never substituted
+for production ceremony output.
 
 ## 6. Weight is Kei-only, and the reserve has none
 
@@ -621,14 +625,17 @@ with §0 putting the public testnet in M3.
 
 ## 16. What is not finished, stated plainly
 
-Two things are not implemented, and what is implemented is unevenly demonstrated.
+One acceptance blocker remains, and what is implemented is unevenly demonstrated.
 
-**The reserve set is empty.** `ledger_constants::reserve_accounts` is the fixed,
-immutable enumeration §5.7 requires, and `is_reserve` enforces the null
-representative and the send lock against it — but it has no members until the
-genesis ceremony produces them, so on dev those rules currently hold vacuously.
-The four circulating allocations and the reserve total are asserted at startup
-today; the *blocks* that distribute them are part of the same ceremony.
+**The reserve rules are real on dev, not vacuous.** The genesis account is the
+single immutable reserve member and names the null representative from its first
+block. Four fixed sends and opens create the exact 100B circulating allocation
+and leave 900B in reserve. `genesis_reserve.*` checks the five account records,
+the 10^30 total, every ceremony block, both the first-start and rebuilt
+representative caches, and the null-representative/send/issue rejection paths.
+Beta/live remain deliberately unstartable until their offline ceremony produces
+public addresses and signed blocks; no production key was invented to make a
+local milestone green.
 
 **What has been executed, and what has only been compiled.** Per §3 there is no
 toolchain on this machine, so anything not named below is checked by compiling in
@@ -667,19 +674,19 @@ nothing had ever read one back — the round-trip test in `block.cpp` uses an
 `issue` block, whose payload is never empty. `asset_ledger.cpp` now round-trips
 all five ops through the exact record the store writes.
 
-What is still unexecuted after that: the reserve rules, which cannot be executed
-until the reserve set has members (above); `asset_info` and the rest of the asset
-RPC, which have no test of their own; and everything in §15 apart from
+What is still unexecuted after that: `asset_info` and the rest of the asset RPC,
+which have no test of their own; and everything in §15 apart from
 `account_history`. A ledger test is also not a running node — definition-of-done
-(1) and (6) still need a toolchain (§3).
+(6) remains the acceptance blocker even though (1) now runs on the Linux box (§17).
 
 **One deliberate divergence from the mock.** §1 makes `MockLedger` the reference
 and says that where this node could differ it does not. It differs in exactly
 one place, on purpose: the mock checks reserve-locked only on a `send`, so a
 reserve account can still `issue`, and issuance destroys Kei (§12). That is
 a supply change with no vote behind it, which SPEC §5.7 does not permit. The node
-refuses it. The cost is nothing today, because the reserve set is empty until
-the ceremony, and the mock should adopt the same rule.
+refuses it. `genesis_reserve.ordinary_blocks_cannot_delegate_send_or_issue`
+executes that stronger rule against the populated dev reserve, and the mock
+should adopt the same issue lock.
 
 **`account_history` answers in both shapes, and this one has actually been
 run.** §15 records the decision and what it turns on. Both halves are executed
@@ -737,8 +744,7 @@ one of them was a defect that compiling could not have found, and three of them
 would have made the node unusable by any client.
 
 **`faucet` existed only in the contract.** It is testnet-only (SPEC §12), pays
-from the dev genesis account rather than the mock's `community` — §5's four
-circulating allocations are sends the §5.7 ceremony has not produced — and
+from the deterministic dev `community` allocation, matching the mock, and
 serialises its read-build-process, because two calls reading one frontier fork
 the single account every test funds from.
 

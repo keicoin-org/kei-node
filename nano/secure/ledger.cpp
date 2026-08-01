@@ -118,15 +118,19 @@ public:
 		nano::account representative{};
 		if (!rep_block_hash.is_zero ())
 		{
-			// Move existing representation & add in amount delta
 			auto block (ledger.store.block.get (transaction, rep_block_hash));
 			debug_assert (block != nullptr);
 			representative = block->representative ();
-			ledger.cache.rep_weights.representation_add_dual (representative, balance, block_a.representative (), 0 - block_a.hashables.balance.number ());
+			if (!ledger.constants.is_reserve (block_a.hashables.account))
+			{
+				// Move existing representation & add in amount delta.
+				ledger.cache.rep_weights.representation_add_dual (representative, balance, block_a.representative (), 0 - block_a.hashables.balance.number ());
+			}
 		}
-		else
+		else if (!ledger.constants.is_reserve (block_a.hashables.account))
 		{
-			// Add in amount delta only
+			// Add in amount delta only. Reserve accounts never enter this cache,
+			// including when an ordinary receive is rolled back.
 			ledger.cache.rep_weights.representation_add (block_a.representative (), 0 - block_a.hashables.balance.number ());
 		}
 
@@ -509,14 +513,15 @@ void ledger_processor::state_block_impl (nano::state_block & block_a)
 						block_a.sideband_set (nano::block_sideband (block_a.hashables.account /* unused */, 0, 0 /* unused */, info.block_count + 1, nano::seconds_since_epoch (), block_details, source_epoch));
 						ledger.store.block.put (transaction, hash, block_a);
 
-						if (!info.head.is_zero ())
+						if (!ledger.constants.is_reserve (block_a.hashables.account) && !info.head.is_zero ())
 						{
 							// Move existing representation & add in amount delta
 							ledger.cache.rep_weights.representation_add_dual (info.representative, 0 - info.balance.number (), block_a.representative (), block_a.hashables.balance.number ());
 						}
-						else
+						else if (!ledger.constants.is_reserve (block_a.hashables.account))
 						{
-							// Add in amount delta only
+							// Add in amount delta only. A reserve receive is valid, but
+							// its balance still contributes zero representative weight.
 							ledger.cache.rep_weights.representation_add (block_a.representative (), block_a.hashables.balance.number ());
 						}
 
@@ -1234,10 +1239,19 @@ void nano::ledger::initialize (nano::generate_cache const & generate_cache_a)
 			decltype (this->cache.rep_weights) rep_weights_l;
 			for (; i != n; ++i)
 			{
+				nano::account const & account (i->first);
 				nano::account_info const & info (i->second);
 				block_count_l += info.block_count;
 				++account_count_l;
-				rep_weights_l.representation_add (info.representative, info.balance.number ());
+				// Reserve membership is immutable genesis data. Rebuilding the
+				// cache must preserve the same exclusion as first startup, instead
+				// of quietly assigning 90% of supply to the null representative.
+				// A null representative on any circulating account remains a valid
+				// weight bucket and must survive restart.
+				if (!this->constants.is_reserve (account))
+				{
+					rep_weights_l.representation_add (info.representative, info.balance.number ());
+				}
 			}
 			this->cache.block_count += block_count_l;
 			this->cache.account_count += account_count_l;

@@ -5910,11 +5910,10 @@ void nano::json_handler::faucet ()
 		static nano::mutex faucet_mutex;
 		nano::lock_guard<nano::mutex> lock (faucet_mutex);
 
-		// The dev genesis account, because it is the only funded one. §5's four
-		// circulating allocations are sends the §5.7 ceremony has not produced
-		// yet (§16), so there is no `community` account to pay from the way the
-		// mock does — when the ceremony lands, this moves to it.
-		auto const & source (nano::dev::genesis_key);
+		// The deterministic dev community allocation, matching MockLedger. The
+		// reserve genesis account is intentionally locked after the fixed M2
+		// ceremony and cannot act as a faucet without a governance vote.
+		auto const & source (nano::dev::community_key);
 		std::shared_ptr<nano::state_block> block;
 		{
 			auto transaction (node.store.tx_begin_read ());

@@ -18,8 +18,8 @@
 // bugs stay invisible until a fork actually happens and then cost real
 // balances.
 //
-// The issuer throughout is the dev genesis account. It is the only funded
-// account in a fresh ledger, and issuance has to burn Kei from somewhere (§12).
+// The issuer throughout is the funded dev team allocation. The genesis account
+// is the reserve and is deliberately unable to issue or otherwise burn Kei.
 
 namespace
 {
@@ -51,10 +51,10 @@ std::shared_ptr<nano::asset_block> signed_asset (nano::work_pool & pool_a, nano:
 	return block;
 }
 
-/** What the genesis account holds once it has paid for its nth asset. */
+/** What the team allocation holds once it has paid for its nth asset. */
 nano::uint128_t after_issuing (uint64_t count_a)
 {
-	nano::uint128_t balance (nano::dev::constants.genesis_amount);
+	nano::uint128_t balance (nano::dev::constants.allocation_team ());
 	for (uint64_t issued (0); issued < count_a; ++issued)
 	{
 		balance -= nano::issuance_burn (issued);
@@ -62,7 +62,7 @@ nano::uint128_t after_issuing (uint64_t count_a)
 	return balance;
 }
 
-/** The genesis account issuing one asset — the starting point for everything below. */
+/** The team allocation issuing one asset — the starting point below. */
 struct issued_asset
 {
 	nano::asset_payload payload;
@@ -74,8 +74,8 @@ issued_asset issue_one (nano::ledger & ledger_a, nano::store & store_a, nano::wo
 {
 	issued_asset issued;
 	issued.payload = issuance ("GEM", transfer_a, max_supply_a);
-	issued.id = nano::derive_asset_id (nano::dev::genesis_key.pub, issued.payload.symbol);
-	issued.block = signed_asset (pool_a, nano::dev::genesis_key, nano::dev::genesis->hash (), nano::amount (after_issuing (1)), nano::asset_op::issue, issued.id, 0, 0, issued.payload);
+	issued.id = nano::derive_asset_id (nano::dev::team_key.pub, issued.payload.symbol);
+	issued.block = signed_asset (pool_a, nano::dev::team_key, nano::dev::constants.genesis_allocations.back ().open->hash (), nano::amount (after_issuing (1)), nano::asset_op::issue, issued.id, 0, 0, issued.payload);
 	auto transaction (store_a.tx_begin_write ());
 	EXPECT_EQ (nano::process_result::progress, ledger_a.process (transaction, *issued.block).code);
 	return issued;
@@ -151,16 +151,16 @@ TEST (asset_ledger, issue_burns_one_kei_and_records_the_asset)
 	auto transaction (store.tx_begin_read ());
 	nano::asset_info asset;
 	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
-	ASSERT_EQ (nano::dev::genesis_key.pub, asset.issuer);
+	ASSERT_EQ (nano::dev::team_key.pub, asset.issuer);
 	ASSERT_EQ ("GEM", asset.symbol);
 	ASSERT_EQ (nano::transfer_policy::open, asset.transfer);
 	ASSERT_TRUE (asset.circulating.is_zero ());
-	ASSERT_EQ (1, store.asset.issued_count (transaction, nano::dev::genesis_key.pub));
+	ASSERT_EQ (1, store.asset.issued_count (transaction, nano::dev::team_key.pub));
 
 	// One Kei gone, and gone from the supply rather than to anyone.
-	ASSERT_EQ (nano::dev::constants.genesis_amount - nano::BAN_ratio, ledger.account_balance (transaction, nano::dev::genesis_key.pub));
-	ASSERT_EQ (nano::dev::constants.genesis_amount - nano::BAN_ratio, ledger.weight (nano::dev::genesis_key.pub));
-	auto const info (ledger.account_info (transaction, nano::dev::genesis_key.pub));
+	ASSERT_EQ (nano::dev::constants.allocation_team () - nano::BAN_ratio, ledger.account_balance (transaction, nano::dev::team_key.pub));
+	ASSERT_EQ (nano::dev::constants.allocation_team () - nano::BAN_ratio, ledger.weight (nano::dev::team_key.pub));
+	auto const info (ledger.account_info (transaction, nano::dev::team_key.pub));
 	ASSERT_TRUE (info);
 	ASSERT_EQ (issued.block->hash (), info->head);
 	ASSERT_EQ (2, info->block_count);
@@ -178,10 +178,10 @@ TEST (asset_ledger, the_second_asset_costs_two_kei)
 	auto const first (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
 
 	auto const payload (issuance ("GOLD", nano::transfer_policy::open, 1000));
-	auto const id (nano::derive_asset_id (nano::dev::genesis_key.pub, payload.symbol));
+	auto const id (nano::derive_asset_id (nano::dev::team_key.pub, payload.symbol));
 	// One Kei short of what a second asset costs.
-	auto underpaid (signed_asset (pool, nano::dev::genesis_key, first.block->hash (), nano::amount (after_issuing (1) - nano::BAN_ratio), nano::asset_op::issue, id, 0, 0, payload));
-	auto second (signed_asset (pool, nano::dev::genesis_key, first.block->hash (), nano::amount (after_issuing (2)), nano::asset_op::issue, id, 0, 0, payload));
+	auto underpaid (signed_asset (pool, nano::dev::team_key, first.block->hash (), nano::amount (after_issuing (1) - nano::BAN_ratio), nano::asset_op::issue, id, 0, 0, payload));
+	auto second (signed_asset (pool, nano::dev::team_key, first.block->hash (), nano::amount (after_issuing (2)), nano::asset_op::issue, id, 0, 0, payload));
 	{
 		auto transaction (store.tx_begin_write ());
 		ASSERT_EQ (nano::process_result::issuance_burn_mismatch, ledger.process (transaction, *underpaid).code);
@@ -189,8 +189,8 @@ TEST (asset_ledger, the_second_asset_costs_two_kei)
 	}
 
 	auto transaction (store.tx_begin_read ());
-	ASSERT_EQ (2, store.asset.issued_count (transaction, nano::dev::genesis_key.pub));
-	ASSERT_EQ (nano::dev::constants.genesis_amount - (nano::BAN_ratio * 3), ledger.account_balance (transaction, nano::dev::genesis_key.pub));
+	ASSERT_EQ (2, store.asset.issued_count (transaction, nano::dev::team_key.pub));
+	ASSERT_EQ (nano::dev::constants.allocation_team () - (nano::BAN_ratio * 3), ledger.account_balance (transaction, nano::dev::team_key.pub));
 }
 
 // Identity is derived, never assigned (SPEC §5.6.1), so re-issuing a symbol
@@ -203,7 +203,7 @@ TEST (asset_ledger, the_same_symbol_cannot_be_issued_twice)
 	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
-	auto again (signed_asset (pool, nano::dev::genesis_key, issued.block->hash (), nano::amount (after_issuing (2)), nano::asset_op::issue, issued.id, 0, 0, issued.payload));
+	auto again (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (2)), nano::asset_op::issue, issued.id, 0, 0, issued.payload));
 
 	auto transaction (store.tx_begin_write ());
 	ASSERT_EQ (nano::process_result::asset_exists, ledger.process (transaction, *again).code);
@@ -221,7 +221,7 @@ TEST (asset_ledger, a_mint_arrives_as_receivable_and_the_holder_collects_it)
 	nano::keypair player;
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
-	auto mint (signed_asset (pool, nano::dev::genesis_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
 	{
 		auto transaction (store.tx_begin_write ());
 		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
@@ -237,7 +237,7 @@ TEST (asset_ledger, a_mint_arrives_as_receivable_and_the_holder_collects_it)
 		ASSERT_FALSE (ledger.account_info (transaction, player.pub));
 		nano::asset_pending_info pending;
 		ASSERT_FALSE (store.asset.pending_get (transaction, nano::pending_key (player.pub, mint->hash ()), pending));
-		ASSERT_EQ (nano::dev::genesis_key.pub, pending.source);
+		ASSERT_EQ (nano::dev::team_key.pub, pending.source);
 		ASSERT_EQ (issued.id, pending.asset_id);
 		ASSERT_EQ (nano::amount (500), pending.amount);
 	}
@@ -282,13 +282,13 @@ TEST (asset_ledger, mint_cannot_exceed_max_supply)
 	nano::keypair player;
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
-	auto mint (signed_asset (pool, nano::dev::genesis_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 600, player.pub));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 600, player.pub));
 	{
 		auto transaction (store.tx_begin_write ());
 		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
 	}
-	auto over (signed_asset (pool, nano::dev::genesis_key, mint->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
-	auto exact (signed_asset (pool, nano::dev::genesis_key, mint->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 400, player.pub));
+	auto over (signed_asset (pool, nano::dev::team_key, mint->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
+	auto exact (signed_asset (pool, nano::dev::team_key, mint->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 400, player.pub));
 	{
 		auto transaction (store.tx_begin_write ());
 		ASSERT_EQ (nano::process_result::over_max_supply, ledger.process (transaction, *over).code);
@@ -310,7 +310,7 @@ TEST (asset_ledger, burning_frees_headroom_to_mint_again)
 	auto & ledger = ctx.ledger ();
 	auto & store = ctx.store ();
 	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
-	auto const & issuer (nano::dev::genesis_key);
+	auto const & issuer (nano::dev::team_key);
 	auto const balance (nano::amount (after_issuing (1)));
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
@@ -349,7 +349,7 @@ TEST (asset_ledger, a_soulbound_asset_cannot_be_transferred)
 	nano::keypair player, other;
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::none, 1000));
-	auto mint (signed_asset (pool, nano::dev::genesis_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
 	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
 	auto transfer (signed_asset (pool, player, collect->hash (), 0, nano::asset_op::transfer, issued.id, 100, other.pub));
 	auto burn (signed_asset (pool, player, collect->hash (), 0, nano::asset_op::burn, issued.id, 100, 0));
@@ -374,10 +374,10 @@ TEST (asset_ledger, issuer_only_permits_only_the_issuer_side)
 	nano::keypair player, other;
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::issuer_only, 1000));
-	auto mint (signed_asset (pool, nano::dev::genesis_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
 	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
 	auto to_player = signed_asset (pool, player, collect->hash (), 0, nano::asset_op::transfer, issued.id, 100, other.pub);
-	auto to_issuer = signed_asset (pool, player, collect->hash (), 0, nano::asset_op::transfer, issued.id, 100, nano::dev::genesis_key.pub);
+	auto to_issuer = signed_asset (pool, player, collect->hash (), 0, nano::asset_op::transfer, issued.id, 100, nano::dev::team_key.pub);
 
 	auto transaction (store.tx_begin_write ());
 	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
@@ -399,7 +399,7 @@ TEST (asset_ledger, an_asset_block_may_not_move_kei)
 	nano::keypair player;
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
-	auto mint (signed_asset (pool, nano::dev::genesis_key, issued.block->hash (), nano::amount (after_issuing (1) - nano::BAN_ratio), nano::asset_op::mint, issued.id, 500, player.pub));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1) - nano::BAN_ratio), nano::asset_op::mint, issued.id, 500, player.pub));
 
 	auto transaction (store.tx_begin_write ());
 	ASSERT_EQ (nano::process_result::asset_balance_mismatch, ledger.process (transaction, *mint).code);
@@ -416,7 +416,7 @@ TEST (asset_ledger, transferring_everything_deletes_both_entries)
 	nano::keypair player, other;
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
-	auto mint (signed_asset (pool, nano::dev::genesis_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
 	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
 	auto transfer (signed_asset (pool, player, collect->hash (), 0, nano::asset_op::transfer, issued.id, 500, other.pub));
 	{
@@ -453,13 +453,13 @@ TEST (asset_ledger, rolling_back_an_issue_gives_the_kei_back)
 
 	auto transaction (store.tx_begin_read ());
 	ASSERT_FALSE (store.asset.exists (transaction, issued.id));
-	ASSERT_EQ (0, store.asset.issued_count (transaction, nano::dev::genesis_key.pub));
-	ASSERT_EQ (nano::dev::constants.genesis_amount, ledger.account_balance (transaction, nano::dev::genesis_key.pub));
-	ASSERT_EQ (nano::dev::constants.genesis_amount, ledger.weight (nano::dev::genesis_key.pub));
+	ASSERT_EQ (0, store.asset.issued_count (transaction, nano::dev::team_key.pub));
+	ASSERT_EQ (nano::dev::constants.allocation_team (), ledger.account_balance (transaction, nano::dev::team_key.pub));
+	ASSERT_EQ (nano::dev::constants.allocation_team (), ledger.weight (nano::dev::team_key.pub));
 	ASSERT_FALSE (store.block.exists (transaction, issued.block->hash ()));
-	auto const info (ledger.account_info (transaction, nano::dev::genesis_key.pub));
+	auto const info (ledger.account_info (transaction, nano::dev::team_key.pub));
 	ASSERT_TRUE (info);
-	ASSERT_EQ (nano::dev::genesis->hash (), info->head);
+	ASSERT_EQ (nano::dev::constants.genesis_allocations.back ().open->hash (), info->head);
 	ASSERT_EQ (1, info->block_count);
 }
 
@@ -474,7 +474,7 @@ TEST (asset_ledger, rolling_back_a_mint_takes_the_receivable_back)
 	nano::keypair player;
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
-	auto mint (signed_asset (pool, nano::dev::genesis_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
 	{
 		auto transaction (store.tx_begin_write ());
 		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
@@ -488,7 +488,7 @@ TEST (asset_ledger, rolling_back_a_mint_takes_the_receivable_back)
 	ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, mint->hash ())));
 	// The asset itself survives: only the mint was rolled back.
 	ASSERT_TRUE (store.asset.exists (transaction, issued.id));
-	ASSERT_EQ (issued.block->hash (), ledger.latest (transaction, nano::dev::genesis_key.pub));
+	ASSERT_EQ (issued.block->hash (), ledger.latest (transaction, nano::dev::team_key.pub));
 }
 
 // The case that is easy to get wrong, and whose bug is invisible until a fork:
@@ -504,7 +504,7 @@ TEST (asset_ledger, rolling_back_a_mint_the_holder_already_collected)
 	nano::keypair player;
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
-	auto mint (signed_asset (pool, nano::dev::genesis_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
 	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
 	{
 		auto transaction (store.tx_begin_write ());
@@ -540,7 +540,7 @@ TEST (asset_ledger, rolling_back_a_collect_makes_it_receivable_again)
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
 	nano::asset_payload payload;
 	payload.memo = "quest reward";
-	auto mint (signed_asset (pool, nano::dev::genesis_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub, payload));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub, payload));
 	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
 	{
 		auto transaction (store.tx_begin_write ());
@@ -554,7 +554,7 @@ TEST (asset_ledger, rolling_back_a_collect_makes_it_receivable_again)
 	ASSERT_TRUE (store.asset.balance (transaction, player.pub, issued.id).is_zero ());
 	nano::asset_pending_info pending;
 	ASSERT_FALSE (store.asset.pending_get (transaction, nano::pending_key (player.pub, mint->hash ()), pending));
-	ASSERT_EQ (nano::dev::genesis_key.pub, pending.source);
+	ASSERT_EQ (nano::dev::team_key.pub, pending.source);
 	ASSERT_EQ (issued.id, pending.asset_id);
 	ASSERT_EQ (nano::amount (500), pending.amount);
 	ASSERT_EQ ("quest reward", pending.memo);

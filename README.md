@@ -29,13 +29,14 @@ token primitive** and a Kei genesis.
 > client's opening block was refused, and a bad signature cost fifteen seconds
 > and reported "Stopped".
 >
-> **Not finished** (§16, §17): the reserve set is empty until the SPEC §5.7
-> genesis ceremony fills it, so the reserve rules currently hold vacuously.
-> `commit`/`claim` are M4 and account for two of the four remaining conformance
+> **Not finished** (§16, §17): `commit`/`claim` are M4 and account for two of
+> the four remaining conformance
 > failures. The other two are decisions rather than defects — the wire shape of a
 > Kei payment carrying a memo (§8), and a genesis whose oldest block is a legacy
-> `open` rather than the state block the contract expects, which belongs to the
-> ceremony because changing it moves the genesis hash. It still does not build on
+> `open` rather than the state block the contract expects. The dev genesis now
+> includes the reproducible §5.7 allocation: a null-representative reserve plus
+> four circulating accounts; beta/live still refuse to start until their offline
+> ceremony supplies real public blocks. It still does not build on
 > the machine it was cloned onto, see [Building](#building). Nothing here holds
 > value.
 
