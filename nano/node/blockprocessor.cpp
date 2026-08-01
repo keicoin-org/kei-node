@@ -180,6 +180,19 @@ bool nano::block_processor::have_blocks ()
 
 void nano::block_processor::process_verified_state_blocks (std::deque<nano::state_block_signature_verification::value_type> & items, std::vector<int> const & verifications, std::vector<nano::block_hash> const & hashes, std::vector<nano::signature> const & blocks_signatures)
 {
+	// State blocks whose signature did not verify are dropped below rather than
+	// queued, so `process_one` never sees them and never reports on them. For a
+	// block that arrived over the network that is right — it is someone else's
+	// malformed traffic. For one submitted through `process` it left the caller
+	// waiting out the whole `block_process_timeout` and then answering
+	// "Stopped", which names the timeout rather than the fault: 15 seconds to
+	// be told nothing, for a block the node rejected in microseconds.
+	//
+	// A client that signs over the wrong bytes — a different hash domain (§14),
+	// a field the node's layout has no room for (§8) — hits exactly this, so it
+	// is the first thing a new client integration meets. Settle those promises
+	// with the real reason instead.
+	std::vector<std::shared_ptr<nano::block>> unverified;
 	{
 		nano::unique_lock<nano::mutex> lk{ mutex };
 		for (auto i (0); i < verifications.size (); ++i)
@@ -205,10 +218,20 @@ void nano::block_processor::process_verified_state_blocks (std::deque<nano::stat
 				// Non epoch blocks
 				blocks.emplace_back (block);
 			}
+			else
+			{
+				unverified.emplace_back (block);
+			}
 			items.pop_front ();
 		}
 	}
 	condition.notify_all ();
+	// Outside the lock: `observe` takes the observer's own, and a block nobody
+	// is waiting on is not in its map at all.
+	for (auto const & block : unverified)
+	{
+		blocking.observe (nano::process_return{ nano::process_result::bad_signature }, block);
+	}
 }
 
 void nano::block_processor::add_impl (std::shared_ptr<nano::block> block)
