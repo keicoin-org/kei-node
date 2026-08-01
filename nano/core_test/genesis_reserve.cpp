@@ -76,7 +76,7 @@ TEST (genesis_reserve, dev_ceremony_installs_the_set_and_exact_allocation)
 		ASSERT_FALSE (nano::validate_message (account, nano::dev::constants.genesis_allocations[i].open->hash (), nano::dev::constants.genesis_allocations[i].open->block_signature ()));
 		ASSERT_GE (nano::dev::constants.work.difficulty (*nano::dev::constants.genesis_allocations[i].send), nano::dev::constants.work.tier_b ());
 		ASSERT_GE (nano::dev::constants.work.difficulty (*nano::dev::constants.genesis_allocations[i].open), nano::dev::constants.work.tier_c ());
-		ASSERT_EQ (nano::dev::constants.genesis_allocations[i].send->hash (), nano::dev::constants.genesis_allocations[i].open->link ());
+		ASSERT_EQ (nano::dev::constants.genesis_allocations[i].send->hash (), nano::dev::constants.genesis_allocations[i].open->link ().as_block_hash ());
 		circulating += info->balance.number ();
 	}
 
@@ -111,7 +111,7 @@ TEST (genesis_reserve, ordinary_blocks_cannot_delegate_send_or_issue)
 		.sign (nano::dev::genesis_key.prv, nano::dev::genesis_key.pub)
 		.work (0)
 		.build ();
-	ASSERT_EQ (nano::process_result::reserve_representative, ledger.process (store.tx_begin_write (), bad_representative).code);
+	ASSERT_EQ (nano::process_result::reserve_representative, ledger.process (store.tx_begin_write (), *bad_representative).code);
 
 	auto send = std::make_shared<nano::state_block> (reserve, reserve_info->head, nano::account{}, nano::amount (reserve_info->balance.number () - 1), nano::dev::team_key.pub, nano::dev::genesis_key.prv, nano::dev::genesis_key.pub, 0);
 	ASSERT_EQ (nano::process_result::reserve_locked, ledger.process (store.tx_begin_write (), *send).code);
