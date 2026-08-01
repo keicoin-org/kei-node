@@ -199,7 +199,10 @@ std::unordered_map<char const *, nano::tables> nano::rocksdb::store::create_cf_n
 		{ "holdings", tables::holdings },
 		{ "holders", tables::holders },
 		{ "asset_pending", tables::asset_pending },
-		{ "issued", tables::issued } };
+		{ "issued", tables::issued },
+		{ "commits", tables::commits },
+		{ "claims", tables::claims },
+		{ "claims_by_root", tables::claims_by_root } };
 
 	debug_assert (map.size () == all_tables ().size () + 1);
 	return map;
@@ -272,6 +275,9 @@ bool nano::rocksdb::store::do_upgrades (nano::write_transaction const & transact
 			upgrade_v22_to_v23 (transaction_a);
 			[[fallthrough]];
 		case 23:
+			upgrade_v23_to_v24 (transaction_a);
+			[[fallthrough]];
+		case 24:
 			break;
 		default:
 			logger.always_log (boost::str (boost::format ("The version of the ledger (%1%) is too high for this node") % version_l));
@@ -290,6 +296,15 @@ void nano::rocksdb::store::upgrade_v22_to_v23 (nano::write_transaction const & t
 	// create_column_families () when the database is opened.
 	version.put (transaction_a, 23);
 	logger.always_log ("Finished creating the asset tables");
+}
+
+void nano::rocksdb::store::upgrade_v23_to_v24 (nano::write_transaction const & transaction_a)
+{
+	logger.always_log ("Preparing v23 to v24 database upgrade...");
+	// create_missing_column_families has already created the three empty M4
+	// indexes before this version step runs; no ledger rows need migration.
+	version.put (transaction_a, 24);
+	logger.always_log ("Finished creating the rooted-claim tables");
 }
 
 void nano::rocksdb::store::upgrade_v21_to_v22 (nano::write_transaction const & transaction_a)
@@ -419,14 +434,14 @@ rocksdb::ColumnFamilyOptions nano::rocksdb::store::get_cf_options (std::string c
 		std::shared_ptr<::rocksdb::TableFactory> table_factory (::rocksdb::NewBlockBasedTableFactory (get_active_table_options (block_cache_size_bytes * 2)));
 		cf_options = get_active_cf_options (table_factory, memtable_size_bytes);
 	}
-	else if (cf_name_a == "assets" || cf_name_a == "issued")
+	else if (cf_name_a == "assets" || cf_name_a == "issued" || cf_name_a == "commits")
 	{
 		// One entry per token ever issued, and per account that has issued one.
 		// The escalating burn (SPEC 5.6.5) is what keeps both small, and neither
 		// is deleted from in the normal case.
 		cf_options = get_small_cf_options (small_table_factory);
 	}
-	else if (cf_name_a == "holdings" || cf_name_a == "holders" || cf_name_a == "asset_pending")
+	else if (cf_name_a == "holdings" || cf_name_a == "holders" || cf_name_a == "asset_pending" || cf_name_a == "claims" || cf_name_a == "claims_by_root")
 	{
 		// Zero balances are deleted rather than kept at zero (SPEC §7), and every
 		// collected receivable is a delete, so all three see heavy deletion —
@@ -576,6 +591,12 @@ rocksdb::ColumnFamilyHandle * nano::rocksdb::store::table_to_column_family (tabl
 			return get_column_family ("asset_pending");
 		case tables::issued:
 			return get_column_family ("issued");
+		case tables::commits:
+			return get_column_family ("commits");
+		case tables::claims:
+			return get_column_family ("claims");
+		case tables::claims_by_root:
+			return get_column_family ("claims_by_root");
 		default:
 			release_assert (false);
 			return get_column_family ("");
@@ -917,7 +938,7 @@ void nano::rocksdb::store::on_flush (::rocksdb::FlushJobInfo const & flush_job_i
 
 std::vector<nano::tables> nano::rocksdb::store::all_tables () const
 {
-	return std::vector<nano::tables>{ tables::accounts, tables::asset_pending, tables::assets, tables::blocks, tables::confirmation_height, tables::final_votes, tables::frontiers, tables::holders, tables::holdings, tables::issued, tables::meta, tables::online_weight, tables::peers, tables::pending, tables::pruned, tables::vote };
+	return std::vector<nano::tables>{ tables::accounts, tables::asset_pending, tables::assets, tables::blocks, tables::claims, tables::claims_by_root, tables::commits, tables::confirmation_height, tables::final_votes, tables::frontiers, tables::holders, tables::holdings, tables::issued, tables::meta, tables::online_weight, tables::peers, tables::pending, tables::pruned, tables::vote };
 }
 
 bool nano::rocksdb::store::copy_db (boost::filesystem::path const & destination_path)

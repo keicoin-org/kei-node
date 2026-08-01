@@ -46,7 +46,10 @@ enum class asset_op : uint8_t
 	mint = 1,
 	burn = 2,
 	transfer = 3,
-	asset_receive = 4
+	asset_receive = 4,
+	commit = 5,
+	commit_close = 6,
+	claim = 7
 };
 /**
  * The domain separator every Kei block hash begins with, so that no Nano or
@@ -130,6 +133,11 @@ public:
 
 	// `mint` and `transfer` only (decisions-m2.md §8).
 	std::string memo;
+
+	// Rooted distribution data. Root/asset/amount use link/asset_id/amount.
+	uint32_t count{ 0 }; // `commit` only
+	std::vector<nano::uint256_union> proof; // `claim` only
+	static std::size_t constexpr max_proof = 48;
 
 	// Bounds, enforced here so a block that cannot be stored cannot be parsed
 	// either. The ledger repeats the ones that carry a user-facing message.

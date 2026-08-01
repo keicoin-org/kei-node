@@ -120,6 +120,11 @@ enum class detail : uint8_t
 	too_many_assets,
 	reserve_representative,
 	reserve_locked,
+	commit_exists,
+	no_such_commit,
+	commit_closed,
+	already_claimed,
+	bad_claim_proof,
 
 	// message specific
 	not_a_type,

@@ -227,6 +227,9 @@ void nano::lmdb::store::open_databases (bool & error_a, nano::transaction const 
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "holders", flags, &asset_store.holders_handle) != 0;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "asset_pending", flags, &asset_store.asset_pending_handle) != 0;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "issued", flags, &asset_store.issued_handle) != 0;
+	error_a |= mdb_dbi_open (env.tx (transaction_a), "commits", flags, &asset_store.commits_handle) != 0;
+	error_a |= mdb_dbi_open (env.tx (transaction_a), "claims", flags, &asset_store.claims_handle) != 0;
+	error_a |= mdb_dbi_open (env.tx (transaction_a), "claims_by_root", flags, &asset_store.claims_by_root_handle) != 0;
 
 	auto version_l = version.get (transaction_a);
 	if (version_l < 19)
@@ -317,6 +320,9 @@ bool nano::lmdb::store::do_upgrades (nano::write_transaction & transaction_a, na
 			upgrade_v22_to_v23 (transaction_a);
 			[[fallthrough]];
 		case 23:
+			upgrade_v23_to_v24 (transaction_a);
+			[[fallthrough]];
+		case 24:
 			break;
 		default:
 			logger.always_log (boost::str (boost::format ("The version of the ledger (%1%) is too high for this node") % version_l));
@@ -801,8 +807,21 @@ void nano::lmdb::store::upgrade_v22_to_v23 (nano::write_transaction const & tran
 	release_assert (!mdb_dbi_open (env.tx (transaction_a), "holders", MDB_CREATE, &asset_store.holders_handle));
 	release_assert (!mdb_dbi_open (env.tx (transaction_a), "asset_pending", MDB_CREATE, &asset_store.asset_pending_handle));
 	release_assert (!mdb_dbi_open (env.tx (transaction_a), "issued", MDB_CREATE, &asset_store.issued_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "commits", MDB_CREATE, &asset_store.commits_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "claims", MDB_CREATE, &asset_store.claims_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "claims_by_root", MDB_CREATE, &asset_store.claims_by_root_handle));
 	version.put (transaction_a, 23);
 	logger.always_log ("Finished creating the asset tables");
+}
+
+void nano::lmdb::store::upgrade_v23_to_v24 (nano::write_transaction const & transaction_a)
+{
+	logger.always_log ("Preparing v23 to v24 database upgrade...");
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "commits", MDB_CREATE, &asset_store.commits_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "claims", MDB_CREATE, &asset_store.claims_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "claims_by_root", MDB_CREATE, &asset_store.claims_by_root_handle));
+	version.put (transaction_a, 24);
+	logger.always_log ("Finished creating the rooted-claim tables");
 }
 
 void nano::lmdb::store::upgrade_v21_to_v22 (nano::write_transaction const & transaction_a)
@@ -914,6 +933,12 @@ MDB_dbi nano::lmdb::store::table_to_dbi (tables table_a) const
 			return asset_store.asset_pending_handle;
 		case tables::issued:
 			return asset_store.issued_handle;
+		case tables::commits:
+			return asset_store.commits_handle;
+		case tables::claims:
+			return asset_store.claims_handle;
+		case tables::claims_by_root:
+			return asset_store.claims_by_root_handle;
 		case tables::online_weight:
 			return online_weight_store.online_weight_handle;
 		case tables::meta:

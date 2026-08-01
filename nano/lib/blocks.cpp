@@ -12,6 +12,7 @@
 
 #include <bitset>
 #include <cstring>
+#include <limits>
 
 #include <cryptopp/words.h>
 
@@ -1379,7 +1380,7 @@ void nano::state_block::signature_set (nano::signature const & signature_a)
 
 bool nano::asset_op_valid (uint8_t raw_a)
 {
-	return raw_a <= static_cast<uint8_t> (nano::asset_op::asset_receive);
+	return raw_a <= static_cast<uint8_t> (nano::asset_op::claim);
 }
 
 char const * nano::asset_op_to_string (nano::asset_op op_a)
@@ -1396,6 +1397,12 @@ char const * nano::asset_op_to_string (nano::asset_op op_a)
 			return "transfer";
 		case nano::asset_op::asset_receive:
 			return "asset_receive";
+		case nano::asset_op::commit:
+			return "commit";
+		case nano::asset_op::commit_close:
+			return "commit_close";
+		case nano::asset_op::claim:
+			return "claim";
 	}
 	return "invalid";
 }
@@ -1422,6 +1429,18 @@ bool nano::asset_op_from_string (std::string const & text_a, nano::asset_op & op
 	else if (text_a == "asset_receive")
 	{
 		op_a = nano::asset_op::asset_receive;
+	}
+	else if (text_a == "commit")
+	{
+		op_a = nano::asset_op::commit;
+	}
+	else if (text_a == "commit_close")
+	{
+		op_a = nano::asset_op::commit_close;
+	}
+	else if (text_a == "claim")
+	{
+		op_a = nano::asset_op::claim;
 	}
 	else
 	{
@@ -1617,7 +1636,7 @@ nano::uint256_union nano::derive_asset_id (nano::public_key const & issuer_a, st
 
 bool nano::asset_payload::operator== (nano::asset_payload const & other_a) const
 {
-	return name == other_a.name && symbol == other_a.symbol && decimals == other_a.decimals && max_supply == other_a.max_supply && transfer == other_a.transfer && swap == other_a.swap && description == other_a.description && image == other_a.image && kind == other_a.kind && memo == other_a.memo;
+	return name == other_a.name && symbol == other_a.symbol && decimals == other_a.decimals && max_supply == other_a.max_supply && transfer == other_a.transfer && swap == other_a.swap && description == other_a.description && image == other_a.image && kind == other_a.kind && memo == other_a.memo && count == other_a.count && proof == other_a.proof;
 }
 
 void nano::asset_payload::serialize (nano::stream & stream_a, nano::asset_op op_a) const
@@ -1641,6 +1660,17 @@ void nano::asset_payload::serialize (nano::stream & stream_a, nano::asset_op op_
 			break;
 		case nano::asset_op::burn:
 		case nano::asset_op::asset_receive:
+		case nano::asset_op::commit_close:
+			break;
+		case nano::asset_op::commit:
+			nano::write (stream_a, boost::endian::native_to_big (count));
+			break;
+		case nano::asset_op::claim:
+			nano::write (stream_a, static_cast<uint8_t> (proof.size ()));
+			for (auto const & sibling : proof)
+			{
+				nano::write (stream_a, sibling.bytes);
+			}
 			break;
 	}
 }
@@ -1659,7 +1689,7 @@ bool nano::asset_payload::deserialize (nano::stream & stream_a, nano::asset_op o
 	// encoding rather than the ordinary case.
 	if (size_a == 0)
 	{
-		return op_a != nano::asset_op::burn && op_a != nano::asset_op::asset_receive;
+		return op_a != nano::asset_op::burn && op_a != nano::asset_op::asset_receive && op_a != nano::asset_op::commit_close;
 	}
 
 	std::vector<uint8_t> bytes;
@@ -1711,7 +1741,25 @@ bool nano::asset_payload::deserialize (nano::stream & stream_a, nano::asset_op o
 				break;
 			case nano::asset_op::burn:
 			case nano::asset_op::asset_receive:
+			case nano::asset_op::commit_close:
 				break;
+			case nano::asset_op::commit:
+				nano::read (payload_stream, count);
+				boost::endian::big_to_native_inplace (count);
+				error = count == 0;
+				break;
+			case nano::asset_op::claim:
+			{
+				uint8_t proof_count{ 0 };
+				nano::read (payload_stream, proof_count);
+				error = proof_count > nano::asset_payload::max_proof;
+				proof.resize (proof_count);
+				for (auto & sibling : proof)
+				{
+					nano::read (payload_stream, sibling.bytes);
+				}
+				break;
+			}
 		}
 	}
 	catch (std::runtime_error const &)
@@ -1910,6 +1958,33 @@ bool nano::asset_hashables::deserialize_op_json (boost::property_tree::ptree con
 			link = source;
 			break;
 		}
+		case nano::asset_op::commit:
+		{
+			error = asset_id.decode_hex (op_a.get<std::string> ("asset"));
+			error = error || amount.decode_dec (op_a.get<std::string> ("total"));
+			error = error || link.decode_hex (op_a.get<std::string> ("root"));
+			auto const count_l (op_a.get<uint64_t> ("count"));
+			error = error || count_l == 0 || count_l > std::numeric_limits<uint32_t>::max ();
+			payload.count = static_cast<uint32_t> (count_l);
+			break;
+		}
+		case nano::asset_op::commit_close:
+			error = link.decode_hex (op_a.get<std::string> ("root"));
+			break;
+		case nano::asset_op::claim:
+		{
+			error = asset_id.decode_hex (op_a.get<std::string> ("asset"));
+			error = error || amount.decode_dec (op_a.get<std::string> ("amount"));
+			error = error || link.decode_hex (op_a.get<std::string> ("root"));
+			for (auto const & entry : op_a.get_child ("proof"))
+			{
+				nano::uint256_union sibling;
+				error = error || sibling.decode_hex (entry.second.get_value<std::string> ());
+				payload.proof.push_back (sibling);
+			}
+			error = error || payload.proof.size () > nano::asset_payload::max_proof;
+			break;
+		}
 	}
 	return error;
 }
@@ -1974,6 +2049,30 @@ void nano::asset_hashables::serialize_op_json (boost::property_tree::ptree & op_
 		case nano::asset_op::asset_receive:
 		{
 			op_a.put ("link", link.as_block_hash ().to_string ());
+			break;
+		}
+		case nano::asset_op::commit:
+			op_a.put ("asset", asset_id.to_string ());
+			op_a.put ("root", link.to_string ());
+			op_a.put ("count", payload.count);
+			op_a.put ("total", amount.to_string_dec ());
+			break;
+		case nano::asset_op::commit_close:
+			op_a.put ("root", link.to_string ());
+			break;
+		case nano::asset_op::claim:
+		{
+			op_a.put ("root", link.to_string ());
+			op_a.put ("asset", asset_id.to_string ());
+			op_a.put ("amount", amount.to_string_dec ());
+			boost::property_tree::ptree proof_l;
+			for (auto const & sibling : payload.proof)
+			{
+				boost::property_tree::ptree entry;
+				entry.put ("", sibling.to_string ());
+				proof_l.push_back ({ "", entry });
+			}
+			op_a.add_child ("proof", proof_l);
 			break;
 		}
 	}

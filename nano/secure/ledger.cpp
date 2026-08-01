@@ -12,6 +12,40 @@
 
 namespace
 {
+/** SPEC §5.5 domain-separated, order-independent Merkle verification. */
+nano::uint256_union claim_leaf (nano::account const & account_a, nano::uint256_union const & asset_a, nano::amount const & amount_a)
+{
+	nano::uint256_union result;
+	blake2b_state hash;
+	blake2b_init (&hash, result.bytes.size ());
+	uint8_t const tag{ 0x00 };
+	blake2b_update (&hash, &tag, 1);
+	blake2b_update (&hash, account_a.bytes.data (), account_a.bytes.size ());
+	blake2b_update (&hash, asset_a.bytes.data (), asset_a.bytes.size ());
+	blake2b_update (&hash, amount_a.bytes.data (), amount_a.bytes.size ());
+	blake2b_final (&hash, result.bytes.data (), result.bytes.size ());
+	return result;
+}
+
+nano::uint256_union claim_parent (nano::uint256_union const & left_a, nano::uint256_union const & right_a)
+{
+	auto const * first = &left_a;
+	auto const * second = &right_a;
+	if (std::lexicographical_compare (right_a.bytes.begin (), right_a.bytes.end (), left_a.bytes.begin (), left_a.bytes.end ()))
+	{
+		std::swap (first, second);
+	}
+	nano::uint256_union result;
+	blake2b_state hash;
+	blake2b_init (&hash, result.bytes.size ());
+	uint8_t const tag{ 0x01 };
+	blake2b_update (&hash, &tag, 1);
+	blake2b_update (&hash, first->bytes.data (), first->bytes.size ());
+	blake2b_update (&hash, second->bytes.data (), second->bytes.size ());
+	blake2b_final (&hash, result.bytes.data (), result.bytes.size ());
+	return result;
+}
+
 /**
  * Roll back the visited block
  */
@@ -258,6 +292,44 @@ public:
 					ledger.store.asset.balance_put (transaction, block_a.hashables.account, asset_id, nano::amount (held - collected));
 				}
 				ledger.store.asset.pending_put (transaction, nano::pending_key (block_a.hashables.account, source_hash), nano::asset_pending_info (source_asset->hashables.account, asset_id, collected, source_asset->hashables.payload.memo));
+				break;
+			}
+			case nano::asset_op::commit:
+			{
+				auto const root (block_a.hashables.link.as_block_hash ());
+				for (;;)
+				{
+					auto i (ledger.store.asset.claims_by_root_begin (transaction, root));
+					if (i == ledger.store.asset.claims_by_root_end () || i->first.first != root)
+					{
+						break;
+					}
+					error = ledger.rollback (transaction, i->second, list);
+					if (error) return;
+				}
+				ledger.store.asset.commit_del (transaction, root);
+				break;
+			}
+			case nano::asset_op::commit_close:
+			{
+				nano::asset_commit_info commit;
+				auto const root (block_a.hashables.link.as_block_hash ());
+				release_assert (!ledger.store.asset.commit_get (transaction, root, commit));
+				commit.closed = false;
+				ledger.store.asset.commit_put (transaction, root, commit);
+				break;
+			}
+			case nano::asset_op::claim:
+			{
+				auto const root (block_a.hashables.link.as_block_hash ());
+				auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
+				debug_assert (held >= amount);
+				if (held == amount) ledger.store.asset.balance_del (transaction, block_a.hashables.account, asset_id);
+				else ledger.store.asset.balance_put (transaction, block_a.hashables.account, asset_id, nano::amount (held - amount));
+				release_assert (!ledger.store.asset.get (transaction, asset_id, asset));
+				asset.circulating = asset.circulating.number () - amount;
+				ledger.store.asset.put (transaction, asset_id, asset);
+				ledger.store.asset.claim_del (transaction, block_a.hashables.account, root);
 				break;
 			}
 		}
@@ -747,6 +819,8 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 	boost::optional<nano::amount> credit;
 	boost::optional<nano::amount> debit;
 	bool collect_receivable (false);
+	boost::optional<nano::asset_commit_info> commit_write;
+	bool record_claim (false);
 
 	switch (block_a.hashables.op)
 	{
@@ -914,6 +988,112 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			collect_receivable = true;
 			break;
 		}
+		case nano::asset_op::commit:
+		{
+			if (ledger.store.asset.get (transaction, asset_id, asset))
+			{
+				result.code = nano::process_result::no_such_asset;
+				return;
+			}
+			if (asset.issuer != block_a.hashables.account)
+			{
+				result.code = nano::process_result::not_issuer;
+				return;
+			}
+			nano::asset_commit_info existing;
+			if (amount == 0 || block_a.hashables.link.is_zero () || block_a.hashables.payload.count == 0)
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			if (!ledger.store.asset.commit_get (transaction, block_a.hashables.link, existing))
+			{
+				result.code = nano::process_result::commit_exists;
+				return;
+			}
+			commit_write = nano::asset_commit_info (block_a.hashables.account, asset_id, block_a.hashables.payload.count, block_a.hashables.amount, hash);
+			break;
+		}
+		case nano::asset_op::commit_close:
+		{
+			nano::asset_commit_info existing;
+			if (!asset_id.is_zero () || amount != 0 || block_a.hashables.link.is_zero ())
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			if (ledger.store.asset.commit_get (transaction, block_a.hashables.link, existing))
+			{
+				result.code = nano::process_result::no_such_commit;
+				return;
+			}
+			if (existing.issuer != block_a.hashables.account)
+			{
+				result.code = nano::process_result::not_issuer;
+				return;
+			}
+			existing.closed = true;
+			commit_write = existing;
+			break;
+		}
+		case nano::asset_op::claim:
+		{
+			nano::asset_commit_info commit;
+			nano::block_hash previous_claim;
+			if (amount == 0 || block_a.hashables.link.is_zero ())
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			if (ledger.store.asset.commit_get (transaction, block_a.hashables.link, commit))
+			{
+				result.code = nano::process_result::no_such_commit;
+				return;
+			}
+			if (commit.closed)
+			{
+				result.code = nano::process_result::commit_closed;
+				return;
+			}
+			if (commit.asset_id != asset_id)
+			{
+				result.code = nano::process_result::bad_claim_proof;
+				return;
+			}
+			if (!ledger.store.asset.claim_get (transaction, block_a.hashables.account, block_a.hashables.link, previous_claim))
+			{
+				result.code = nano::process_result::already_claimed;
+				return;
+			}
+			if (ledger.store.asset.get (transaction, asset_id, asset))
+			{
+				result.code = nano::process_result::no_such_asset;
+				return;
+			}
+			auto root_l (claim_leaf (block_a.hashables.account, asset_id, block_a.hashables.amount));
+			for (auto const & sibling : block_a.hashables.payload.proof) root_l = claim_parent (root_l, sibling);
+			if (root_l != block_a.hashables.link)
+			{
+				result.code = nano::process_result::bad_claim_proof;
+				return;
+			}
+			if (!asset.uncapped () && asset.circulating.number () + amount > asset.max_supply.number ())
+			{
+				result.code = nano::process_result::over_max_supply;
+				return;
+			}
+			auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
+			if (held == 0 && ledger.store.asset.holdings_count (transaction, block_a.hashables.account) >= nano::max_assets_per_account)
+			{
+				result.code = nano::process_result::too_many_assets;
+				return;
+			}
+			credit = nano::amount (held + amount);
+			asset.circulating = asset.circulating.number () + amount;
+			asset_dirty = true;
+			record_claim = true;
+			break;
+		}
 	}
 
 	ledger.stats.inc (nano::stat::type::ledger, nano::stat::detail::asset_block);
@@ -968,6 +1148,14 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 	if (collect_receivable)
 	{
 		ledger.store.asset.pending_del (transaction, nano::pending_key (block_a.hashables.account, block_a.hashables.link.as_block_hash ()));
+	}
+	if (commit_write)
+	{
+		ledger.store.asset.commit_put (transaction, block_a.hashables.link, *commit_write);
+	}
+	if (record_claim)
+	{
+		ledger.store.asset.claim_put (transaction, block_a.hashables.account, block_a.hashables.link, hash);
 	}
 
 	nano::account_info new_info (hash, block_a.representative (), info.open_block.is_zero () ? hash : info.open_block, block_a.hashables.balance, nano::seconds_since_epoch (), info.block_count + 1, info.epoch ());

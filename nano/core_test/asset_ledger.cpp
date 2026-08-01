@@ -80,6 +80,42 @@ issued_asset issue_one (nano::ledger & ledger_a, nano::store & store_a, nano::wo
 	EXPECT_EQ (nano::process_result::progress, ledger_a.process (transaction, *issued.block).code);
 	return issued;
 }
+
+nano::uint256_union claim_leaf_for_test (nano::account const & account_a, nano::uint256_union const & asset_a, nano::amount const & amount_a, uint8_t tag_a = 0x00)
+{
+	nano::uint256_union result;
+	blake2b_state hash;
+	blake2b_init (&hash, result.bytes.size ());
+	blake2b_update (&hash, &tag_a, 1);
+	if (tag_a == 0x00)
+	{
+		blake2b_update (&hash, account_a.bytes.data (), account_a.bytes.size ());
+		blake2b_update (&hash, asset_a.bytes.data (), asset_a.bytes.size ());
+		blake2b_update (&hash, amount_a.bytes.data (), amount_a.bytes.size ());
+	}
+	else
+	{
+		blake2b_update (&hash, account_a.bytes.data (), account_a.bytes.size ());
+	}
+	blake2b_final (&hash, result.bytes.data (), result.bytes.size ());
+	return result;
+}
+
+nano::uint256_union claim_parent_for_test (nano::uint256_union const & a, nano::uint256_union const & b)
+{
+	auto const ordered = std::lexicographical_compare (b.bytes.begin (), b.bytes.end (), a.bytes.begin (), a.bytes.end ());
+	auto const & first = ordered ? b : a;
+	auto const & second = ordered ? a : b;
+	nano::uint256_union result;
+	blake2b_state hash;
+	blake2b_init (&hash, result.bytes.size ());
+	uint8_t const tag{ 0x01 };
+	blake2b_update (&hash, &tag, 1);
+	blake2b_update (&hash, first.bytes.data (), first.bytes.size ());
+	blake2b_update (&hash, second.bytes.data (), second.bytes.size ());
+	blake2b_final (&hash, result.bytes.data (), result.bytes.size ());
+	return result;
+}
 }
 
 // Every op has to survive the record the block store writes — a type byte, the
@@ -616,4 +652,86 @@ TEST (asset_ledger, rolling_back_a_collect_makes_it_receivable_again)
 	nano::asset_info asset;
 	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
 	ASSERT_EQ (nano::amount (500), asset.circulating);
+}
+
+TEST (asset_ledger, one_commit_underwrites_three_parallel_player_claims)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	std::array<nano::keypair, 3> players;
+	std::array<nano::amount, 3> amounts{ nano::amount (10), nano::amount (20), nano::amount (30) };
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 60));
+	std::array<nano::uint256_union, 4> leaves{
+		claim_leaf_for_test (players[0].pub, issued.id, amounts[0]),
+		claim_leaf_for_test (players[1].pub, issued.id, amounts[1]),
+		claim_leaf_for_test (players[2].pub, issued.id, amounts[2]),
+		claim_leaf_for_test (players[0].pub, nano::uint256_union{}, nano::amount (0), 0x02)
+	};
+	auto const left (claim_parent_for_test (leaves[0], leaves[1]));
+	auto const right (claim_parent_for_test (leaves[2], leaves[3]));
+	auto const root (claim_parent_for_test (left, right));
+
+	nano::asset_payload commit_payload;
+	commit_payload.count = 3;
+	auto commit (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit, issued.id, 60, root, commit_payload));
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *commit).code);
+	}
+
+	std::array<std::shared_ptr<nano::asset_block>, 3> claims;
+	for (std::size_t i = 0; i < claims.size (); ++i)
+	{
+		nano::asset_payload payload;
+		payload.proof = i == 0 ? std::vector<nano::uint256_union>{ leaves[1], right } :
+			i == 1 ? std::vector<nano::uint256_union>{ leaves[0], right } :
+			std::vector<nano::uint256_union>{ leaves[3], left };
+		claims[i] = signed_asset (pool, players[i], 0, 0, nano::asset_op::claim, issued.id, amounts[i], root, payload);
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *claims[i]).code);
+	}
+
+	{
+		auto transaction (store.tx_begin_read ());
+		for (std::size_t i = 0; i < claims.size (); ++i)
+		{
+			ASSERT_EQ (amounts[i], store.asset.balance (transaction, players[i].pub, issued.id));
+			nano::block_hash claimed;
+			ASSERT_FALSE (store.asset.claim_get (transaction, players[i].pub, root, claimed));
+			ASSERT_EQ (claims[i]->hash (), claimed);
+		}
+		nano::asset_info asset;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+		ASSERT_EQ (nano::amount (60), asset.circulating);
+	}
+
+	// The primary index is (account, root), so submitting the same entitlement
+	// from a later block on that account cannot credit it twice.
+	{
+		nano::asset_payload payload;
+		payload.proof = { leaves[1], right };
+		auto duplicate (signed_asset (pool, players[0], claims[0]->hash (), 0, nano::asset_op::claim, issued.id, amounts[0], root, payload));
+		auto transaction (store.tx_begin_write ());
+		ASSERT_NE (nano::process_result::progress, ledger.process (transaction, *duplicate).code);
+	}
+
+	// Rolling back the issuer commit crosses account chains and removes every
+	// dependent claim before deleting the root.
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_FALSE (ledger.rollback (transaction, commit->hash ())) ;
+	}
+	{
+		auto transaction (store.tx_begin_read ());
+		for (auto const & player : players)
+		{
+			ASSERT_FALSE (ledger.account_info (transaction, player.pub));
+			ASSERT_TRUE (store.asset.balance (transaction, player.pub, issued.id).is_zero ());
+		}
+		nano::asset_commit_info gone;
+		ASSERT_TRUE (store.asset.commit_get (transaction, root, gone));
+	}
 }

@@ -647,6 +647,52 @@ bool nano::asset_pending_info::operator== (nano::asset_pending_info const & othe
 	return source == other_a.source && asset_id == other_a.asset_id && amount == other_a.amount && memo == other_a.memo;
 }
 
+nano::asset_commit_info::asset_commit_info (nano::account const & issuer_a, nano::uint256_union const & asset_id_a, uint32_t count_a, nano::amount const & total_a, nano::block_hash const & block_a, bool closed_a) :
+	issuer (issuer_a),
+	asset_id (asset_id_a),
+	count (count_a),
+	total (total_a),
+	block (block_a),
+	closed (closed_a)
+{
+}
+
+void nano::asset_commit_info::serialize (nano::stream & stream_a) const
+{
+	nano::write (stream_a, issuer.bytes);
+	nano::write (stream_a, asset_id.bytes);
+	nano::write (stream_a, boost::endian::native_to_big (count));
+	nano::write (stream_a, total.bytes);
+	nano::write (stream_a, block.bytes);
+	nano::write (stream_a, static_cast<uint8_t> (closed));
+}
+
+bool nano::asset_commit_info::deserialize (nano::stream & stream_a)
+{
+	try
+	{
+		nano::read (stream_a, issuer.bytes);
+		nano::read (stream_a, asset_id.bytes);
+		nano::read (stream_a, count);
+		boost::endian::big_to_native_inplace (count);
+		nano::read (stream_a, total.bytes);
+		nano::read (stream_a, block.bytes);
+		uint8_t closed_l{ 0 };
+		nano::read (stream_a, closed_l);
+		closed = closed_l != 0;
+		return closed_l > 1 || !nano::at_end (stream_a);
+	}
+	catch (std::runtime_error const &)
+	{
+		return true;
+	}
+}
+
+bool nano::asset_commit_info::operator== (nano::asset_commit_info const & other_a) const
+{
+	return issuer == other_a.issuer && asset_id == other_a.asset_id && count == other_a.count && total == other_a.total && block == other_a.block && closed == other_a.closed;
+}
+
 nano::unchecked_info::unchecked_info (std::shared_ptr<nano::block> const & block_a) :
 	block (block_a),
 	modified_m (nano::seconds_since_epoch ())
@@ -1067,6 +1113,16 @@ nano::error_process nano::to_error_process (nano::process_result process_result)
 			return nano::error_process::reserve_representative;
 		case process_result::reserve_locked:
 			return nano::error_process::reserve_locked;
+		case process_result::commit_exists:
+			return nano::error_process::commit_exists;
+		case process_result::no_such_commit:
+			return nano::error_process::no_such_commit;
+		case process_result::commit_closed:
+			return nano::error_process::commit_closed;
+		case process_result::already_claimed:
+			return nano::error_process::already_claimed;
+		case process_result::bad_claim_proof:
+			return nano::error_process::bad_claim_proof;
 		case process_result::progress:
 		case process_result::bad_signature:
 		case process_result::old:
@@ -1142,6 +1198,16 @@ nano::stat::detail nano::to_stat_detail (nano::process_result process_result)
 			return nano::stat::detail::reserve_representative;
 		case process_result::reserve_locked:
 			return nano::stat::detail::reserve_locked;
+		case process_result::commit_exists:
+			return nano::stat::detail::commit_exists;
+		case process_result::no_such_commit:
+			return nano::stat::detail::no_such_commit;
+		case process_result::commit_closed:
+			return nano::stat::detail::commit_closed;
+		case process_result::already_claimed:
+			return nano::stat::detail::already_claimed;
+		case process_result::bad_claim_proof:
+			return nano::stat::detail::bad_claim_proof;
 	}
 	debug_assert (false && "There should be always a defined nano::stat::detail that is not _last");
 	return nano::stat::detail::_last;

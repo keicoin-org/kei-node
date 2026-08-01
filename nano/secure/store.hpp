@@ -131,6 +131,16 @@ public:
 		convert_buffer_to_value ();
 	}
 
+	db_val (nano::asset_commit_info const & val_a) :
+		buffer (std::make_shared<std::vector<uint8_t>> ())
+	{
+		{
+			nano::vectorstream stream (*buffer);
+			val_a.serialize (stream);
+		}
+		convert_buffer_to_value ();
+	}
+
 	db_val (nano::confirmation_height_info const & val_a) :
 		buffer (std::make_shared<std::vector<uint8_t>> ())
 	{
@@ -247,6 +257,16 @@ public:
 	{
 		nano::bufferstream stream (reinterpret_cast<uint8_t const *> (data ()), size ());
 		nano::asset_pending_info result;
+		bool error (result.deserialize (stream));
+		(void)error;
+		debug_assert (!error);
+		return result;
+	}
+
+	explicit operator nano::asset_commit_info () const
+	{
+		nano::bufferstream stream (reinterpret_cast<uint8_t const *> (data ()), size ());
+		nano::asset_commit_info result;
 		bool error (result.deserialize (stream));
 		(void)error;
 		debug_assert (!error);
@@ -566,6 +586,9 @@ enum class tables
 	asset_pending,
 	assets,
 	blocks,
+	claims,
+	claims_by_root,
+	commits,
 	confirmation_height,
 	default_unused, // RocksDB only
 	final_votes,
@@ -753,6 +776,15 @@ public:
 	virtual nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_begin (nano::transaction const &, nano::pending_key const &) const = 0;
 	virtual nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_begin (nano::transaction const &) const = 0;
 	virtual nano::store_iterator<nano::pending_key, nano::asset_pending_info> pending_end () const = 0;
+
+	virtual void commit_put (nano::write_transaction const &, nano::uint256_union const & root, nano::asset_commit_info const &) = 0;
+	virtual bool commit_get (nano::transaction const &, nano::uint256_union const & root, nano::asset_commit_info &) = 0;
+	virtual void commit_del (nano::write_transaction const &, nano::uint256_union const & root) = 0;
+	virtual void claim_put (nano::write_transaction const &, nano::account const &, nano::uint256_union const & root, nano::block_hash const &) = 0;
+	virtual bool claim_get (nano::transaction const &, nano::account const &, nano::uint256_union const & root, nano::block_hash &) = 0;
+	virtual void claim_del (nano::write_transaction const &, nano::account const &, nano::uint256_union const & root) = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::block_hash> claims_by_root_begin (nano::transaction const &, nano::uint256_union const & root) const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::block_hash> claims_by_root_end () const = 0;
 };
 
 /**
@@ -923,7 +955,7 @@ public:
 	account_store & account;
 	pending_store & pending;
 	static int constexpr version_minimum{ 14 };
-	static int constexpr version_current{ 23 };
+	static int constexpr version_current{ 24 };
 
 public:
 	online_weight_store & online_weight;

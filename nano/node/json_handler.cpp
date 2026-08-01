@@ -3645,6 +3645,11 @@ void nano::json_handler::process ()
 							case nano::process_result::too_many_assets:
 							case nano::process_result::reserve_representative:
 							case nano::process_result::reserve_locked:
+							case nano::process_result::commit_exists:
+							case nano::process_result::no_such_commit:
+							case nano::process_result::commit_closed:
+							case nano::process_result::already_claimed:
+							case nano::process_result::bad_claim_proof:
 							{
 								rpc_l->ec = nano::to_error_process (result.code);
 								break;
@@ -5826,6 +5831,53 @@ void nano::json_handler::asset_holders ()
 	response_errors ();
 }
 
+void nano::json_handler::commit_info ()
+{
+	nano::uint256_union root;
+	if (root.decode_hex (request.get<std::string> ("root", "")))
+	{
+		ec = nano::error_common::bad_hash_number;
+	}
+	if (!ec)
+	{
+		auto transaction (node.store.tx_begin_read ());
+		nano::asset_commit_info info;
+		if (node.store.asset.commit_get (transaction, root, info))
+		{
+			nano::json::put_null (response_l, "commit");
+		}
+		else
+		{
+			boost::property_tree::ptree commit;
+			commit.put ("root", root.to_string ());
+			commit.put ("issuer", info.issuer.to_account ());
+			commit.put ("asset", info.asset_id.to_string ());
+			nano::json::put_number (commit, "count", info.count);
+			commit.put ("total", info.total.to_string_dec ());
+			nano::json::put_boolean (commit, "closed", info.closed);
+			response_l.add_child ("commit", commit);
+		}
+	}
+	response_errors ();
+}
+
+void nano::json_handler::claim_status ()
+{
+	nano::uint256_union root;
+	if (root.decode_hex (request.get<std::string> ("root", "")))
+	{
+		ec = nano::error_common::bad_hash_number;
+	}
+	auto account (account_impl ());
+	if (!ec)
+	{
+		auto transaction (node.store.tx_begin_read ());
+		nano::block_hash claim;
+		nano::json::put_boolean (response_l, "claimed", !node.store.asset.claim_get (transaction, account, root, claim));
+	}
+	response_errors ();
+}
+
 void nano::json_handler::kei_receivables ()
 {
 	auto account (account_impl ());
@@ -6121,6 +6173,8 @@ ipc_json_handler_no_arg_func_map create_ipc_json_handler_no_arg_func_map ()
 	no_arg_funcs.emplace ("account_holdings", &nano::json_handler::account_holdings);
 	no_arg_funcs.emplace ("asset_balance", &nano::json_handler::asset_balance);
 	no_arg_funcs.emplace ("asset_holders", &nano::json_handler::asset_holders);
+	no_arg_funcs.emplace ("commit_info", &nano::json_handler::commit_info);
+	no_arg_funcs.emplace ("claim_status", &nano::json_handler::claim_status);
 	no_arg_funcs.emplace ("work_thresholds", &nano::json_handler::work_thresholds);
 	no_arg_funcs.emplace ("faucet", &nano::json_handler::faucet);
 	no_arg_funcs.emplace ("work_peer_add", &nano::json_handler::work_peer_add);

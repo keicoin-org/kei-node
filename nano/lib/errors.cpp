@@ -289,13 +289,23 @@ std::string nano::error_process_messages::message (int ev) const
 		case nano::error_process::asset_balance_mismatch:
 			return "An asset block must carry the account's Kei balance unchanged; only issuance changes it";
 		case nano::error_process::bad_asset_payload:
-			return "Malformed issuance parameters";
+			return "Malformed fields for that asset operation";
 		case nano::error_process::too_many_assets:
 			return "The account already holds the maximum of 1,024 distinct assets; burn or transfer something first";
 		case nano::error_process::reserve_representative:
 			return "Reserve accounts must name the null representative, so reserve Kei carries no weight of any kind";
 		case nano::error_process::reserve_locked:
 			return "Reserve Kei can only move through a passed on-chain vote";
+		case nano::error_process::commit_exists:
+			return "That commit root already exists; use a fresh random salt for each drop";
+		case nano::error_process::no_such_commit:
+			return "No commit with that root exists";
+		case nano::error_process::commit_closed:
+			return "That commit root is closed and accepts no further claims";
+		case nano::error_process::already_claimed:
+			return "This account has already claimed that root";
+		case nano::error_process::bad_claim_proof:
+			return "The claim proof does not lead from this account, asset, and amount to the committed root";
 		case nano::error_process::other:
 			return "Error processing block";
 	}

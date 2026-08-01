@@ -204,3 +204,54 @@ nano::store_iterator<nano::pending_key, nano::asset_pending_info> nano::rocksdb:
 {
 	return nano::store_iterator<nano::pending_key, nano::asset_pending_info> (nullptr);
 }
+
+void nano::rocksdb::asset_store::commit_put (nano::write_transaction const & tx, nano::uint256_union const & root, nano::asset_commit_info const & info)
+{
+	store.release_assert_success (store.put (tx, tables::commits, root, info));
+}
+
+bool nano::rocksdb::asset_store::commit_get (nano::transaction const & tx, nano::uint256_union const & root, nano::asset_commit_info & info)
+{
+	nano::rocksdb_val value;
+	auto status = store.get (tx, tables::commits, root, value);
+	release_assert (store.success (status) || store.not_found (status));
+	if (!store.success (status)) return true;
+	nano::bufferstream stream (reinterpret_cast<uint8_t const *> (value.data ()), value.size ());
+	return info.deserialize (stream);
+}
+
+void nano::rocksdb::asset_store::commit_del (nano::write_transaction const & tx, nano::uint256_union const & root)
+{
+	store.release_assert_success (store.del (tx, tables::commits, root));
+}
+
+void nano::rocksdb::asset_store::claim_put (nano::write_transaction const & tx, nano::account const & account, nano::uint256_union const & root, nano::block_hash const & hash)
+{
+	store.release_assert_success (store.put (tx, tables::claims, nano::asset_key (account, root), hash));
+	store.release_assert_success (store.put (tx, tables::claims_by_root, nano::asset_key (root, account), hash));
+}
+
+bool nano::rocksdb::asset_store::claim_get (nano::transaction const & tx, nano::account const & account, nano::uint256_union const & root, nano::block_hash & hash)
+{
+	nano::rocksdb_val value;
+	auto status = store.get (tx, tables::claims, nano::asset_key (account, root), value);
+	release_assert (store.success (status) || store.not_found (status));
+	if (store.success (status)) hash = static_cast<nano::block_hash> (value);
+	return !store.success (status);
+}
+
+void nano::rocksdb::asset_store::claim_del (nano::write_transaction const & tx, nano::account const & account, nano::uint256_union const & root)
+{
+	store.release_assert_success (store.del (tx, tables::claims, nano::asset_key (account, root)));
+	store.release_assert_success (store.del (tx, tables::claims_by_root, nano::asset_key (root, account)));
+}
+
+nano::store_iterator<nano::asset_key, nano::block_hash> nano::rocksdb::asset_store::claims_by_root_begin (nano::transaction const & tx, nano::uint256_union const & root) const
+{
+	return store.template make_iterator<nano::asset_key, nano::block_hash> (tx, tables::claims_by_root, nano::asset_key (root, 0));
+}
+
+nano::store_iterator<nano::asset_key, nano::block_hash> nano::rocksdb::asset_store::claims_by_root_end () const
+{
+	return nano::store_iterator<nano::asset_key, nano::block_hash> (nullptr);
+}

@@ -231,6 +231,24 @@ public:
 	std::string memo;
 };
 
+/** Immutable rooted-distribution header plus its issuer-controlled close bit. */
+class asset_commit_info final
+{
+public:
+	asset_commit_info () = default;
+	asset_commit_info (nano::account const &, nano::uint256_union const &, uint32_t, nano::amount const &, nano::block_hash const &, bool = false);
+	void serialize (nano::stream &) const;
+	bool deserialize (nano::stream &);
+	bool operator== (nano::asset_commit_info const &) const;
+
+	nano::account issuer{};
+	nano::uint256_union asset_id{ 0 };
+	uint32_t count{ 0 };
+	nano::amount total{ 0 };
+	nano::block_hash block{ 0 };
+	bool closed{ false };
+};
+
 class endpoint_key final
 {
 public:
@@ -440,7 +458,12 @@ enum class process_result
 	bad_asset_payload, // Malformed issuance parameters: name, decimals, max supply, policy
 	too_many_assets, // The account already holds the §7 maximum of 1,024 distinct assets
 	reserve_representative, // A reserve account must name the null representative (SPEC §5.7)
-	reserve_locked // Reserve Kei moves only through a passed on-chain vote (SPEC §5.7)
+	reserve_locked, // Reserve Kei moves only through a passed on-chain vote (SPEC §5.7)
+	commit_exists,
+	no_such_commit,
+	commit_closed,
+	already_claimed,
+	bad_claim_proof
 };
 class process_return final
 {
