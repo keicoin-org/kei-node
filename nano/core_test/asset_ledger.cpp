@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <limits>
 
 // The five asset operations, taken through nano::ledger::process and back out
@@ -715,11 +717,22 @@ TEST (asset_ledger, one_commit_underwrites_three_parallel_player_claims)
 		payload.proof = { leaves[1], right };
 		auto duplicate (signed_asset (pool, players[0], claims[0]->hash (), 0, nano::asset_op::claim, issued.id, amounts[0], root, payload));
 		auto transaction (store.tx_begin_write ());
-		ASSERT_NE (nano::process_result::progress, ledger.process (transaction, *duplicate).code);
+		ASSERT_EQ (nano::process_result::already_claimed, ledger.process (transaction, *duplicate).code);
 	}
 
-	// Rolling back the issuer commit crosses account chains and removes every
-	// dependent claim before deleting the root.
+	// The issuer, not a wall clock, closes the root. A late player receives the
+	// specific closed-root result before their proof can materialize anything.
+	auto close (signed_asset (pool, nano::dev::team_key, commit->hash (), nano::amount (after_issuing (1)), nano::asset_op::commit_close, 0, 0, root));
+	{
+		auto transaction (store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *close).code);
+		nano::keypair late;
+		auto late_claim (signed_asset (pool, late, 0, 0, nano::asset_op::claim, issued.id, 1, root));
+		ASSERT_EQ (nano::process_result::commit_closed, ledger.process (transaction, *late_claim).code);
+	}
+
+	// Rolling back the issuer commit first reopens its close, then crosses account
+	// chains and removes every dependent claim before deleting the root.
 	{
 		auto transaction (store.tx_begin_write ());
 		ASSERT_FALSE (ledger.rollback (transaction, commit->hash ())) ;
