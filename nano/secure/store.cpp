@@ -195,8 +195,9 @@ void nano::store::initialize (nano::write_transaction const & transaction_a, nan
 	account.put (transaction_a, constants.genesis->account (), { reserve_head, constants.genesis->representative (), genesis_hash, reserve_balance, timestamp, reserve_height, constants.genesis->sideband ().details.epoch });
 	// No representation entry for reserve: the null representative is not a
 	// bucket holding 90% of supply; reserve Kei contributes zero weight of any
-	// kind. Circulating accounts were added above under their own representatives.
-	if (!constants.is_reserve (constants.genesis->account ()) && !constants.genesis->representative ().is_zero ())
+	// kind. This is a reserve-membership exception, not a general null-rep
+	// exception: null remains a valid weight bucket for circulating accounts.
+	if (!constants.is_reserve (constants.genesis->account ()))
 	{
 		ledger_cache_a.rep_weights.representation_put (constants.genesis->representative (), reserve_balance);
 	}

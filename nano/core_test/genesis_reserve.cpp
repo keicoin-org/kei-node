@@ -143,6 +143,39 @@ TEST (genesis_reserve, rebuilding_the_weight_cache_keeps_reserve_excluded)
 	}
 }
 
+TEST (genesis_reserve, rebuilding_preserves_a_circulating_null_representative)
+{
+	nano::test::context::ledger_context context;
+	auto & ledger (context.ledger ());
+	auto & store (context.store ());
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+
+	auto const account (nano::dev::team_key.pub);
+	auto const balance (nano::dev::constants.allocation_team ());
+	auto const initial_head (nano::dev::constants.genesis_allocations.back ().open->hash ());
+	auto change_to_null = std::make_shared<nano::state_block> (account, initial_head, nano::account{}, nano::amount (balance), 0, nano::dev::team_key.prv, account, 0);
+	change_to_null->block_work_set (*pool.generate (change_to_null->root (), nano::dev::constants.work.tier_b ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (store.tx_begin_write (), *change_to_null).code);
+	ASSERT_EQ (0, ledger.weight (account));
+	ASSERT_EQ (balance, ledger.weight (nano::account{}));
+
+	nano::stats rebuilt_stats;
+	nano::ledger rebuilt (store, rebuilt_stats, nano::dev::constants);
+	ASSERT_EQ (0, rebuilt.weight (nano::dev::genesis_key.pub));
+	ASSERT_EQ (0, rebuilt.weight (account));
+	ASSERT_EQ (balance, rebuilt.weight (nano::account{}));
+
+	auto change_back = std::make_shared<nano::state_block> (account, change_to_null->hash (), account, nano::amount (balance), 0, nano::dev::team_key.prv, account, 0);
+	change_back->block_work_set (*pool.generate (change_back->root (), nano::dev::constants.work.tier_b ()));
+	ASSERT_EQ (nano::process_result::progress, rebuilt.process (store.tx_begin_write (), *change_back).code);
+	ASSERT_EQ (balance, rebuilt.weight (account));
+	ASSERT_EQ (0, rebuilt.weight (nano::account{}));
+
+	ASSERT_FALSE (rebuilt.rollback (store.tx_begin_write (), change_back->hash ()));
+	ASSERT_EQ (0, rebuilt.weight (account));
+	ASSERT_EQ (balance, rebuilt.weight (nano::account{}));
+}
+
 TEST (genesis_reserve, receive_and_rollback_never_give_reserve_weight)
 {
 	nano::test::context::ledger_context context;

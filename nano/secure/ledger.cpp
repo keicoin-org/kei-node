@@ -1246,7 +1246,9 @@ void nano::ledger::initialize (nano::generate_cache const & generate_cache_a)
 				// Reserve membership is immutable genesis data. Rebuilding the
 				// cache must preserve the same exclusion as first startup, instead
 				// of quietly assigning 90% of supply to the null representative.
-				if (!this->constants.is_reserve (account) && !info.representative.is_zero ())
+				// A null representative on any circulating account remains a valid
+				// weight bucket and must survive restart.
+				if (!this->constants.is_reserve (account))
 				{
 					rep_weights_l.representation_add (info.representative, info.balance.number ());
 				}
