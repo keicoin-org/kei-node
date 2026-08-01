@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keicoin-org/kei-transaction
-          ref: a448884b735071720e3da51589ad6c512c4a44ae
+          ref: a4a52c6a04fb4d19c38f51a58c7211ff11239264
           path: kei-transaction
 
       - name: Set up Bun
