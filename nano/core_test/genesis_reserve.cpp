@@ -18,12 +18,15 @@ std::array<nano::keypair const *, 4> const circulating_keys{
 	&nano::dev::team_key
 };
 
-std::array<nano::uint128_t, 4> const circulating_amounts{
-	nano::dev::constants.allocation_grants (),
-	nano::dev::constants.allocation_community (),
-	nano::dev::constants.allocation_bounty (),
-	nano::dev::constants.allocation_team ()
-};
+std::array<nano::uint128_t, 4> circulating_amounts ()
+{
+	return {
+		nano::dev::constants.allocation_grants (),
+		nano::dev::constants.allocation_community (),
+		nano::dev::constants.allocation_bounty (),
+		nano::dev::constants.allocation_team ()
+	};
+}
 }
 
 TEST (genesis_reserve, dev_ceremony_installs_the_set_and_exact_allocation)
@@ -33,6 +36,7 @@ TEST (genesis_reserve, dev_ceremony_installs_the_set_and_exact_allocation)
 	auto & store (context.store ());
 	auto transaction (store.tx_begin_read ());
 	auto const reserve (nano::dev::genesis_key.pub);
+	auto const amounts (circulating_amounts ());
 
 	ASSERT_EQ (nano::kei_total_supply, nano::dev::constants.genesis_amount);
 	ASSERT_EQ (1, nano::dev::constants.reserve_accounts.size ());
@@ -63,9 +67,9 @@ TEST (genesis_reserve, dev_ceremony_installs_the_set_and_exact_allocation)
 		ASSERT_FALSE (nano::dev::constants.is_reserve (account));
 		auto const info (ledger.account_info (transaction, account));
 		ASSERT_TRUE (info.has_value ());
-		ASSERT_EQ (circulating_amounts[i], info->balance.number ());
+		ASSERT_EQ (amounts[i], info->balance.number ());
 		ASSERT_EQ (account, info->representative);
-		ASSERT_EQ (circulating_amounts[i], ledger.weight (account));
+		ASSERT_EQ (amounts[i], ledger.weight (account));
 		nano::confirmation_height_info confirmation;
 		ASSERT_FALSE (store.confirmation_height.get (transaction, account, confirmation));
 		ASSERT_EQ (1, confirmation.height);
@@ -134,12 +138,13 @@ TEST (genesis_reserve, rebuilding_the_weight_cache_keeps_reserve_excluded)
 	nano::test::context::ledger_context context;
 	nano::stats rebuilt_stats;
 	nano::ledger rebuilt (context.store (), rebuilt_stats, nano::dev::constants);
+	auto const amounts (circulating_amounts ());
 
 	ASSERT_EQ (0, rebuilt.weight (nano::dev::genesis_key.pub));
 	ASSERT_EQ (0, rebuilt.weight (nano::account{}));
 	for (std::size_t i = 0; i < circulating_keys.size (); ++i)
 	{
-		ASSERT_EQ (circulating_amounts[i], rebuilt.weight (circulating_keys[i]->pub));
+		ASSERT_EQ (amounts[i], rebuilt.weight (circulating_keys[i]->pub));
 	}
 }
 
