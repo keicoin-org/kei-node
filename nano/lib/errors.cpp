@@ -211,6 +211,8 @@ std::string nano::error_rpc_messages::message (int ev) const
 			return "Invalid shape argument";
 		case nano::error_rpc::invalid_shape_account_filter:
 			return "Shape \"block\" cannot be combined with account_filter";
+		case nano::error_rpc::invalid_swap_state:
+			return "\"state\" is one of open, accepted or cancelled -- leave it out for all three";
 		case nano::error_rpc::invalid_sources:
 			return "Invalid sources number";
 		case nano::error_rpc::invalid_subtype:
