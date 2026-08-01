@@ -160,12 +160,16 @@ since, and each pass only removes its current tip.
 
 ## 8. The RPC surface
 
-Two read-only actions, following `asset_commit`'s and `asset_holders`'
-conventions exactly, because M5's node-side RPC contract is otherwise already
-covered: submitting the three new block types goes through the same generic
-block-JSON path `asset_commit`/`claim` already use (`asset_hashables::
+Four read-only actions. Submitting the three new block types needs no new
+action at all — it goes through the same generic block-JSON path
+`asset_commit`/`claim` already use (`asset_hashables::
 deserialize_op_json`/`serialize_op_json`, extended for the three new ops in
-`nano/lib/blocks.cpp`).
+`nano/lib/blocks.cpp`), exactly as SPEC §9.2 implies by never describing a
+separate write path for a swap leg.
+
+**`asset_offer` / `asset_offers`**, following `asset_commit`'s and
+`asset_holders`' conventions exactly, are this node's own market-scan surface,
+built directly on the two tables in §6:
 
 - **`asset_offers`** — `{ "asset": "<hex>", "count": N }` → a page of
   `{ "offer", "offerer" }`, a prefix scan of `swap_offers`. This *is* the
@@ -177,9 +181,40 @@ deserialize_op_json`/`serialize_op_json`, extended for the three new ops in
   it is not). `null` for a hash that was never a `swap_offer`, the same
   "absent, not an error" rule `asset_commit` follows for an unpublished root.
 
-Neither action is in `kei-transaction/docs/rpc.md` yet, which as of this
-writing states plainly that "`swap_offer`/`swap_accept`/`swap_cancel` and the
-market read model are M5" — future work for that repository, not a
+**`swap_info` / `account_swaps`** are a second, distinct surface added
+alongside the first, matching `@keicoin/core`'s actual wire contract
+(`packages/core/src/node.ts`'s `SwapOffer`, called via `HttpNode.swapOffer` /
+`HttpNode.accountSwaps` and mocked in `packages/core/src/mock/server.ts`) —
+not a guess at what the SDK might want, but its existing source. They answer
+a question `asset_offer`/`asset_offers` structurally cannot: **what happened
+to an offer that is no longer open**, including one that was *cancelled*,
+which §7 establishes leaves no trace in `swap_locks` at all.
+
+- **`swap_info`** — `{ "hash": "<offer hash>" }` → one full `SwapOffer`
+  (`hash`, `from`, `asset`, `amount`, `wantAsset`, `wantAmount`,
+  `counterparty`, `expiresAt`, `height`, `seenAt`, `state`, `acceptedBy`,
+  `settledBy`, `settledAt`), or `{ "offer": null }` if the hash never named a
+  `swap_offer`.
+- **`account_swaps`** — `{ "account": "<addr>", "count": N, "state"?:
+  "open"|"accepted"|"cancelled" }` → every `swap_offer` that account has ever
+  made, in any state, found by walking that account's own chain tip-first —
+  a bounded, per-account scan by construction (SPEC §9.1), and the only place
+  a *cancelled* offer's outcome can be answered from at all (§7): the record
+  in `swap_locks` is gone, so the state and the settling block are recovered
+  by walking forward from the offer, on the offerer's own chain, to the
+  `swap_cancel` that references it.
+
+Both surfaces read real, disjoint value: `asset_offers` answers "what can I
+buy right now" for an asset in one scan with no per-account cost; `swap_info`
+/ `account_swaps` answer "what happened to this offer, or to this account's
+offers" including settled and cancelled history. Neither is a mock of the
+other, and a future pass could fold the first into the second if the
+market-scan use case turns out not to need its own shape — nothing in this
+milestone required deciding that yet.
+
+`kei-transaction/docs/rpc.md` does not describe either surface yet, which as
+of this writing states plainly that "`swap_offer`/`swap_accept`/`swap_cancel`
+and the market read model are M5" — future work for that repository, not a
 contradiction of it.
 
 ## 9. What is not finished: cross-chain conflict prioritisation
