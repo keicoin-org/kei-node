@@ -695,6 +695,82 @@ will not verify across them. §7 already noted this lands as one change on the S
 side; it has not been made, and until it is, definition-of-done (6) cannot pass
 no matter what this node does.
 
+## 17. A Kei payment carries no memo, and `pay({ memo })` says so out loud
+
+§8 took decisions-m0 §4 option (a) — memos ride on the `asset`-family block —
+and closed with "The SDK surface does not move either way, `kei.pay({ memo })`
+is already written and already tested." That sentence is the one part of §8 that
+is wrong, and everything below follows from it.
+
+`kei.pay()` is `client.send()`, which builds a `state` block, and §8 left `state`
+blocks untouched. `asset`/`transfer` is not a route either: `asset_id` is
+`H(issuer_pubkey ‖ symbol)` (§5.6.1) and Kei has no issuance block, so there is
+no id to name. A memo'd Kei payment therefore has no valid representation on this
+chain. §8 settled where an *asset* memo lives and read as though it had settled
+where a *Kei* memo lives.
+
+What that costs today is worse than being unrepresentable.
+`state_block::deserialize_json` reads seven named fields and ignores every other
+key, so a `state` block carrying `memo` is accepted and the memo is discarded.
+Once the SDK's hash moves (§16) it will cover the §14 layout, which has no memo
+in it, so the hashes will agree, the signature will verify, the block will
+process, and the memo will be gone. Compare `commit`, `commit_close` and `claim`,
+which hash under an op byte no node computes and are rejected loudly. Silent
+truncation is the failure mode a payments protocol can least afford.
+
+**Taking: memos are asset-only for M2, and `pay({ memo })` is an error.** It fails
+the same way and for the same reason the three deferred ops do — the SDK does not
+offer a surface this node cannot honour. Definition-of-done (6) drops the memo
+from the Kei leg of `over-http.test.ts`; the memo on the *asset* leg stays, is
+carried in `asset_pending_info`, and is delivered to the recipient, which is what
+§8 actually bought.
+
+Two routes were considered for making it representable, and both are M4 work
+rather than an M2 patch:
+
+**Kei as asset 0** is not a reinterpretation, it is a ledger change. Asset
+validation requires `new_balance == previous_balance` for every op but `issue`,
+so an `asset` block that moves Kei is rejected by construction today. Kei
+receivables and asset receivables are also separate stores with different value
+types: `pending_info` is `{source, amount, epoch}` and has nowhere to put a memo,
+while `asset_pending_info` carries one but is collected by `asset_receive`, which
+credits `holders` rather than the Kei balance. The route needs a schema change to
+one store or the other, plus a carve-out in §5.6.1's "derived, never assigned".
+
+**A memo on Kei's own `state` block** is the better of the two and the one M4
+should take. §14 already domain-separates every block type, so no Nano or Banano
+tool can read a Kei `state` hash regardless, and the compatibility §8 was
+protecting is not there to lose. It costs exactly what the `asset` block already
+pays: `state_hashables::size` stops being a constant, and everything that frames
+a `state` block by fixed size follows it. That is real work and it is not M2's.
+When it lands, §8's closing sentence should be struck rather than reinterpreted.
+
+It is not urgent, because the correlation problem §8 set out to solve is already
+solved for Kei by a weaker means: `onPayment` hands the issuer the block hash,
+and matching on a hash is exact where §8's amount-and-timing was racy. What it
+needs is an out-of-band channel from payer to issuer to carry that hash — which
+the Button demo has, and a shop that knows its customers only on-chain does not.
+That gap is the case for the memo, and it is worth one milestone's wait.
+
+SPEC §6.7's worked example is `kei.pay({ to, amount: 0.05, memo: 'Sword of
+Testing' })` with a matching `onPayment(({ from, amount, memo }) => …)`. It is the
+marquee example of the whole API and it does not run. It has to change now and
+change back at M4.
+
+## 18. The deferred op numbers are reserved, not merely deferred
+
+The `asset_op` comment says `commit`/`commit_close` and the swap legs "land with
+M4 and M5 and are deliberately not members of this enum yet". It does not say
+what numbers they will take, and an op byte is hashed — picking a different order
+at M4 silently invalidates every vector and every signature produced against the
+earlier guess.
+
+The SDK's `AssetOp` union already orders them `commit`, `commit_close`, `claim`
+after `asset_receive`. **Reserving 5, 6 and 7 for exactly those, and 8 upward for
+the §5.6.4 swap legs.** `asset_op_valid` stays bounded at `asset_receive`, so a
+reserved number is still rejected on the wire and reserving costs nothing until
+the op exists.
+
 ---
 
 ## Definition of done for M2

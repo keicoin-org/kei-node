@@ -33,8 +33,13 @@ enum class block_type : uint8_t
 	asset = 7
 };
 // The five asset operations M2 validates (decisions-m2.md §0, §7, §11).
-// commit/commit_close and the swap legs are SPEC §5.6.4 operations that land
-// with M4 and M5 and are deliberately not members of this enum yet.
+// commit/commit_close/claim and the swap legs land with M4 and M5 and are
+// deliberately not members of this enum yet. Their numbers are reserved rather
+// than merely deferred, because the op byte is hashed and renumbering later
+// invalidates every vector and signature made against the earlier guess:
+// 5 = commit, 6 = commit_close, 7 = claim, 8 upward = the SPEC §5.6.4 swap
+// legs. See decisions-m2.md §18. asset_op_valid stays bounded at
+// asset_receive, so a reserved number is still rejected on the wire.
 enum class asset_op : uint8_t
 {
 	issue = 0,
