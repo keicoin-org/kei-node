@@ -839,7 +839,7 @@ if(NANO_GUI OR RAIBLOCKS_GUI)
             DESTINATION ${NANO_OSX_PACKAGE_NAME}.app/Contents/Frameworks)
     install(FILES "${Qt5_DIR}/../../../plugins/platforms/libqcocoa.dylib"
             DESTINATION ${NANO_OSX_PACKAGE_NAME}.app/Contents/PlugIns/platforms)
-    install(FILES Nano.icns
+    install(FILES Kei.icns
             DESTINATION ${NANO_OSX_PACKAGE_NAME}.app/Contents/Resources)
   elseif(WIN32)
     if("${CMAKE_SIZEOF_VOID_P}" EQUAL "8")
@@ -855,7 +855,7 @@ if(NANO_GUI OR RAIBLOCKS_GUI)
     set(CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS
         "DeleteRegKey HKLM 'SYSTEM\\\\CurrentControlSet\\\\Services\\\\EventLog\\\\Nano${NANO_PREFIX}'"
     )
-    set(CPACK_NSIS_MUI_ICON ${CMAKE_SOURCE_DIR}/Nano.ico)
+    set(CPACK_NSIS_MUI_ICON ${CMAKE_SOURCE_DIR}/Kei.ico)
     set(CPACK_NSIS_DISPLAY_NAME "Nano${NANO_PREFIX}")
     set(CPACK_NSIS_URL_INFO_ABOUT "https://nano.org")
     set(CPACK_NSIS_CONTACT "info@nano.org")
