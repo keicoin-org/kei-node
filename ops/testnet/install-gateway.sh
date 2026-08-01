@@ -33,7 +33,8 @@ if [[ ! -s /etc/kei-rpc-gateway/origin.key || ! -s /etc/kei-rpc-gateway/origin.c
     -keyout /etc/kei-rpc-gateway/origin.key \
     -out /etc/kei-rpc-gateway/origin.crt >/dev/null 2>&1
 fi
-chown root:nogroup /etc/kei-rpc-gateway /etc/kei-rpc-gateway/origin.key /etc/kei-rpc-gateway/origin.crt
+getent passwd www-data >/dev/null
+chown root:www-data /etc/kei-rpc-gateway /etc/kei-rpc-gateway/origin.key /etc/kei-rpc-gateway/origin.crt
 chmod 0750 /etc/kei-rpc-gateway
 chmod 0640 /etc/kei-rpc-gateway/origin.key
 chmod 0644 /etc/kei-rpc-gateway/origin.crt
@@ -48,8 +49,8 @@ Requires=kei-node.service
 ExecStart=/usr/bin/python3 /opt/kei-rpc-gateway/rpc_gateway.py --listen ${listen} --port ${port} --tls-cert /etc/kei-rpc-gateway/origin.crt --tls-key /etc/kei-rpc-gateway/origin.key
 Restart=on-failure
 RestartSec=2
-User=nobody
-Group=nogroup
+User=www-data
+Group=www-data
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
@@ -62,7 +63,8 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now kei-rpc-gateway
+systemctl enable kei-rpc-gateway
+systemctl restart kei-rpc-gateway
 ready=0
 for _ in $(seq 1 25); do
   if curl -kfsS --max-time 5 "https://127.0.0.1:${port}/healthz"; then
