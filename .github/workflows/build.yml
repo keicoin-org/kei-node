@@ -38,6 +38,9 @@ jobs:
           # CMakeLists.txt add_subdirectory()s each Boost library directly.
           submodules: recursive
 
+      - name: Test the public RPC gateway boundary
+        run: python3 -m unittest ops/testnet/test_rpc_gateway.py
+
       # The M2 and M4 contracts live in the SDK repository. Pinning the revision makes
       # a green node build a claim about one reviewable contract, not whatever
       # happened to be at the tip of another repository when the job started.

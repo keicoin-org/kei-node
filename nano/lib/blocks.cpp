@@ -1959,8 +1959,11 @@ bool nano::asset_hashables::deserialize_op_json (boost::property_tree::ptree con
 			// An absent or null maxSupply is uncapped, which is stored as zero.
 			// A maxSupply that is explicitly zero is not the same statement and
 			// is refused here rather than silently read as "uncapped".
+			// Boost.PropertyTree represents a JSON null scalar as the literal text
+			// "null". The SDK sends that documented shape for an uncapped asset,
+			// while this node serializes the same value as an empty string.
 			auto const max_supply_l (op_a.get<std::string> ("maxSupply", ""));
-			if (!max_supply_l.empty ())
+			if (!max_supply_l.empty () && max_supply_l != "null")
 			{
 				error = payload.max_supply.decode_dec (max_supply_l) || payload.max_supply.is_zero ();
 				if (error)
