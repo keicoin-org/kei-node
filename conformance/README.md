@@ -20,15 +20,16 @@ Their SDK coverage is these exact files, run the same way by
 - `packages/core/test/m4-node.test.ts`
 - `packages/kei/test/m4-over-http.test.ts`
 
-The pinned SDK revision in `.github/workflows/build.yml` already carries both
-files — `m4-node.test.ts` and `m2-node.test.ts` landed in the same SDK commit
-— so running M4 needed no new pin, only a second launcher and a second CI step.
-Before this, the build workflow ran only `run-m2.sh`: a node could pass its
-gate while `commit_info` and `claim_status` answered under the wrong names and
-in the wrong shapes, because nothing in CI ever asked them a question through
-the SDK. `docs/decisions-m4.md` §8.4 has the history of what those wrong names
-were (`asset_commit`, `asset_claims`) and why they still answer, as deprecated
-aliases, alongside the frozen ones.
+The pinned SDK revision in `.github/workflows/build.yml` carries both the M4
+tests and the native commit/claim wire layout they exercise. Earlier SDK
+revisions already contained deferred M4 test files, but still encoded only the
+M2 operations; pinning one of those revisions makes every live M4 block fail as
+invalid. Before this, the build workflow ran only `run-m2.sh`: a node could pass
+its gate while `commit_info` and `claim_status` answered under the wrong names
+and in the wrong shapes, because nothing in CI ever asked them a question
+through the SDK. `docs/decisions-m4.md` §8.4 has the history of what those wrong
+names were (`asset_commit`, `asset_claims`) and why they still answer, as
+deprecated aliases, alongside the frozen ones.
 
 ## M4 claim hashing
 
