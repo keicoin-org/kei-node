@@ -653,7 +653,8 @@ nano::asset_commit_info::asset_commit_info (nano::account const & issuer_a, nano
 	count (count_a),
 	total (total_a),
 	block (block_a),
-	closed (closed_a)
+	closed (closed_a),
+	close_count (closed_a ? 1 : 0)
 {
 }
 
@@ -664,7 +665,7 @@ void nano::asset_commit_info::serialize (nano::stream & stream_a) const
 	nano::write (stream_a, boost::endian::native_to_big (count));
 	nano::write (stream_a, total.bytes);
 	nano::write (stream_a, block.bytes);
-	nano::write (stream_a, static_cast<uint8_t> (closed));
+	nano::write (stream_a, boost::endian::native_to_big (close_count));
 }
 
 bool nano::asset_commit_info::deserialize (nano::stream & stream_a)
@@ -677,10 +678,10 @@ bool nano::asset_commit_info::deserialize (nano::stream & stream_a)
 		boost::endian::big_to_native_inplace (count);
 		nano::read (stream_a, total.bytes);
 		nano::read (stream_a, block.bytes);
-		uint8_t closed_l{ 0 };
-		nano::read (stream_a, closed_l);
-		closed = closed_l != 0;
-		return closed_l > 1 || !nano::at_end (stream_a);
+		nano::read (stream_a, close_count);
+		boost::endian::big_to_native_inplace (close_count);
+		closed = close_count != 0;
+		return !nano::at_end (stream_a);
 	}
 	catch (std::runtime_error const &)
 	{
@@ -690,7 +691,7 @@ bool nano::asset_commit_info::deserialize (nano::stream & stream_a)
 
 bool nano::asset_commit_info::operator== (nano::asset_commit_info const & other_a) const
 {
-	return issuer == other_a.issuer && asset_id == other_a.asset_id && count == other_a.count && total == other_a.total && block == other_a.block && closed == other_a.closed;
+	return issuer == other_a.issuer && asset_id == other_a.asset_id && count == other_a.count && total == other_a.total && block == other_a.block && closed == other_a.closed && close_count == other_a.close_count;
 }
 
 nano::unchecked_info::unchecked_info (std::shared_ptr<nano::block> const & block_a) :

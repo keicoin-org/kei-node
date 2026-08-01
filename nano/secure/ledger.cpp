@@ -315,7 +315,9 @@ public:
 				nano::asset_commit_info commit;
 				auto const root (block_a.hashables.link.as_block_hash ());
 				release_assert (!ledger.store.asset.commit_get (transaction, root, commit));
-				commit.closed = false;
+				release_assert (commit.close_count > 0);
+				--commit.close_count;
+				commit.closed = commit.close_count != 0;
 				ledger.store.asset.commit_put (transaction, root, commit);
 				break;
 			}
@@ -1032,6 +1034,7 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 				result.code = nano::process_result::not_issuer;
 				return;
 			}
+			++existing.close_count;
 			existing.closed = true;
 			commit_write = existing;
 			break;

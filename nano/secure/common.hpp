@@ -247,6 +247,8 @@ public:
 	nano::amount total{ 0 };
 	nano::block_hash block{ 0 };
 	bool closed{ false };
+	/** Duplicate close blocks are idempotent; this makes each one rollback-safe. */
+	uint32_t close_count{ 0 };
 };
 
 class endpoint_key final
