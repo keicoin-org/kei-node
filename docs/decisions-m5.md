@@ -430,8 +430,10 @@ required properties once the resource becomes a first-class conflict identity:
 
 - `block::election_root()` and `election_qualified_root()` equal the
   ordinary chain roots for every block except swap consumers. Both
-  `swap_accept` and `swap_cancel` use the offer hash and
-  `{ offer_hash, offer_hash }`.
+  `swap_accept` and `swap_cancel` use the domain-separated
+  `H("kei-swap-election-v1" || offer_hash)` for both halves. The domain
+  separation prevents the resource election from colliding with an ordinary
+  successor of the offerer's account chain.
 - Active insertion/publish/erase, election construction, confirm requests,
   local vote history, vote spacing, final-vote persistence, and
   recently-confirmed all use that shared identity. Representatives therefore

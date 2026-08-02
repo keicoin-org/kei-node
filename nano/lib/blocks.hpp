@@ -63,6 +63,8 @@ enum class asset_op : uint8_t
 nano::uint256_union const & kei_block_domain ();
 /** Writes the Kei domain followed by the block type, in that order. */
 void hash_preamble (blake2b_state &, nano::block_type);
+/** Domain-separated ORV root for both consumers of one swap offer. */
+nano::root swap_election_root (nano::block_hash const & offer_hash);
 
 bool asset_op_valid (uint8_t);
 char const * asset_op_to_string (nano::asset_op);
@@ -273,8 +275,8 @@ public:
 	// Qualified root value based on previous() and root()
 	virtual nano::qualified_root qualified_root () const;
 	// Consensus-conflict identity. These are the chain root/qualified root for
-	// ordinary blocks. Swap consumers override them with the offer hash so an
-	// accept and cancel on different account chains share one ORV election.
+	// ordinary blocks. Swap consumers override them with a domain-separated
+	// hash of the offer so different account chains share one ORV election.
 	virtual nano::root election_root () const;
 	virtual nano::qualified_root election_qualified_root () const;
 	// Link field for state blocks, zero otherwise.

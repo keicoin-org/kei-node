@@ -929,7 +929,9 @@ TEST (asset_block, swap_consumers_share_the_offer_election_root_across_accounts)
 	ASSERT_NE (cancel.qualified_root (), accept.qualified_root ());
 	ASSERT_EQ (cancel.election_root (), accept.election_root ());
 	ASSERT_EQ (cancel.election_qualified_root (), accept.election_qualified_root ());
-	ASSERT_EQ (nano::qualified_root (offer_hash, offer_hash), accept.election_qualified_root ());
+	auto const resource_root = nano::swap_election_root (offer_hash);
+	ASSERT_EQ (nano::qualified_root (resource_root, resource_root), accept.election_qualified_root ());
+	ASSERT_NE (cancel.qualified_root (), cancel.election_qualified_root ());
 }
 
 // decisions-m2.md §14: a Kei block hashes under a domain no Nano or Banano

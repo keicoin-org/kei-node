@@ -1784,7 +1784,7 @@ TEST (asset_ledger, final_vote_store_allows_only_one_swap_consumer_per_offer)
 	ASSERT_EQ (cancel->election_qualified_root (), accept->election_qualified_root ());
 	ASSERT_TRUE (store.final_vote.put (transaction, cancel->election_qualified_root (), cancel->hash ()));
 	ASSERT_FALSE (store.final_vote.put (transaction, accept->election_qualified_root (), accept->hash ()));
-	auto const persisted = store.final_vote.get (transaction, offer_hash);
+	auto const persisted = store.final_vote.get (transaction, cancel->election_root ());
 	ASSERT_EQ (1, persisted.size ());
 	ASSERT_EQ (cancel->hash (), persisted.front ());
 }

@@ -265,6 +265,20 @@ void nano::hash_preamble (blake2b_state & hash_a, nano::block_type type_a)
 	blake2b_update (&hash_a, type.bytes.data (), type.bytes.size ());
 }
 
+nano::root nano::swap_election_root (nano::block_hash const & offer_hash)
+{
+	nano::root result;
+	blake2b_state hash;
+	auto status = blake2b_init (&hash, sizeof (result.bytes));
+	debug_assert (status == 0);
+	char const * const label = "kei-swap-election-v1";
+	blake2b_update (&hash, label, std::strlen (label));
+	blake2b_update (&hash, offer_hash.bytes.data (), offer_hash.bytes.size ());
+	status = blake2b_final (&hash, result.bytes.data (), sizeof (result.bytes));
+	debug_assert (status == 0);
+	return result;
+}
+
 void nano::send_block::hash (blake2b_state & hash_a) const
 {
 	nano::hash_preamble (hash_a, nano::block_type::send);
@@ -2548,11 +2562,11 @@ nano::root const & nano::asset_block::root () const
 
 nano::root nano::asset_block::election_root () const
 {
-	// `link` carries the offer hash for both consumers. Using it as the vote
-	// root gives local vote history and vote spacing one shared namespace.
+	// `link` carries the offer hash for both consumers. Its domain-separated
+	// derivative gives vote history and spacing one collision-safe namespace.
 	if (hashables.op == nano::asset_op::swap_accept || hashables.op == nano::asset_op::swap_cancel)
 	{
-		return hashables.link;
+		return nano::swap_election_root (hashables.link.as_block_hash ());
 	}
 	return root ();
 }
@@ -2561,10 +2575,8 @@ nano::qualified_root nano::asset_block::election_qualified_root () const
 {
 	if (hashables.op == nano::asset_op::swap_accept || hashables.op == nano::asset_op::swap_cancel)
 	{
-		auto const offer_hash = hashables.link.as_block_hash ();
-		// A cancel immediately following its offer already has this ordinary
-		// qualified root. An accept on another account deliberately adopts it.
-		return nano::qualified_root{ offer_hash, offer_hash };
+		auto const root = nano::swap_election_root (hashables.link.as_block_hash ());
+		return nano::qualified_root{ root, root };
 	}
 	return qualified_root ();
 }
