@@ -205,6 +205,9 @@ nano::uint128_t nano::rocksdb::block_store::balance_calculated (std::shared_ptr<
 		case nano::block_type::state:
 			result = boost::polymorphic_downcast<nano::state_block *> (block_a.get ())->hashables.balance.number ();
 			break;
+		case nano::block_type::asset:
+			result = boost::polymorphic_downcast<nano::asset_block *> (block_a.get ())->hashables.balance.number ();
+			break;
 		case nano::block_type::invalid:
 		case nano::block_type::not_a_block:
 			release_assert (false);

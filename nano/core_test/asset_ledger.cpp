@@ -1549,11 +1549,14 @@ TEST (asset_ledger, swap_accept_settles_both_legs_and_each_side_collects)
 	ASSERT_FALSE (store.pending.get (transaction, nano::pending_key (player.pub, accept->hash ()), kei_pending));
 	ASSERT_EQ (nano::dev::team_key.pub, kei_pending.source);
 	ASSERT_EQ (nano::amount (50), kei_pending.amount);
+	// The player's chain is not new — `held.collect` already opened it, and
+	// `offer` is its current head — so this receive continues it rather than
+	// opening a fresh account.
 	nano::block_builder builder;
 	auto open (builder.state ()
 			   .make_block ()
 			   .account (player.pub)
-			   .previous (0)
+			   .previous (offer->hash ())
 			   .representative (player.pub)
 			   .balance (50)
 			   .link (accept->hash ())
