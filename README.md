@@ -10,7 +10,8 @@ The Kei node. A fork of [Banano](https://github.com/BananoCoin/banano), itself a
 fork of [Nano](https://github.com/nanocurrency/nano-node), adding a **native
 token primitive** and a Kei genesis.
 
-> **Status: M3 testnet.** The M2 genesis/token gate is complete. A single
+> **Status: native M4 claims merged; public network remains M3.** The M2
+> genesis/token gate is complete. A single
 > best-effort Hetzner dev-network node is served through the rate-limited,
 > allowlisted HTTPS boundary documented in
 > [`docs/decisions-m3.md`](docs/decisions-m3.md). It has weak consensus, no
@@ -34,9 +35,12 @@ token primitive** and a Kei genesis.
 > was rejected at a legacy ingress threshold before its A/B/C rule ran, and a
 > bad signature cost fifteen seconds and reported "Stopped".
 >
-> **Not in M3** (§16, §17): `commit`/`claim` remain M4 and live in separate
-> M4 suites rather than weakening M2's gate. Kei-payment memos are likewise
-> deferred and rejected explicitly. The dev genesis now includes the
+> **M4 is merged and gated, not silently assumed deployed.** Native `commit`,
+> `claim`, and `commit_close`, plus the `commit_info` and `claim_status` RPCs,
+> run through the exact pinned SDK-owned M4 contract in CI. That proves a clean
+> node startup matches the M4 wire contract; it does not by itself prove which
+> build the public endpoint is running. Kei-payment memos remain deferred and
+> rejected explicitly. The dev genesis includes the
 > reproducible §5.7 allocation: a null-representative reserve plus four
 > circulating accounts; beta/live still refuse to start until their offline
 > ceremony supplies real public blocks. The inherited legacy genesis `open`
@@ -69,7 +73,7 @@ mining, ORV consensus, sub-second confirmation, and the base32 address encoding 
 so existing wallets, explorers, and libraries can be adapted rather than
 rewritten.
 
-## What M2 adds
+## What M2 added
 
 | Op | Behaviour |
 |---|---|
@@ -82,9 +86,24 @@ rewritten.
 Plus a genesis block producing exactly 1,000,000,000,000 Kei with the SPEC §5.7
 allocation, and `balanceOf` answerable in a single call.
 
-`commit`/`claim` land at M4, swaps at M5, and reserve governance before mainnet.
+M4 has now landed native rooted claims; swaps remain M5, and reserve governance
+remains a pre-mainnet gate.
 [`docs/decisions-m2.md`](docs/decisions-m2.md) says why, and settles the wire
 format, the store layout, the work tiers, and the genesis arithmetic.
+
+## What M4 adds
+
+| Operation | Behaviour |
+|---|---|
+| `commit` | The issuer publishes one Merkle root covering a batch of entitlements. |
+| `claim` | A recipient proves one entitlement and materialises it from their own account chain. |
+| `commit_close` | The issuer stops further claims against a root so its record can become prunable. |
+| `commit_info` | RPC lookup for root metadata, total, count, and closed state. |
+| `claim_status` | RPC lookup for the `(account, root)` double-claim key. |
+
+The node CI checks the claim hash vectors before compiling, then runs the pinned
+SDK M4 suite over HTTP against a clean dev-node startup. The M2 suite remains a
+separate gate so M4 cannot weaken it.
 
 ## The contract this node has to serve
 
@@ -99,8 +118,8 @@ described:
 
 **M2's RPC gate is green because those two exact files pass unchanged against
 both the mock and a clean dev node; `KEI_NODE_URL` is the only switch.** M3 runs
-them against the public endpoint as operational evidence. M4's commit/claim
-cases remain preserved separately.
+them against the public endpoint as operational evidence. M4 remains a separate
+pinned contract and gate, covering native claim vectors and live HTTP behavior.
 
 ## Building
 
