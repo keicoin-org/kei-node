@@ -1062,6 +1062,33 @@ TEST (asset_block, issue_json_derives_its_own_id)
 	ASSERT_EQ (block1.hash (), block2.hash ());
 }
 
+// kei-transaction writes an uncapped maxSupply as JSON null. PropertyTree
+// exposes that scalar as the text "null", so exercise the parsed wire shape
+// rather than constructing a ptree (which cannot distinguish JSON scalar
+// types) and keep it equivalent to the node's empty-string serialization.
+TEST (asset_block, issue_json_accepts_null_max_supply)
+{
+	nano::keypair key1;
+	auto payload (issue_payload ());
+	payload.max_supply.clear ();
+	auto const id (nano::derive_asset_id (key1.pub, payload.symbol));
+	nano::asset_block block1 (key1.pub, 0, key1.pub, 1000, nano::asset_op::issue, id, 0, 0, payload, key1.prv, key1.pub, 6);
+	std::string json;
+	block1.serialize_json (json);
+	std::string const encoded ("\"maxSupply\": \"\"");
+	auto const position (json.find (encoded));
+	ASSERT_NE (std::string::npos, position);
+	json.replace (position, encoded.size (), "\"maxSupply\": null");
+
+	boost::property_tree::ptree tree;
+	std::stringstream input (json);
+	boost::property_tree::read_json (input, tree);
+	bool error (false);
+	nano::asset_block block2 (error, tree);
+	ASSERT_FALSE (error);
+	ASSERT_EQ (block1, block2);
+}
+
 // decisions-m2.md §7 and §14, pinned to literals rather than to agreement.
 //
 // The SDK computes these same hashes in TypeScript, and nothing in either

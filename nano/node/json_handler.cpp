@@ -5837,7 +5837,12 @@ void nano::json_handler::asset_holders ()
 	response_errors ();
 }
 
-void nano::json_handler::asset_commit ()
+// `commit_info` is docs/rpc.md's name for this read; `asset_commit` answers
+// alongside it as a deprecated alias to the same handler (decisions-m4.md §8.4).
+// The response omits `info.block` — the block that published the root is not
+// part of the frozen contract's `CommitInfo` shape, and adding fields the SDK
+// never asked for is its own kind of drift.
+void nano::json_handler::commit_info ()
 {
 	nano::uint256_union root;
 	if (root.decode_hex (request.get<std::string> ("root", "")))
@@ -5856,7 +5861,6 @@ void nano::json_handler::asset_commit ()
 			commit.put ("asset", info.asset_id.to_string ());
 			nano::json::put_number (commit, "count", info.count);
 			commit.put ("total", info.total.to_string_dec ());
-			commit.put ("block", info.block.to_string ());
 			nano::json::put_boolean (commit, "closed", info.closed);
 			response_l.add_child ("commit", commit);
 		}
@@ -5870,25 +5874,25 @@ void nano::json_handler::asset_commit ()
 	response_errors ();
 }
 
-void nano::json_handler::asset_claims ()
+// `claim_status` is docs/rpc.md's name for this read: one boolean answer to
+// "has this account already claimed this root", keyed exactly like the
+// `asset_claims` table (account, root). `asset_claims` answers alongside it as
+// a deprecated alias — the branch's earlier RPC surface served a *list* of an
+// account's claims under this name (decisions-m4.md §8.4), a shape nothing in
+// the frozen SDK contract ever asked for and nothing here still needs; the name
+// is kept, the shape is not.
+void nano::json_handler::claim_status ()
 {
+	nano::uint256_union root;
+	if (root.decode_hex (request.get<std::string> ("root", "")))
+	{
+		ec = nano::error_common::bad_root;
+	}
 	auto account (account_impl ());
-	auto const count (count_optional_impl ());
 	if (!ec)
 	{
-		boost::property_tree::ptree claims;
 		auto transaction (node.store.tx_begin_read ());
-		uint64_t returned (0);
-		// Keyed by account, so an SDK asking "what have I already claimed?"
-		// before it publishes another claim gets one prefix scan (SPEC §5.5).
-		for (auto i (node.store.asset.claims_begin (transaction, nano::claim_key (account, 0))), n (node.store.asset.claims_end ()); i != n && i->first.first == account && returned < count; ++i, ++returned)
-		{
-			boost::property_tree::ptree entry;
-			entry.put ("root", i->first.second.to_string ());
-			entry.put ("block", i->second.to_string ());
-			claims.push_back (std::make_pair ("", entry));
-		}
-		nano::json::add_array (response_l, "claims", claims);
+		nano::json::put_boolean (response_l, "claimed", node.store.asset.claim_exists (transaction, account, root));
 	}
 	response_errors ();
 }
@@ -6452,8 +6456,14 @@ ipc_json_handler_no_arg_func_map create_ipc_json_handler_no_arg_func_map ()
 	no_arg_funcs.emplace ("account_holdings", &nano::json_handler::account_holdings);
 	no_arg_funcs.emplace ("asset_balance", &nano::json_handler::asset_balance);
 	no_arg_funcs.emplace ("asset_holders", &nano::json_handler::asset_holders);
-	no_arg_funcs.emplace ("asset_commit", &nano::json_handler::asset_commit);
-	no_arg_funcs.emplace ("asset_claims", &nano::json_handler::asset_claims);
+	// docs/rpc.md's frozen names. The public gateway allowlists only these.
+	no_arg_funcs.emplace ("commit_info", &nano::json_handler::commit_info);
+	no_arg_funcs.emplace ("claim_status", &nano::json_handler::claim_status);
+	// Deprecated aliases to the handlers above — see the comments on
+	// commit_info() and claim_status() for why the old names' shapes did not
+	// carry over.
+	no_arg_funcs.emplace ("asset_commit", &nano::json_handler::commit_info);
+	no_arg_funcs.emplace ("asset_claims", &nano::json_handler::claim_status);
 	no_arg_funcs.emplace ("asset_offers", &nano::json_handler::asset_offers);
 	no_arg_funcs.emplace ("asset_offer", &nano::json_handler::asset_offer);
 	no_arg_funcs.emplace ("swap_info", &nano::json_handler::swap_info);

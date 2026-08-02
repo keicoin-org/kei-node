@@ -39,8 +39,9 @@ public:
 	void account_holdings ();
 	void asset_balance ();
 	void asset_holders ();
-	void asset_commit ();
-	void asset_claims ();
+	/** docs/rpc.md's frozen names. `asset_commit`/`asset_claims` alias these. */
+	void commit_info ();
+	void claim_status ();
 	/** The market's read model: a scan of open `swap_offer`s for one asset (SPEC §9.3). */
 	void asset_offers ();
 	/** One offer's full lock record, open or settled (SPEC §9.2). */
