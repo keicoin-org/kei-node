@@ -196,6 +196,16 @@ nano::asset_key claim_key (nano::account const &, nano::uint256_union const & ro
  * validation, and it prunes with the root (decisions-m4.md §4).
  */
 nano::asset_key claim_root_key (nano::uint256_union const & root, nano::account const &);
+/**
+ * The market's read index, keyed (offered asset, offer block hash).
+ *
+ * SPEC §9.3 makes the market's read model "a scan of `swap_offer` blocks that
+ * are neither accepted nor cancelled", and this is that scan: an auction house
+ * asks what is for sale of one asset, and gets a bounded prefix range rather
+ * than a walk of every account. Nothing reads it during validation, and it is
+ * deleted the moment the lock it points at is consumed (decisions-m5.md §6).
+ */
+nano::asset_key offer_key (nano::uint256_union const & asset_id, nano::block_hash const & offer);
 
 /**
  * A token's immutable parameters plus the one thing about it that moves.
@@ -277,6 +287,47 @@ public:
 	nano::block_hash block{ 0 };
 	/** Set by the issuer's `commit_close`; there is no clock (SPEC §5.5). */
 	bool closed{ false };
+};
+
+/**
+ * One `swap_offer`'s locked entry — the only new consensus state M5 adds.
+ *
+ * SPEC §9.2: the offer debits the offerer's own asset out of their spendable
+ * balance and into this record, keyed by the offer block's hash. Nothing is
+ * moved to anybody, and the same sword cannot be promised into two swaps
+ * because after the first offer it is not in the offerer's balance to offer
+ * again.
+ *
+ * `settled_by` is what makes the accept-vs-cancel race decidable and, just as
+ * importantly, reversible. A cancel deletes this record, because the block that
+ * would have to be undone to bring it back sits later on the offerer's own
+ * chain and rollback walks that chain anyway. An accept cannot: it sits on the
+ * *accepter's* chain, which nothing orders against the offerer's, so the record
+ * stays and names the block that consumed it — the same reason
+ * `asset_claim_roots` exists (decisions-m4.md §4, decisions-m5.md §7).
+ */
+class asset_lock_info final
+{
+public:
+	asset_lock_info () = default;
+	void serialize (nano::stream &) const;
+	bool deserialize (nano::stream &);
+	bool operator== (nano::asset_lock_info const &) const;
+	/** True while the offer is open, which is the only state it can be accepted or cancelled in. */
+	bool open () const;
+
+	nano::account offerer{};
+	/** The locked asset. Zero is Kei, which the offer debits from `balance` (decisions-m5.md §3). */
+	nano::uint256_union asset_id{ 0 };
+	nano::amount amount{ 0 };
+	nano::uint256_union want_asset{ 0 };
+	nano::amount want_amount{ 0 };
+	/** Zero is an offer open to anyone, which SPEC §9.3 calls a sale listing. */
+	nano::account counterparty{};
+	/** Advisory only. The node stores it and never compares it to anything (SPEC §9.3). */
+	uint64_t expires_at{ 0 };
+	/** The `swap_accept` that consumed this lock, or zero while it is open. */
+	nano::block_hash settled_by{ 0 };
 };
 
 class endpoint_key final
@@ -493,7 +544,13 @@ enum class process_result
 	no_such_commit, // Nothing to claim from or close: no commit block published this root
 	commit_closed, // The issuer closed this root, and closing is final (SPEC §5.5)
 	already_claimed, // One leaf per account per root, claimed once (SPEC §5.5)
-	bad_claim_proof // The proof does not put this account in this root for this amount
+	bad_claim_proof, // The proof does not put this account in this root for this amount
+	no_such_offer, // No `swap_offer` block on this network published that hash
+	offer_consumed, // The lock is gone: an accept or a cancel got there first (SPEC §9.2)
+	not_offerer, // Only the account that locked the asset may cancel the offer
+	swap_terms_mismatch, // The accepter did not restate the offer's own wanted asset and amount
+	swap_not_counterparty, // The offer names a specific counterparty and this is not them
+	self_swap // An offer cannot name its own author as the counterparty — it could never be accepted
 };
 class process_return final
 {

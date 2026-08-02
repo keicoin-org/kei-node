@@ -210,7 +210,7 @@ nano::node::node (boost::asio::io_context & io_ctx_a, boost::filesystem::path co
 	startup_time (std::chrono::steady_clock::now ()),
 	node_seq (seq),
 	block_broadcast{ network, block_arrival, !flags.disable_block_processor_republishing },
-	block_publisher{ active },
+	block_publisher{ active, ledger },
 	gap_tracker{ gap_cache },
 	process_live_dispatcher{ ledger, scheduler, inactive_vote_cache, websocket }
 {
@@ -1275,7 +1275,7 @@ std::shared_ptr<nano::election> nano::node::block_confirm (std::shared_ptr<nano:
 {
 	scheduler.manual (block_a);
 	scheduler.flush ();
-	auto election = active.election (block_a->qualified_root ());
+	auto election = active.election (block_a->election_qualified_root ());
 	if (election != nullptr)
 	{
 		election->transition_active ();
@@ -1403,7 +1403,7 @@ void nano::node::process_confirmed (nano::election_status const & status_a, uint
 	decltype (iteration_a) const num_iters = (config.block_processor_batch_max_time / network_params.node.process_confirmed_interval) * 4;
 	if (auto block_l = ledger.store.block.get (ledger.store.tx_begin_read (), hash))
 	{
-		active.recently_confirmed.put (block_l->qualified_root (), hash);
+		active.recently_confirmed.put (block_l->election_qualified_root (), hash);
 		confirmation_height_processor.add (block_l);
 	}
 	else if (iteration_a < num_iters)

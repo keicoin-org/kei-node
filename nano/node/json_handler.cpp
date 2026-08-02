@@ -3650,6 +3650,12 @@ void nano::json_handler::process ()
 							case nano::process_result::commit_closed:
 							case nano::process_result::already_claimed:
 							case nano::process_result::bad_claim_proof:
+							case nano::process_result::no_such_offer:
+							case nano::process_result::offer_consumed:
+							case nano::process_result::not_offerer:
+							case nano::process_result::swap_terms_mismatch:
+							case nano::process_result::swap_not_counterparty:
+							case nano::process_result::self_swap:
 							{
 								rpc_l->ec = nano::to_error_process (result.code);
 								break;
@@ -5891,6 +5897,270 @@ void nano::json_handler::claim_status ()
 	response_errors ();
 }
 
+namespace
+{
+void asset_lock_to_json (boost::property_tree::ptree & tree_a, nano::block_hash const & offer_a, nano::asset_lock_info const & lock_a)
+{
+	tree_a.put ("offer", offer_a.to_string ());
+	tree_a.put ("offerer", lock_a.offerer.to_account ());
+	tree_a.put ("asset", lock_a.asset_id.to_string ());
+	tree_a.put ("amount", lock_a.amount.to_string_dec ());
+	tree_a.put ("wantAsset", lock_a.want_asset.to_string ());
+	tree_a.put ("wantAmount", lock_a.want_amount.to_string_dec ());
+	if (!lock_a.counterparty.is_zero ())
+	{
+		tree_a.put ("to", lock_a.counterparty.to_account ());
+	}
+	if (lock_a.expires_at != 0)
+	{
+		nano::json::put_number (tree_a, "expiresAt", lock_a.expires_at);
+	}
+	nano::json::put_boolean (tree_a, "open", lock_a.open ());
+	if (!lock_a.open ())
+	{
+		tree_a.put ("settledBy", lock_a.settled_by.to_string ());
+	}
+}
+
+/**
+ * One `swap_offer` in `@keicoin/core`'s `SwapOffer` shape (packages/core/src/node.ts),
+ * which `asset_lock_to_json` above does not answer: that one is the lock
+ * record alone, keyed by offer hash, and says nothing while a lock is open
+ * about the offer's own terms, and nothing at all once a cancel has deleted
+ * it. This is the SDK's `swap_info` / `account_swaps` contract instead —
+ * every field the offer block itself carries, plus whatever the ledger still
+ * knows about how it ended.
+ */
+void swap_offer_to_json (nano::node & node_a, nano::transaction const & transaction_a, nano::block_hash const & hash_a, nano::asset_block const & offer_a, boost::property_tree::ptree & entry_a)
+{
+	entry_a.put ("hash", hash_a.to_string ());
+	entry_a.put ("from", offer_a.hashables.account.to_account ());
+	entry_a.put ("asset", offer_a.hashables.asset_id.to_string ());
+	entry_a.put ("amount", offer_a.hashables.amount.to_string_dec ());
+	entry_a.put ("wantAsset", offer_a.hashables.payload.want_asset.to_string ());
+	entry_a.put ("wantAmount", offer_a.hashables.payload.want_amount.to_string_dec ());
+	if (offer_a.hashables.link.is_zero ())
+	{
+		nano::json::put_null (entry_a, "counterparty");
+	}
+	else
+	{
+		entry_a.put ("counterparty", offer_a.hashables.link.as_account ().to_account ());
+	}
+	if (offer_a.hashables.payload.expires_at == 0)
+	{
+		nano::json::put_null (entry_a, "expiresAt");
+	}
+	else
+	{
+		nano::json::put_number (entry_a, "expiresAt", offer_a.hashables.payload.expires_at);
+	}
+	nano::json::put_number (entry_a, "height", offer_a.sideband ().height);
+	// Node-local, and never consensus (SPEC §9.3) — the SDK's own caveat on
+	// `seenAt`/`settledAt`. The sideband keeps this in seconds; the SDK's
+	// contract wants milliseconds.
+	nano::json::put_number (entry_a, "seenAt", offer_a.sideband ().timestamp * 1000);
+
+	nano::asset_lock_info lock;
+	if (!node_a.store.asset.lock_get (transaction_a, hash_a, lock))
+	{
+		if (lock.open ())
+		{
+			entry_a.put ("state", "open");
+			nano::json::put_null (entry_a, "acceptedBy");
+			nano::json::put_null (entry_a, "settledBy");
+			nano::json::put_null (entry_a, "settledAt");
+		}
+		else
+		{
+			entry_a.put ("state", "accepted");
+			entry_a.put ("settledBy", lock.settled_by.to_string ());
+			entry_a.put ("acceptedBy", node_a.ledger.account (transaction_a, lock.settled_by).to_account ());
+			auto const accept_block (node_a.store.block.get (transaction_a, lock.settled_by));
+			nano::json::put_number (entry_a, "settledAt", accept_block->sideband ().timestamp * 1000);
+		}
+	}
+	else
+	{
+		// A `swap_cancel` deletes the lock outright rather than keeping it
+		// settled (decisions-m5.md §7), so the only place left to learn that
+		// this offer was cancelled, and when, is the offerer's own chain: the
+		// cancel that consumed it sits somewhere after this block on this
+		// same chain, because only the offerer may cancel their own offer.
+		// This walk costs one hop per block the offerer has made since, the
+		// same bound `undo_claims` and the other index-free scans in
+		// ledger.cpp already accept for an operation that is not on the
+		// consensus path.
+		entry_a.put ("state", "cancelled");
+		nano::json::put_null (entry_a, "acceptedBy");
+		nano::block_hash cursor (hash_a);
+		nano::block_hash cancel_hash{ 0 };
+		uint64_t cancel_timestamp{ 0 };
+		while (true)
+		{
+			auto const next (node_a.store.block.successor (transaction_a, cursor));
+			if (next.is_zero ())
+			{
+				break;
+			}
+			auto const next_block (node_a.store.block.get (transaction_a, next));
+			auto const next_asset (dynamic_cast<nano::asset_block const *> (next_block.get ()));
+			if (next_asset != nullptr && next_asset->hashables.op == nano::asset_op::swap_cancel && next_asset->hashables.link.as_block_hash () == hash_a)
+			{
+				cancel_hash = next;
+				cancel_timestamp = next_block->sideband ().timestamp;
+				break;
+			}
+			cursor = next;
+		}
+		if (cancel_hash.is_zero ())
+		{
+			// Should never happen against a consistent ledger — the lock is
+			// only ever missing because a cancel deleted it — but answer
+			// honestly rather than assert against a caller-supplied hash.
+			nano::json::put_null (entry_a, "settledBy");
+			nano::json::put_null (entry_a, "settledAt");
+		}
+		else
+		{
+			entry_a.put ("settledBy", cancel_hash.to_string ());
+			nano::json::put_number (entry_a, "settledAt", cancel_timestamp * 1000);
+		}
+	}
+}
+}
+
+void nano::json_handler::swap_info ()
+{
+	auto const hash (hash_impl ("hash"));
+	if (!ec)
+	{
+		auto transaction (node.store.tx_begin_read ());
+		auto const block (node.store.block.get (transaction, hash));
+		auto const offer (block == nullptr ? nullptr : dynamic_cast<nano::asset_block const *> (block.get ()));
+		if (offer != nullptr && offer->hashables.op == nano::asset_op::swap_offer)
+		{
+			boost::property_tree::ptree entry;
+			swap_offer_to_json (node, transaction, hash, *offer, entry);
+			response_l.add_child ("offer", entry);
+		}
+		else
+		{
+			// No `swap_offer` with that hash was ever processed here, or the
+			// hash names some other kind of block entirely — either way,
+			// absent rather than an error, the same rule `asset_offer` and
+			// `asset_commit` follow.
+			nano::json::put_null (response_l, "offer");
+		}
+	}
+	response_errors ();
+}
+
+void nano::json_handler::account_swaps ()
+{
+	auto const account (account_impl ());
+	auto const count (count_optional_impl ());
+	std::string state_filter;
+	auto const state_text (request.get_optional<std::string> ("state"));
+	if (!ec && state_text.is_initialized ())
+	{
+		if (*state_text == "open" || *state_text == "accepted" || *state_text == "cancelled")
+		{
+			state_filter = *state_text;
+		}
+		else
+		{
+			ec = nano::error_rpc::invalid_swap_state;
+		}
+	}
+	if (!ec)
+	{
+		boost::property_tree::ptree offers;
+		auto transaction (node.store.tx_begin_read ());
+		uint64_t returned (0);
+		// One account's own chain is a bounded scan (SPEC §9.1), and every
+		// `swap_offer` that account ever made lives on it — open, accepted or
+		// cancelled — which is what lets this answer every `state` without a
+		// second index. Walked tip-first, the same direction
+		// `account_history` reads by default.
+		auto hash (node.ledger.latest (transaction, account));
+		auto block (hash.is_zero () ? nullptr : node.store.block.get (transaction, hash));
+		while (block != nullptr && returned < count)
+		{
+			auto const offer (dynamic_cast<nano::asset_block const *> (block.get ()));
+			if (offer != nullptr && offer->hashables.op == nano::asset_op::swap_offer)
+			{
+				boost::property_tree::ptree entry;
+				swap_offer_to_json (node, transaction, hash, *offer, entry);
+				if (state_filter.empty () || entry.get<std::string> ("state") == state_filter)
+				{
+					offers.push_back (std::make_pair ("", entry));
+					++returned;
+				}
+			}
+			hash = block->previous ();
+			block = hash.is_zero () ? nullptr : node.store.block.get (transaction, hash);
+		}
+		nano::json::add_array (response_l, "offers", offers);
+	}
+	response_errors ();
+}
+
+void nano::json_handler::asset_offers ()
+{
+	nano::uint256_union id;
+	if (id.decode_hex (request.get<std::string> ("asset", "")))
+	{
+		ec = nano::error_common::bad_asset_id;
+	}
+	auto const count (count_optional_impl ());
+	if (!ec)
+	{
+		boost::property_tree::ptree offers;
+		auto transaction (node.store.tx_begin_read ());
+		uint64_t returned (0);
+		// The market's whole read model (SPEC §9.3): every entry here is a
+		// `swap_offer` block that is still open, and nothing else ever appears.
+		for (auto i (node.store.asset.offers_begin (transaction, nano::offer_key (id, 0))), n (node.store.asset.offers_end ()); i != n && i->first.first == id && returned < count; ++i, ++returned)
+		{
+			boost::property_tree::ptree entry;
+			entry.put ("offer", i->first.second.to_string ());
+			entry.put ("offerer", i->second.to_account ());
+			offers.push_back (std::make_pair ("", entry));
+		}
+		nano::json::add_array (response_l, "offers", offers);
+	}
+	response_errors ();
+}
+
+void nano::json_handler::asset_offer ()
+{
+	nano::block_hash offer;
+	if (offer.decode_hex (request.get<std::string> ("offer", "")))
+	{
+		ec = nano::error_common::bad_root;
+	}
+	if (!ec)
+	{
+		auto transaction (node.store.tx_begin_read ());
+		nano::asset_lock_info lock;
+		if (!node.store.asset.lock_get (transaction, offer, lock))
+		{
+			boost::property_tree::ptree tree;
+			asset_lock_to_json (tree, offer, lock);
+			response_l.add_child ("offer", tree);
+		}
+		else
+		{
+			// No `swap_offer` with that hash was ever processed here — the same
+			// "absent, not an error" rule `asset_commit` follows for a root
+			// nobody published.
+			nano::json::put_null (response_l, "offer");
+		}
+	}
+	response_errors ();
+}
+
 void nano::json_handler::kei_receivables ()
 {
 	auto account (account_impl ());
@@ -6194,6 +6464,10 @@ ipc_json_handler_no_arg_func_map create_ipc_json_handler_no_arg_func_map ()
 	// carry over.
 	no_arg_funcs.emplace ("asset_commit", &nano::json_handler::commit_info);
 	no_arg_funcs.emplace ("asset_claims", &nano::json_handler::claim_status);
+	no_arg_funcs.emplace ("asset_offers", &nano::json_handler::asset_offers);
+	no_arg_funcs.emplace ("asset_offer", &nano::json_handler::asset_offer);
+	no_arg_funcs.emplace ("swap_info", &nano::json_handler::swap_info);
+	no_arg_funcs.emplace ("account_swaps", &nano::json_handler::account_swaps);
 	no_arg_funcs.emplace ("work_thresholds", &nano::json_handler::work_thresholds);
 	no_arg_funcs.emplace ("faucet", &nano::json_handler::faucet);
 	no_arg_funcs.emplace ("work_peer_add", &nano::json_handler::work_peer_add);

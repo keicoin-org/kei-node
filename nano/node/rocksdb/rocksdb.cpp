@@ -202,7 +202,9 @@ std::unordered_map<char const *, nano::tables> nano::rocksdb::store::create_cf_n
 		{ "issued", tables::issued },
 		{ "asset_commits", tables::asset_commits },
 		{ "asset_claims", tables::asset_claims },
-		{ "asset_claim_roots", tables::asset_claim_roots } };
+		{ "asset_claim_roots", tables::asset_claim_roots },
+		{ "swap_locks", tables::swap_locks },
+		{ "swap_offers", tables::swap_offers } };
 
 	debug_assert (map.size () == all_tables ().size () + 1);
 	return map;
@@ -438,6 +440,15 @@ rocksdb::ColumnFamilyOptions nano::rocksdb::store::get_cf_options (std::string c
 		std::shared_ptr<::rocksdb::TableFactory> table_factory (::rocksdb::NewBlockBasedTableFactory (get_active_table_options (block_cache_size_bytes)));
 		cf_options = get_active_cf_options (table_factory, memtable_size_bytes);
 	}
+	else if (cf_name_a == "swap_locks" || cf_name_a == "swap_offers")
+	{
+		// An open offer is written once and deleted once, and a settled lock is
+		// updated in place exactly once more (SPEC §9.2). The lock *is* the
+		// garbage collector for stale listings (§9.3), so both tables churn the
+		// way "pending" does rather than growing the way "blocks" does.
+		std::shared_ptr<::rocksdb::TableFactory> table_factory (::rocksdb::NewBlockBasedTableFactory (get_active_table_options (block_cache_size_bytes)));
+		cf_options = get_active_cf_options (table_factory, memtable_size_bytes);
+	}
 	else if (cf_name_a == "assets" || cf_name_a == "issued")
 	{
 		// One entry per token ever issued, and per account that has issued one.
@@ -601,6 +612,10 @@ rocksdb::ColumnFamilyHandle * nano::rocksdb::store::table_to_column_family (tabl
 			return get_column_family ("asset_claims");
 		case tables::asset_claim_roots:
 			return get_column_family ("asset_claim_roots");
+		case tables::swap_locks:
+			return get_column_family ("swap_locks");
+		case tables::swap_offers:
+			return get_column_family ("swap_offers");
 		default:
 			release_assert (false);
 			return get_column_family ("");
@@ -942,7 +957,7 @@ void nano::rocksdb::store::on_flush (::rocksdb::FlushJobInfo const & flush_job_i
 
 std::vector<nano::tables> nano::rocksdb::store::all_tables () const
 {
-	return std::vector<nano::tables>{ tables::accounts, tables::asset_claim_roots, tables::asset_claims, tables::asset_commits, tables::asset_pending, tables::assets, tables::blocks, tables::confirmation_height, tables::final_votes, tables::frontiers, tables::holders, tables::holdings, tables::issued, tables::meta, tables::online_weight, tables::peers, tables::pending, tables::pruned, tables::vote };
+	return std::vector<nano::tables>{ tables::accounts, tables::asset_claim_roots, tables::asset_claims, tables::asset_commits, tables::asset_pending, tables::assets, tables::blocks, tables::confirmation_height, tables::final_votes, tables::frontiers, tables::holders, tables::holdings, tables::issued, tables::meta, tables::online_weight, tables::peers, tables::pending, tables::pruned, tables::swap_locks, tables::swap_offers, tables::vote };
 }
 
 bool nano::rocksdb::store::copy_db (boost::filesystem::path const & destination_path)

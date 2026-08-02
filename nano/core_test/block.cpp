@@ -918,6 +918,22 @@ TEST (asset_block, type_and_preamble)
 	ASSERT_NE (asset.hash (), state.hash ());
 }
 
+TEST (asset_block, swap_consumers_share_the_offer_election_root_across_accounts)
+{
+	nano::keypair offerer;
+	nano::keypair accepter;
+	nano::block_hash const offer_hash{ 42 };
+	nano::asset_block cancel (offerer.pub, offer_hash, offerer.pub, 1000, nano::asset_op::swap_cancel, 0, 0, offer_hash, nano::asset_payload{}, offerer.prv, offerer.pub, 6);
+	nano::asset_block accept (accepter.pub, nano::block_hash{ 7 }, accepter.pub, 950, nano::asset_op::swap_accept, 0, 50, offer_hash, nano::asset_payload{}, accepter.prv, accepter.pub, 6);
+
+	ASSERT_NE (cancel.qualified_root (), accept.qualified_root ());
+	ASSERT_EQ (cancel.election_root (), accept.election_root ());
+	ASSERT_EQ (cancel.election_qualified_root (), accept.election_qualified_root ());
+	auto const resource_root = nano::swap_election_root (offer_hash);
+	ASSERT_EQ (nano::qualified_root (resource_root, resource_root), accept.election_qualified_root ());
+	ASSERT_NE (cancel.qualified_root (), cancel.election_qualified_root ());
+}
+
 // decisions-m2.md §14: a Kei block hashes under a domain no Nano or Banano
 // block hashes under, so the two chains cannot be confused at the ledger.
 TEST (block, kei_hash_domain)

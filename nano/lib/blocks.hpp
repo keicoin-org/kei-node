@@ -10,6 +10,7 @@
 #include <nano/lib/utility.hpp>
 #include <nano/lib/work.hpp>
 
+#include <boost/optional.hpp>
 #include <boost/property_tree/ptree_fwd.hpp>
 
 #include <unordered_map>
@@ -32,13 +33,14 @@ enum class block_type : uint8_t
 	// keeps its number and its meaning, per decisions-m2.md §2.
 	asset = 7
 };
-// The eight asset operations this node validates. M2 shipped the first five
+// The eleven asset operations this node validates. M2 shipped the first five
 // (decisions-m2.md §0, §7, §11) and reserved the next three by number, because
 // the op byte is hashed and renumbering later invalidates every vector and
-// signature made against the earlier guess. M4 activates them at exactly the
-// reserved numbers (decisions-m2.md §18, decisions-m4.md §2). 8 upward stays
-// reserved for the SPEC §5.6.4 swap legs, and asset_op_valid stays bounded at
-// the last live op so a reserved number is still rejected on the wire.
+// signature made against the earlier guess. M4 activated them at exactly the
+// reserved numbers (decisions-m2.md §18, decisions-m4.md §2), and M5 spends
+// 8, 9 and 10 on the swap legs in SPEC §5.6.4's own order (decisions-m5.md §1).
+// Nothing above them is reserved, so `asset_op_valid` bounds the enum and a
+// number past its end is rejected on the wire rather than parsed.
 enum class asset_op : uint8_t
 {
 	issue = 0,
@@ -48,7 +50,10 @@ enum class asset_op : uint8_t
 	asset_receive = 4,
 	commit = 5,
 	commit_close = 6,
-	claim = 7
+	claim = 7,
+	swap_offer = 8,
+	swap_accept = 9,
+	swap_cancel = 10
 };
 /**
  * The domain separator every Kei block hash begins with, so that no Nano or
@@ -58,6 +63,8 @@ enum class asset_op : uint8_t
 nano::uint256_union const & kei_block_domain ();
 /** Writes the Kei domain followed by the block type, in that order. */
 void hash_preamble (blake2b_state &, nano::block_type);
+/** Domain-separated ORV root for both consumers of one swap offer. */
+nano::root swap_election_root (nano::block_hash const & offer_hash);
 
 bool asset_op_valid (uint8_t);
 char const * asset_op_to_string (nano::asset_op);
@@ -140,6 +147,20 @@ public:
 	uint32_t count{ 0 };
 	// `claim` only: the sibling hashes from the claimant's leaf to the root.
 	std::vector<nano::uint256_union> proof;
+
+	// `swap_offer` only: what the offerer wants back for the asset the fixed
+	// header locks. The offered side reuses `asset_id` and `amount`, and the
+	// optional counterparty reuses `link`, so the wanted side is the only part
+	// of an offer with nowhere in the header to live (decisions-m5.md §2).
+	nano::uint256_union want_asset{ 0 };
+	nano::amount want_amount{ 0 };
+	/**
+	 * Advisory wall-clock seconds, and never consensus-enforced (SPEC §9.3).
+	 * A block-lattice has no clock, so this cannot bind anything; it lets
+	 * clients hide stale listings and lets the SDK auto-cancel the player's
+	 * own. Zero means the offer states no expiry at all.
+	 */
+	uint64_t expires_at{ 0 };
 
 	// Bounds, enforced here so a block that cannot be stored cannot be parsed
 	// either. The ledger repeats the ones that carry a user-facing message.
@@ -253,6 +274,11 @@ public:
 	virtual nano::root const & root () const = 0;
 	// Qualified root value based on previous() and root()
 	virtual nano::qualified_root qualified_root () const;
+	// Consensus-conflict identity. These are the chain root/qualified root for
+	// ordinary blocks. Swap consumers override them with a domain-separated
+	// hash of the offer so different account chains share one ORV election.
+	virtual nano::root election_root () const;
+	virtual nano::qualified_root election_qualified_root () const;
 	// Link field for state blocks, zero otherwise.
 	virtual nano::link const & link () const;
 	virtual nano::account const & representative () const;
@@ -588,6 +614,8 @@ public:
 	nano::block_hash const & previous () const override;
 	nano::account const & account () const override;
 	nano::root const & root () const override;
+	nano::root election_root () const override;
+	nano::qualified_root election_qualified_root () const override;
 	nano::link const & link () const override;
 	nano::account const & representative () const override;
 	nano::amount const & balance () const override;

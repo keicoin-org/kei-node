@@ -141,6 +141,16 @@ public:
 		convert_buffer_to_value ();
 	}
 
+	db_val (nano::asset_lock_info const & val_a) :
+		buffer (std::make_shared<std::vector<uint8_t>> ())
+	{
+		{
+			nano::vectorstream stream (*buffer);
+			val_a.serialize (stream);
+		}
+		convert_buffer_to_value ();
+	}
+
 	db_val (nano::confirmation_height_info const & val_a) :
 		buffer (std::make_shared<std::vector<uint8_t>> ())
 	{
@@ -267,6 +277,16 @@ public:
 	{
 		nano::bufferstream stream (reinterpret_cast<uint8_t const *> (data ()), size ());
 		nano::asset_commit_info result;
+		bool error (result.deserialize (stream));
+		(void)error;
+		debug_assert (!error);
+		return result;
+	}
+
+	explicit operator nano::asset_lock_info () const
+	{
+		nano::bufferstream stream (reinterpret_cast<uint8_t const *> (data ()), size ());
+		nano::asset_lock_info result;
 		bool error (result.deserialize (stream));
 		(void)error;
 		debug_assert (!error);
@@ -601,6 +621,8 @@ enum class tables
 	peers,
 	pending,
 	pruned,
+	swap_locks,
+	swap_offers,
 	vote
 };
 
@@ -812,6 +834,36 @@ public:
 	virtual nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_begin (nano::transaction const &, nano::asset_key const &) const = 0;
 	virtual nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_begin (nano::transaction const &) const = 0;
 	virtual nano::store_iterator<nano::asset_key, nano::block_hash> claim_roots_end () const = 0;
+
+	/**
+	 * The swap locks, keyed by the `swap_offer` block that created them
+	 * (SPEC §9.2, decisions-m5.md §6).
+	 *
+	 * This is the only table validation consults for a swap, and it is what
+	 * makes accept and cancel mutually exclusive without either party knowing
+	 * about the other: whichever block this node applies first leaves the entry
+	 * settled or deletes it, and the second one finds nothing to consume.
+	 */
+	virtual void lock_put (nano::write_transaction const &, nano::block_hash const & offer, nano::asset_lock_info const &) = 0;
+	virtual bool lock_get (nano::transaction const &, nano::block_hash const & offer, nano::asset_lock_info &) = 0;
+	virtual void lock_del (nano::write_transaction const &, nano::block_hash const & offer) = 0;
+	virtual bool lock_exists (nano::transaction const &, nano::block_hash const & offer) = 0;
+	virtual nano::store_iterator<nano::block_hash, nano::asset_lock_info> locks_begin (nano::transaction const &, nano::block_hash const & offer) const = 0;
+	virtual nano::store_iterator<nano::block_hash, nano::asset_lock_info> locks_begin (nano::transaction const &) const = 0;
+	virtual nano::store_iterator<nano::block_hash, nano::asset_lock_info> locks_end () const = 0;
+
+	/**
+	 * The open-offer index, keyed (offered asset, offer hash), which is the
+	 * market's read model and nothing else (SPEC §9.3). It carries only offers
+	 * that are still open, so an entry disappearing is what "this listing is
+	 * gone" means; the value is the offerer, so a market view can filter by
+	 * seller without a second read per row.
+	 */
+	virtual void offer_put (nano::write_transaction const &, nano::uint256_union const & asset_id, nano::block_hash const & offer, nano::account const &) = 0;
+	virtual void offer_del (nano::write_transaction const &, nano::uint256_union const & asset_id, nano::block_hash const & offer) = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::account> offers_begin (nano::transaction const &, nano::asset_key const &) const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::account> offers_begin (nano::transaction const &) const = 0;
+	virtual nano::store_iterator<nano::asset_key, nano::account> offers_end () const = 0;
 };
 
 /**

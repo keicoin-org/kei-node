@@ -380,7 +380,7 @@ nano::election_insertion_result nano::active_transactions::insert_impl (nano::un
 	nano::election_insertion_result result;
 	if (!stopped)
 	{
-		auto root (block_a->qualified_root ());
+		auto root (block_a->election_qualified_root ());
 		auto existing (roots.get<tag_root> ().find (root));
 		if (existing == roots.get<tag_root> ().end ())
 		{
@@ -503,7 +503,7 @@ bool nano::active_transactions::active (nano::qualified_root const & root_a) con
 bool nano::active_transactions::active (nano::block const & block_a) const
 {
 	nano::lock_guard<nano::mutex> guard{ mutex };
-	return roots.get<tag_root> ().find (block_a.qualified_root ()) != roots.get<tag_root> ().end () && blocks.find (block_a.hash ()) != blocks.end ();
+	return roots.get<tag_root> ().find (block_a.election_qualified_root ()) != roots.get<tag_root> ().end () && blocks.find (block_a.hash ()) != blocks.end ();
 }
 
 bool nano::active_transactions::active (const nano::block_hash & hash) const
@@ -540,7 +540,7 @@ std::shared_ptr<nano::block> nano::active_transactions::winner (nano::block_hash
 
 void nano::active_transactions::erase (nano::block const & block_a)
 {
-	erase (block_a.qualified_root ());
+	erase (block_a.election_qualified_root ());
 }
 
 void nano::active_transactions::erase (nano::qualified_root const & root_a)
@@ -585,11 +585,15 @@ std::size_t nano::active_transactions::size () const
 bool nano::active_transactions::publish (std::shared_ptr<nano::block> const & block_a)
 {
 	nano::unique_lock<nano::mutex> lock{ mutex };
-	auto existing (roots.get<tag_root> ().find (block_a->qualified_root ()));
-	auto result (true);
+	auto existing (roots.get<tag_root> ().find (block_a->election_qualified_root ()));
+	std::shared_ptr<nano::election> election;
 	if (existing != roots.get<tag_root> ().end ())
 	{
-		auto election (existing->election);
+		election = existing->election;
+	}
+	auto result (true);
+	if (election)
+	{
 		lock.unlock ();
 		result = election->publish (block_a);
 		if (!result)

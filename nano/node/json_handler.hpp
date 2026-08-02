@@ -42,6 +42,14 @@ public:
 	/** docs/rpc.md's frozen names. `asset_commit`/`asset_claims` alias these. */
 	void commit_info ();
 	void claim_status ();
+	/** The market's read model: a scan of open `swap_offer`s for one asset (SPEC §9.3). */
+	void asset_offers ();
+	/** One offer's full lock record, open or settled (SPEC §9.2). */
+	void asset_offer ();
+	/** One `swap_offer`, in the shape `@keicoin/core`'s `SwapOffer` expects, whatever its state. */
+	void swap_info ();
+	/** One account's own `swap_offer`s, across every state, from its own chain (SPEC §9.1). */
+	void account_swaps ();
 	/** The one-account, Kei-and-assets shape of `accounts_receivable`. */
 	void kei_receivables ();
 	void work_thresholds ();

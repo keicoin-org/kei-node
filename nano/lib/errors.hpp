@@ -118,6 +118,7 @@ enum class error_rpc
 	invalid_root,
 	invalid_shape,
 	invalid_shape_account_filter,
+	invalid_swap_state,
 	invalid_sources,
 	invalid_subtype,
 	invalid_subtype_balance,
@@ -167,6 +168,12 @@ enum class error_process
 	commit_closed,
 	already_claimed,
 	bad_claim_proof,
+	no_such_offer,
+	offer_consumed,
+	not_offerer,
+	swap_terms_mismatch,
+	swap_not_counterparty,
+	self_swap,
 	other
 };
 

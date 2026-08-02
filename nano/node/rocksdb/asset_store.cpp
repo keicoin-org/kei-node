@@ -307,3 +307,79 @@ nano::store_iterator<nano::asset_key, nano::block_hash> nano::rocksdb::asset_sto
 {
 	return nano::store_iterator<nano::asset_key, nano::block_hash> (nullptr);
 }
+
+void nano::rocksdb::asset_store::lock_put (nano::write_transaction const & transaction, nano::block_hash const & offer, nano::asset_lock_info const & info)
+{
+	auto status = store.put (transaction, tables::swap_locks, offer, info);
+	store.release_assert_success (status);
+}
+
+bool nano::rocksdb::asset_store::lock_get (nano::transaction const & transaction, nano::block_hash const & offer, nano::asset_lock_info & info_a)
+{
+	nano::rocksdb_val value;
+	auto status = store.get (transaction, tables::swap_locks, offer, value);
+	release_assert (store.success (status) || store.not_found (status));
+	bool result (true);
+	if (store.success (status))
+	{
+		nano::bufferstream stream (reinterpret_cast<uint8_t const *> (value.data ()), value.size ());
+		result = info_a.deserialize (stream);
+	}
+	return result;
+}
+
+void nano::rocksdb::asset_store::lock_del (nano::write_transaction const & transaction, nano::block_hash const & offer)
+{
+	auto status = store.del (transaction, tables::swap_locks, offer);
+	store.release_assert_success (status);
+}
+
+bool nano::rocksdb::asset_store::lock_exists (nano::transaction const & transaction, nano::block_hash const & offer)
+{
+	nano::rocksdb_val junk;
+	auto status = store.get (transaction, tables::swap_locks, offer, junk);
+	release_assert (store.success (status) || store.not_found (status));
+	return store.success (status);
+}
+
+nano::store_iterator<nano::block_hash, nano::asset_lock_info> nano::rocksdb::asset_store::locks_begin (nano::transaction const & transaction, nano::block_hash const & offer) const
+{
+	return store.template make_iterator<nano::block_hash, nano::asset_lock_info> (transaction, tables::swap_locks, offer);
+}
+
+nano::store_iterator<nano::block_hash, nano::asset_lock_info> nano::rocksdb::asset_store::locks_begin (nano::transaction const & transaction) const
+{
+	return store.template make_iterator<nano::block_hash, nano::asset_lock_info> (transaction, tables::swap_locks);
+}
+
+nano::store_iterator<nano::block_hash, nano::asset_lock_info> nano::rocksdb::asset_store::locks_end () const
+{
+	return nano::store_iterator<nano::block_hash, nano::asset_lock_info> (nullptr);
+}
+
+void nano::rocksdb::asset_store::offer_put (nano::write_transaction const & transaction, nano::uint256_union const & asset_id, nano::block_hash const & offer, nano::account const & offerer)
+{
+	auto status = store.put (transaction, tables::swap_offers, nano::offer_key (asset_id, offer), offerer);
+	store.release_assert_success (status);
+}
+
+void nano::rocksdb::asset_store::offer_del (nano::write_transaction const & transaction, nano::uint256_union const & asset_id, nano::block_hash const & offer)
+{
+	auto status = store.del (transaction, tables::swap_offers, nano::offer_key (asset_id, offer));
+	store.release_assert_success (status);
+}
+
+nano::store_iterator<nano::asset_key, nano::account> nano::rocksdb::asset_store::offers_begin (nano::transaction const & transaction, nano::asset_key const & key) const
+{
+	return store.template make_iterator<nano::asset_key, nano::account> (transaction, tables::swap_offers, key);
+}
+
+nano::store_iterator<nano::asset_key, nano::account> nano::rocksdb::asset_store::offers_begin (nano::transaction const & transaction) const
+{
+	return store.template make_iterator<nano::asset_key, nano::account> (transaction, tables::swap_offers);
+}
+
+nano::store_iterator<nano::asset_key, nano::account> nano::rocksdb::asset_store::offers_end () const
+{
+	return nano::store_iterator<nano::asset_key, nano::account> (nullptr);
+}

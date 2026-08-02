@@ -14,6 +14,76 @@
 
 namespace
 {
+/** The three ops whose Kei balance rule depends on which asset the offer locked. */
+bool swap_leg (nano::asset_op op_a)
+{
+	return op_a == nano::asset_op::swap_offer || op_a == nano::asset_op::swap_accept || op_a == nano::asset_op::swap_cancel;
+}
+
+/**
+ * Whether one leg of a swap may move `asset_a` from `from_a` to `to_a`.
+ *
+ * A swap leg is a transfer with a second leg attached, so it answers to the
+ * same immutable policy (SPEC §5.4) — the SDK does not get to trade its way
+ * around a soulbound item. Either party may be the zero account, which is what
+ * an offer with no named counterparty looks like before anyone accepts it:
+ * `issuer_only` then passes only when the *known* side is the issuer, so an
+ * offer nobody could legally accept is refused at the offer rather than left
+ * open forever.
+ */
+nano::process_result swap_leg_permitted (nano::asset_info const & asset_a, nano::account const & from_a, nano::account const & to_a)
+{
+	switch (asset_a.transfer)
+	{
+		case nano::transfer_policy::open:
+			return nano::process_result::progress;
+		case nano::transfer_policy::issuer_only:
+			return (from_a == asset_a.issuer || to_a == asset_a.issuer) ? nano::process_result::progress : nano::process_result::transfer_not_permitted;
+		case nano::transfer_policy::none:
+			// Soulbound: it can only be burned, so it cannot be sold either.
+			return nano::process_result::transfer_not_permitted;
+	}
+	return nano::process_result::transfer_not_permitted;
+}
+
+/**
+ * Rebuild a lock record from the `swap_offer` block that created it.
+ *
+ * Every field of the lock is a field of the offer, so the record is derived
+ * rather than journalled — which is what lets a `swap_cancel` delete it outright
+ * and a rollback put back exactly what was there.
+ */
+nano::asset_lock_info lock_from_offer (nano::asset_block const & offer_a)
+{
+	nano::asset_lock_info lock;
+	lock.offerer = offer_a.hashables.account;
+	lock.asset_id = offer_a.hashables.asset_id;
+	lock.amount = offer_a.hashables.amount;
+	lock.want_asset = offer_a.hashables.payload.want_asset;
+	lock.want_amount = offer_a.hashables.payload.want_amount;
+	lock.counterparty = offer_a.hashables.link.as_account ();
+	lock.expires_at = offer_a.hashables.payload.expires_at;
+	return lock;
+}
+
+/**
+ * One receivable a block creates, before it is known whether the block is valid.
+ *
+ * A `swap_accept` creates two of these — one per leg, on two different chains —
+ * which is why this is a list where every op before M5 needed a single optional
+ * (SPEC §9.2). Kei arrivals go to the inherited `pending` table and asset
+ * arrivals to `asset_pending`, told apart by the zero asset id rather than by a
+ * flag on a shared record (decisions-m5.md §3).
+ */
+struct staged_arrival final
+{
+	nano::account to;
+	nano::uint256_union asset_id;
+	nano::amount amount;
+	nano::account source;
+	std::string memo;
+};
+
 /**
  * Roll back the visited block
  */
@@ -308,6 +378,95 @@ public:
 				ledger.store.asset.claim_del (transaction, block_a.hashables.account, root);
 				break;
 			}
+			case nano::asset_op::swap_offer:
+			{
+				nano::asset_lock_info lock;
+				auto exists (!ledger.store.asset.lock_get (transaction, hash, lock));
+				// Settled by an accept on the counterparty's chain, which nothing
+				// orders against this one — every block that chain grew since the
+				// accept has to come off first, the same reason
+				// `take_back_receivable` loops instead of rolling back one block.
+				// The lock is re-read each pass because the accept's own rollback
+				// (below) is what flips `open ()` back to true; nothing else
+				// touches this record from over there.
+				while (!error && exists && !lock.open ())
+				{
+					auto const settler (ledger.account (transaction, lock.settled_by));
+					error = ledger.rollback (transaction, ledger.latest (transaction, settler), list);
+					exists = !error && !ledger.store.asset.lock_get (transaction, hash, lock);
+				}
+				if (!error && exists)
+				{
+					ledger.store.asset.lock_del (transaction, hash);
+				}
+				// If the lock is already gone, a `swap_cancel` deleted it — and
+				// that block sits later on this same chain, so ordinary
+				// tip-first rollback has already undone it and put the lock
+				// back before reaching this block.
+				if (!error)
+				{
+					ledger.store.asset.offer_del (transaction, asset_id, hash);
+					if (!asset_id.is_zero ())
+					{
+						restore (block_a.hashables.account, asset_id, amount);
+					}
+				}
+				break;
+			}
+			case nano::asset_op::swap_accept:
+			{
+				auto const offer_hash (block_a.hashables.link.as_block_hash ());
+				nano::asset_lock_info lock;
+				auto const missing (ledger.store.asset.lock_get (transaction, offer_hash, lock));
+				release_assert (!missing);
+				// Both arrivals this block created might already be collected,
+				// on either side — each a different chain than this one.
+				take_back_arrival (lock.offerer, lock.want_asset, hash);
+				if (!error)
+				{
+					take_back_arrival (block_a.hashables.account, lock.asset_id, hash);
+				}
+				if (!error)
+				{
+					if (!asset_id.is_zero ())
+					{
+						restore (block_a.hashables.account, asset_id, amount);
+					}
+					lock.settled_by.clear ();
+					ledger.store.asset.lock_put (transaction, offer_hash, lock);
+					ledger.store.asset.offer_put (transaction, lock.asset_id, offer_hash, lock.offerer);
+				}
+				break;
+			}
+			case nano::asset_op::swap_cancel:
+			{
+				auto const offer_hash (block_a.hashables.link.as_block_hash ());
+				auto const offer_block (ledger.store.block.get (transaction, offer_hash));
+				release_assert (offer_block != nullptr);
+				auto const offer_asset (dynamic_cast<nano::asset_block const *> (offer_block.get ()));
+				release_assert (offer_asset != nullptr);
+				auto const lock (lock_from_offer (*offer_asset));
+				ledger.store.asset.lock_put (transaction, offer_hash, lock);
+				ledger.store.asset.offer_put (transaction, lock.asset_id, offer_hash, lock.offerer);
+				if (!lock.asset_id.is_zero ())
+				{
+					auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, lock.asset_id).number ());
+					auto const locked (lock.amount.number ());
+					debug_assert (held >= locked);
+					if (held == locked)
+					{
+						ledger.store.asset.balance_del (transaction, block_a.hashables.account, lock.asset_id);
+					}
+					else
+					{
+						ledger.store.asset.balance_put (transaction, block_a.hashables.account, lock.asset_id, nano::amount (held - locked));
+					}
+				}
+				// Kei restores itself: the generic balance rewrite below puts
+				// `block_a.hashables.previous`'s balance back, and that is where
+				// a cancelled Kei-denominated lock's amount already was.
+				break;
+			}
 		}
 		ledger.stats.inc (nano::stat::type::rollback, nano::stat::detail::asset_block);
 
@@ -372,6 +531,42 @@ public:
 		if (!error)
 		{
 			ledger.store.asset.pending_del (transaction, key);
+		}
+	}
+
+	/**
+	 * Withdraw one leg of a `swap_accept`'s pair of arrivals.
+	 *
+	 * The recipient may already have collected it, same as
+	 * `take_back_receivable` — and unlike a mint or a transfer, a swap leg can
+	 * be Kei itself (SPEC §9.2), which lives in a different table than an
+	 * asset receivable, told apart the same way the apply side tells them
+	 * apart: by the zero asset id.
+	 */
+	void take_back_arrival (nano::account const & to_a, nano::uint256_union const & asset_id_a, nano::block_hash const & hash_a)
+	{
+		nano::pending_key const key (to_a, hash_a);
+		if (asset_id_a.is_zero ())
+		{
+			while (!error && !ledger.store.pending.exists (transaction, key))
+			{
+				error = ledger.rollback (transaction, ledger.latest (transaction, to_a), list);
+			}
+			if (!error)
+			{
+				ledger.store.pending.del (transaction, key);
+			}
+		}
+		else
+		{
+			while (!error && !ledger.store.asset.pending_exists (transaction, key))
+			{
+				error = ledger.rollback (transaction, ledger.latest (transaction, to_a), list);
+			}
+			if (!error)
+			{
+				ledger.store.asset.pending_del (transaction, key);
+			}
 		}
 	}
 
@@ -757,8 +952,9 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			result.code = nano::process_result::reserve_representative;
 			return;
 		}
-		if (block_a.hashables.op == nano::asset_op::issue)
+		switch (block_a.hashables.op)
 		{
+			case nano::asset_op::issue:
 			// Issuance destroys Kei (§12). From a reserve account that is
 			// a supply change with no vote behind it, which SPEC §5.7 does not
 			// permit — so the reserve cannot issue.
@@ -768,8 +964,19 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			// burn its way through the reserve one issuance at a time. It costs
 			// nothing today because the reserve set is empty until the genesis
 			// ceremony (§16), and the mock should adopt it.
-			result.code = nano::process_result::reserve_locked;
-			return;
+			case nano::asset_op::swap_offer:
+			case nano::asset_op::swap_accept:
+			case nano::asset_op::swap_cancel:
+				// And the reserve does not trade. An offer of reserve Kei is a
+				// send with an extra step, and an accept pays for something —
+				// both move reserve Kei without the vote SPEC §5.7 requires.
+				// `swap_cancel` only ever undoes an offer that could not have
+				// been made, so refusing all three keeps the rule one line
+				// instead of a case analysis that has to stay true.
+				result.code = nano::process_result::reserve_locked;
+				return;
+			default:
+				break;
 		}
 	}
 
@@ -797,11 +1004,16 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			return;
 		}
 	}
-	else if (new_balance != previous_balance)
+	else if (!swap_leg (block_a.hashables.op) && new_balance != previous_balance)
 	{
 		// §5.6.1's concession to §5.6.8: a Banano-derived explorer that ignores
 		// the asset payload still tracks Kei correctly instead of reporting a
 		// broken balance.
+		//
+		// The swap legs are excluded because their answer depends on which
+		// asset the offer locked, and that is only known once the lock has been
+		// read. Each of them checks the balance itself, and none of them
+		// reaches an apply without having done so (decisions-m5.md §3).
 		result.code = nano::process_result::asset_balance_mismatch;
 		return;
 	}
@@ -814,15 +1026,34 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 	// The rooted ops put the root where every other op puts a destination or a
 	// source, which is what lets them reuse the fixed header unchanged
 	// (decisions-m4.md §2).
-	nano::uint256_union const root (block_a.hashables.link.as_block_hash ());
+	nano::block_hash const root (block_a.hashables.link.as_block_hash ());
 	bool asset_dirty (false);
-	boost::optional<nano::asset_pending_info> receivable;
-	nano::account receivable_to{};
+	std::vector<staged_arrival> arrivals;
 	boost::optional<nano::amount> credit;
 	boost::optional<nano::amount> debit;
 	bool collect_receivable (false);
 	boost::optional<nano::asset_commit_info> commit;
 	bool claimed (false);
+	// The swap staging. `swap_lock_key` is the `swap_offer` block's hash for all
+	// three legs — the offer's own hash when it creates the lock, and the hash
+	// it references when a later block consumes one.
+	boost::optional<nano::asset_lock_info> swap_lock;
+	nano::block_hash swap_lock_key{ 0 };
+	bool swap_lock_delete (false);
+	bool swap_offer_list (false);
+	bool swap_offer_unlist (false);
+	nano::uint256_union swap_offer_asset{ 0 };
+
+	// Told apart only on the failure path, and only because SPEC §9.2 asks for
+	// a lost accept/cancel race to read as retryable rather than as a fault. A
+	// hash that never named an offer is a different mistake from one whose lock
+	// somebody else consumed first.
+	auto const lock_unavailable = [this] (nano::block_hash const & offer_a) {
+		auto const offer_block (ledger.store.block.get (transaction, offer_a));
+		auto const offer_asset (dynamic_cast<nano::asset_block const *> (offer_block.get ()));
+		auto const was_an_offer (offer_asset != nullptr && offer_asset->hashables.op == nano::asset_op::swap_offer);
+		return was_an_offer ? nano::process_result::offer_consumed : nano::process_result::no_such_offer;
+	};
 
 	switch (block_a.hashables.op)
 	{
@@ -899,8 +1130,7 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			}
 			asset.circulating = circulating + amount;
 			asset_dirty = true;
-			receivable_to = block_a.hashables.link.as_account ();
-			receivable = nano::asset_pending_info (block_a.hashables.account, asset_id, amount, block_a.hashables.payload.memo);
+			arrivals.push_back ({ block_a.hashables.link.as_account (), asset_id, block_a.hashables.amount, block_a.hashables.account, block_a.hashables.payload.memo });
 			break;
 		}
 		case nano::asset_op::burn:
@@ -938,24 +1168,14 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 				result.code = nano::process_result::bad_asset_payload;
 				return;
 			}
-			receivable_to = block_a.hashables.link.as_account ();
+			auto const to (block_a.hashables.link.as_account ());
 			// The transfer policy is immutable and protocol-enforced; the SDK
 			// does not get to ask for an exception (SPEC §5.4).
-			switch (asset.transfer)
+			auto const permitted (swap_leg_permitted (asset, block_a.hashables.account, to));
+			if (permitted != nano::process_result::progress)
 			{
-				case nano::transfer_policy::open:
-					break;
-				case nano::transfer_policy::issuer_only:
-					if (block_a.hashables.account != asset.issuer && receivable_to != asset.issuer)
-					{
-						result.code = nano::process_result::transfer_not_permitted;
-						return;
-					}
-					break;
-				case nano::transfer_policy::none:
-					// Soulbound: it can only be burned.
-					result.code = nano::process_result::transfer_not_permitted;
-					return;
+				result.code = permitted;
+				return;
 			}
 			auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
 			if (held < amount)
@@ -964,7 +1184,7 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 				return;
 			}
 			debit = nano::amount (held - amount);
-			receivable = nano::asset_pending_info (block_a.hashables.account, asset_id, amount, block_a.hashables.payload.memo);
+			arrivals.push_back ({ to, asset_id, block_a.hashables.amount, block_a.hashables.account, block_a.hashables.payload.memo });
 			break;
 		}
 		case nano::asset_op::asset_receive:
@@ -1135,6 +1355,207 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 			claimed = true;
 			break;
 		}
+		case nano::asset_op::swap_offer:
+		{
+			// A signed to sell `amount` of `asset_id` for the payload's
+			// `want_amount` of `want_asset`, to `link` if named or to anyone if
+			// not (SPEC §9.2, §9.3). `want_amount == 0` is already refused by
+			// `asset_payload::deserialize`, but a block built straight from JSON
+			// never goes through that path, so it is checked again here.
+			if (amount == 0 || block_a.hashables.payload.want_amount.is_zero ())
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			auto const counterparty (block_a.hashables.link.as_account ());
+			// An offer naming its own author could never be accepted — the
+			// self-accept check below refuses exactly that account — so it is
+			// refused here instead of left to lock an asset forever for nothing.
+			if (!counterparty.is_zero () && counterparty == block_a.hashables.account)
+			{
+				result.code = nano::process_result::self_swap;
+				return;
+			}
+			if (asset_id.is_zero ())
+			{
+				// Locking Kei itself: the fixed header's own balance field is the
+				// lock, exactly as a send's would be.
+				if (previous_balance < amount || new_balance != previous_balance - amount)
+				{
+					result.code = nano::process_result::asset_balance_mismatch;
+					return;
+				}
+			}
+			else
+			{
+				if (ledger.store.asset.get (transaction, asset_id, asset))
+				{
+					result.code = nano::process_result::no_such_asset;
+					return;
+				}
+				auto const permitted (swap_leg_permitted (asset, block_a.hashables.account, counterparty));
+				if (permitted != nano::process_result::progress)
+				{
+					result.code = permitted;
+					return;
+				}
+				auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
+				if (held < amount)
+				{
+					result.code = nano::process_result::insufficient_asset_balance;
+					return;
+				}
+				// Locking an asset moves none of the account's Kei — the fixed
+				// header's balance field must restate the previous one exactly,
+				// the same invariant `swap_accept`/`swap_cancel` enforce on their
+				// own asset branches. Without this, the block never runs the
+				// Kei-branch check above either, so nothing here would stop the
+				// header from claiming any balance the offerer wants.
+				if (new_balance != previous_balance)
+				{
+					result.code = nano::process_result::asset_balance_mismatch;
+					return;
+				}
+				debit = nano::amount (held - amount);
+			}
+			// Keyed by this block's own hash, not `root` — `link` here holds an
+			// optional counterparty account, not a reference to an earlier block.
+			swap_lock_key = hash;
+			swap_lock = lock_from_offer (block_a);
+			swap_offer_list = true;
+			swap_offer_asset = asset_id;
+			break;
+		}
+		case nano::asset_op::swap_accept:
+		{
+			swap_lock_key = root;
+			nano::asset_lock_info lock;
+			if (ledger.store.asset.lock_get (transaction, swap_lock_key, lock) || !lock.open ())
+			{
+				result.code = lock_unavailable (swap_lock_key);
+				return;
+			}
+			// Self-accept would settle the lock for no reason and leave two
+			// permanent receivable records nobody but the offerer ever reads —
+			// the ledger-growth cost §5.5 asks every op to justify, spent on
+			// nothing (SPEC §9.2 speaks throughout of "the accepter (B)" as a
+			// second party).
+			if (lock.offerer == block_a.hashables.account || (!lock.counterparty.is_zero () && lock.counterparty != block_a.hashables.account))
+			{
+				result.code = nano::process_result::swap_not_counterparty;
+				return;
+			}
+			// B restates what it is paying. Without this, B would sign a block
+			// whose cost is written on somebody else's chain, and a lock the
+			// offerer could not have changed (the lock is derived once, from the
+			// offer, and is immutable) still deserves an explicit restatement
+			// rather than a blind trust of whatever this hash currently means.
+			if (asset_id != lock.want_asset || amount != lock.want_amount.number ())
+			{
+				result.code = nano::process_result::swap_terms_mismatch;
+				return;
+			}
+			if (asset_id.is_zero ())
+			{
+				if (previous_balance < amount || new_balance != previous_balance - amount)
+				{
+					result.code = nano::process_result::asset_balance_mismatch;
+					return;
+				}
+			}
+			else
+			{
+				if (ledger.store.asset.get (transaction, asset_id, asset))
+				{
+					result.code = nano::process_result::no_such_asset;
+					return;
+				}
+				// Only the side B is paying is checked against policy here. The
+				// side A locked was already checked at offer time against this
+				// same counterparty — named explicitly, or, if the offer was
+				// open, permitted for any counterparty precisely because A was
+				// the issuer of an `issuer_only` asset (the one open-offer case
+				// `swap_leg_permitted` allows) — and transfer policy cannot
+				// change after issuance (SPEC §5.4), so re-checking it here
+				// would only ever repeat the same answer.
+				auto const permitted (swap_leg_permitted (asset, block_a.hashables.account, lock.offerer));
+				if (permitted != nano::process_result::progress)
+				{
+					result.code = permitted;
+					return;
+				}
+				auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
+				if (held < amount)
+				{
+					result.code = nano::process_result::insufficient_asset_balance;
+					return;
+				}
+				if (new_balance != previous_balance)
+				{
+					result.code = nano::process_result::asset_balance_mismatch;
+					return;
+				}
+				debit = nano::amount (held - amount);
+			}
+			// Both legs settle in the one block that consumes the lock (SPEC
+			// §9.2): A receives what B paid, B receives what A locked.
+			arrivals.push_back ({ lock.offerer, lock.want_asset, lock.want_amount, block_a.hashables.account, std::string () });
+			arrivals.push_back ({ block_a.hashables.account, lock.asset_id, lock.amount, lock.offerer, std::string () });
+			// The lock record stays — it sits on the *accepter's* chain, and
+			// nothing orders that against the offerer's, so unlike a cancel
+			// there is no chain to roll back to make it disappear. It is kept
+			// and marked settled, the same reason `asset_claim_roots` keeps a
+			// claim rather than deleting it (decisions-m4.md §4).
+			lock.settled_by = hash;
+			swap_lock = lock;
+			swap_offer_unlist = true;
+			swap_offer_asset = lock.asset_id;
+			break;
+		}
+		case nano::asset_op::swap_cancel:
+		{
+			swap_lock_key = root;
+			nano::asset_lock_info lock;
+			if (ledger.store.asset.lock_get (transaction, swap_lock_key, lock) || !lock.open ())
+			{
+				result.code = lock_unavailable (swap_lock_key);
+				return;
+			}
+			if (lock.offerer != block_a.hashables.account)
+			{
+				result.code = nano::process_result::not_offerer;
+				return;
+			}
+			if (lock.asset_id.is_zero ())
+			{
+				if (new_balance != previous_balance + lock.amount.number ())
+				{
+					result.code = nano::process_result::asset_balance_mismatch;
+					return;
+				}
+			}
+			else
+			{
+				if (new_balance != previous_balance)
+				{
+					result.code = nano::process_result::asset_balance_mismatch;
+					return;
+				}
+				auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, lock.asset_id).number ());
+				credit = nano::amount (held + lock.amount.number ());
+			}
+			// The credit above and the `asset_dirty`-free write below both key
+			// off `asset_id`, which for a cancel block is always zero on the
+			// wire (there is nothing left for the block itself to say — the
+			// offer already said it). What was actually locked comes from the
+			// lock record, not the block, so it is substituted in here exactly
+			// as `asset_receive` substitutes the source block's asset id.
+			asset_id = lock.asset_id;
+			swap_lock_delete = true;
+			swap_offer_unlist = true;
+			swap_offer_asset = lock.asset_id;
+			break;
+		}
 	}
 
 	ledger.stats.inc (nano::stat::type::ledger, nano::stat::detail::asset_block);
@@ -1182,9 +1603,21 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 	{
 		ledger.store.asset.balance_put (transaction, block_a.hashables.account, asset_id, *credit);
 	}
-	if (receivable)
+	for (auto const & arrival : arrivals)
 	{
-		ledger.store.asset.pending_put (transaction, nano::pending_key (receivable_to, hash), *receivable);
+		if (arrival.asset_id.is_zero ())
+		{
+			// The first time an asset-typed block ever moves Kei: a swap leg
+			// locking or paying in Kei itself (SPEC §9.2). It arrives exactly
+			// as a state-block send would, in the inherited `pending` table,
+			// rather than in `asset_pending` — told apart by the zero asset id
+			// (decisions-m5.md §3).
+			ledger.store.pending.put (transaction, nano::pending_key (arrival.to, hash), nano::pending_info (arrival.source, arrival.amount, info.epoch ()));
+		}
+		else
+		{
+			ledger.store.asset.pending_put (transaction, nano::pending_key (arrival.to, hash), nano::asset_pending_info (arrival.source, arrival.asset_id, arrival.amount, arrival.memo));
+		}
 	}
 	if (collect_receivable)
 	{
@@ -1199,6 +1632,25 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 	if (claimed)
 	{
 		ledger.store.asset.claim_put (transaction, block_a.hashables.account, root, hash);
+	}
+	if (swap_lock)
+	{
+		// Created by `swap_offer`, or the same record with `settled_by` filled
+		// in by `swap_accept` — either way the whole record is in the block,
+		// so there is nothing to journal (SPEC §9.2).
+		ledger.store.asset.lock_put (transaction, swap_lock_key, *swap_lock);
+	}
+	if (swap_lock_delete)
+	{
+		ledger.store.asset.lock_del (transaction, swap_lock_key);
+	}
+	if (swap_offer_list)
+	{
+		ledger.store.asset.offer_put (transaction, swap_offer_asset, swap_lock_key, block_a.hashables.account);
+	}
+	if (swap_offer_unlist)
+	{
+		ledger.store.asset.offer_del (transaction, swap_offer_asset, swap_lock_key);
 	}
 
 	nano::account_info new_info (hash, block_a.representative (), info.open_block.is_zero () ? hash : info.open_block, block_a.hashables.balance, nano::seconds_since_epoch (), info.block_count + 1, info.epoch ());
@@ -1809,6 +2261,90 @@ bool nano::ledger::rollback (nano::write_transaction const & transaction_a, nano
 	return rollback (transaction_a, block_a, rollback_list);
 }
 
+bool nano::ledger::rollback_swap_conflict (nano::write_transaction const & transaction_a, nano::block_hash const & offer_hash_a, nano::block_hash const & desired_hash_a, std::vector<std::shared_ptr<nano::block>> & list_a)
+{
+	auto const offer_block (store.block.get (transaction_a, offer_hash_a));
+	if (offer_block == nullptr)
+	{
+		// The offer itself is gone — nothing left to reconcile a consumer of.
+		return false;
+	}
+	auto const offer_asset (dynamic_cast<nano::asset_block const *> (offer_block.get ()));
+	release_assert (offer_asset != nullptr);
+	auto const offerer (offer_asset->hashables.account);
+	auto error (false);
+	while (!error)
+	{
+		nano::asset_lock_info lock;
+		auto const exists (!store.asset.lock_get (transaction_a, offer_hash_a, lock));
+		if (exists && lock.open ())
+		{
+			// Free. Either nothing has consumed it yet, or the rollback below
+			// already undid whichever block did.
+			break;
+		}
+		if (exists)
+		{
+			// Settled by a swap_accept, which sits on the accepter's chain —
+			// a different chain than the offer's, so nothing here orders it
+			// against this rollback except walking that chain down directly
+			// (decisions-m5.md §7).
+			if (lock.settled_by == desired_hash_a)
+			{
+				break;
+			}
+			auto const settler (account (transaction_a, lock.settled_by));
+			error = rollback (transaction_a, latest (transaction_a, settler), list_a);
+		}
+		else
+		{
+			// The lock record is gone, which only a swap_cancel does, and a
+			// cancel is always on the offerer's own chain (decisions-m5.md §7).
+			auto const offerer_head (latest (transaction_a, offerer));
+			if (offerer_head.is_zero () || offerer_head == desired_hash_a)
+			{
+				break;
+			}
+			error = rollback (transaction_a, offerer_head, list_a);
+		}
+	}
+	return error;
+}
+
+std::shared_ptr<nano::block> nano::ledger::swap_consumer (nano::transaction const & transaction_a, nano::block_hash const & offer_hash_a)
+{
+	nano::asset_lock_info lock;
+	if (!store.asset.lock_get (transaction_a, offer_hash_a, lock))
+	{
+		return lock.open () ? nullptr : store.block.get (transaction_a, lock.settled_by);
+	}
+
+	// Cancellation removes the lock record, so locate the cancel on the
+	// offerer's chain. It need not immediately follow the offer.
+	auto const offer = store.block.get (transaction_a, offer_hash_a);
+	auto const offer_asset = dynamic_cast<nano::asset_block const *> (offer.get ());
+	if (offer_asset == nullptr)
+	{
+		return nullptr;
+	}
+	auto hash = latest (transaction_a, offer_asset->hashables.account);
+	while (!hash.is_zero () && hash != offer_hash_a)
+	{
+		auto block = store.block.get (transaction_a, hash);
+		if (block == nullptr)
+		{
+			return nullptr;
+		}
+		auto const asset = dynamic_cast<nano::asset_block const *> (block.get ());
+		if (asset != nullptr && asset->hashables.op == nano::asset_op::swap_cancel && asset->hashables.link.as_block_hash () == offer_hash_a)
+		{
+			return block;
+		}
+		hash = block->previous ();
+	}
+	return nullptr;
+}
+
 nano::account nano::ledger::account (nano::transaction const & transaction_a, nano::block_hash const & hash_a) const
 {
 	return store.block.account (transaction_a, hash_a);
@@ -1989,7 +2525,14 @@ public:
 		// entry by. A claim that arrives before the root it proves against is
 		// rejected rather than held, and comes back on rebroadcast
 		// (decisions-m4.md §5).
-		if (block_a.hashables.op == nano::asset_op::asset_receive)
+		//
+		// A swap leg's `link` is the offer it consumes, on a different chain
+		// than this block. Waiting for the offer to confirm before scheduling
+		// an accept or a cancel for its own election narrows the window in
+		// which two nodes could each start an independent, unlinked election
+		// for a competing consumer before either one's active_transactions
+		// entry exists to be joined by the other (SPEC §9.2 point 4).
+		if (block_a.hashables.op == nano::asset_op::asset_receive || block_a.hashables.op == nano::asset_op::swap_accept || block_a.hashables.op == nano::asset_op::swap_cancel)
 		{
 			result[1] = block_a.hashables.link.as_block_hash ();
 		}

@@ -536,6 +536,11 @@ nano::asset_key nano::claim_root_key (nano::uint256_union const & root_a, nano::
 	return nano::asset_key (root_a, account_a);
 }
 
+nano::asset_key nano::offer_key (nano::uint256_union const & asset_id_a, nano::block_hash const & offer_a)
+{
+	return nano::asset_key (asset_id_a, offer_a);
+}
+
 namespace
 {
 void write_stored_string (nano::stream & stream_a, std::string const & value_a)
@@ -701,6 +706,49 @@ bool nano::asset_commit_info::deserialize (nano::stream & stream_a)
 bool nano::asset_commit_info::operator== (nano::asset_commit_info const & other_a) const
 {
 	return issuer == other_a.issuer && asset_id == other_a.asset_id && count == other_a.count && total == other_a.total && block == other_a.block && closed == other_a.closed;
+}
+
+void nano::asset_lock_info::serialize (nano::stream & stream_a) const
+{
+	nano::write (stream_a, offerer.bytes);
+	nano::write (stream_a, asset_id.bytes);
+	nano::write (stream_a, amount.bytes);
+	nano::write (stream_a, want_asset.bytes);
+	nano::write (stream_a, want_amount.bytes);
+	nano::write (stream_a, counterparty.bytes);
+	nano::write (stream_a, boost::endian::native_to_big (expires_at));
+	nano::write (stream_a, settled_by.bytes);
+}
+
+bool nano::asset_lock_info::deserialize (nano::stream & stream_a)
+{
+	try
+	{
+		nano::read (stream_a, offerer.bytes);
+		nano::read (stream_a, asset_id.bytes);
+		nano::read (stream_a, amount.bytes);
+		nano::read (stream_a, want_asset.bytes);
+		nano::read (stream_a, want_amount.bytes);
+		nano::read (stream_a, counterparty.bytes);
+		nano::read (stream_a, expires_at);
+		boost::endian::big_to_native_inplace (expires_at);
+		nano::read (stream_a, settled_by.bytes);
+		return !nano::at_end (stream_a);
+	}
+	catch (std::runtime_error const &)
+	{
+		return true;
+	}
+}
+
+bool nano::asset_lock_info::operator== (nano::asset_lock_info const & other_a) const
+{
+	return offerer == other_a.offerer && asset_id == other_a.asset_id && amount == other_a.amount && want_asset == other_a.want_asset && want_amount == other_a.want_amount && counterparty == other_a.counterparty && expires_at == other_a.expires_at && settled_by == other_a.settled_by;
+}
+
+bool nano::asset_lock_info::open () const
+{
+	return settled_by.is_zero ();
 }
 
 nano::unchecked_info::unchecked_info (std::shared_ptr<nano::block> const & block_a) :
@@ -1133,6 +1181,18 @@ nano::error_process nano::to_error_process (nano::process_result process_result)
 			return nano::error_process::already_claimed;
 		case process_result::bad_claim_proof:
 			return nano::error_process::bad_claim_proof;
+		case process_result::no_such_offer:
+			return nano::error_process::no_such_offer;
+		case process_result::offer_consumed:
+			return nano::error_process::offer_consumed;
+		case process_result::not_offerer:
+			return nano::error_process::not_offerer;
+		case process_result::swap_terms_mismatch:
+			return nano::error_process::swap_terms_mismatch;
+		case process_result::swap_not_counterparty:
+			return nano::error_process::swap_not_counterparty;
+		case process_result::self_swap:
+			return nano::error_process::self_swap;
 		case process_result::progress:
 		case process_result::bad_signature:
 		case process_result::old:
@@ -1218,6 +1278,18 @@ nano::stat::detail nano::to_stat_detail (nano::process_result process_result)
 			return nano::stat::detail::already_claimed;
 		case process_result::bad_claim_proof:
 			return nano::stat::detail::bad_claim_proof;
+		case process_result::no_such_offer:
+			return nano::stat::detail::no_such_offer;
+		case process_result::offer_consumed:
+			return nano::stat::detail::offer_consumed;
+		case process_result::not_offerer:
+			return nano::stat::detail::not_offerer;
+		case process_result::swap_terms_mismatch:
+			return nano::stat::detail::swap_terms_mismatch;
+		case process_result::swap_not_counterparty:
+			return nano::stat::detail::swap_not_counterparty;
+		case process_result::self_swap:
+			return nano::stat::detail::self_swap;
 	}
 	debug_assert (false && "There should be always a defined nano::stat::detail that is not _last");
 	return nano::stat::detail::_last;

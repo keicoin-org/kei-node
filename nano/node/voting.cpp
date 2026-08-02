@@ -190,8 +190,8 @@ void nano::vote_generator::process (nano::write_transaction const & transaction,
 	if (is_final)
 	{
 		auto block (ledger.store.block.get (transaction, hash_a));
-		should_vote = block != nullptr && ledger.dependents_confirmed (transaction, *block) && ledger.store.final_vote.put (transaction, block->qualified_root (), hash_a);
-		debug_assert (block == nullptr || root_a == block->root ());
+		should_vote = block != nullptr && ledger.dependents_confirmed (transaction, *block) && ledger.store.final_vote.put (transaction, block->election_qualified_root (), hash_a);
+		debug_assert (block == nullptr || root_a == block->election_root ());
 	}
 	else
 	{
@@ -258,7 +258,7 @@ std::size_t nano::vote_generator::generate (std::vector<std::shared_ptr<nano::bl
 			return this->ledger.dependents_confirmed (transaction, *block_a);
 		};
 		auto as_candidate = [] (auto const & block_a) {
-			return candidate_t{ block_a->root (), block_a->hash () };
+			return candidate_t{ block_a->election_root (), block_a->hash () };
 		};
 		nano::transform_if (blocks_a.begin (), blocks_a.end (), std::back_inserter (req_candidates), dependents_confirmed, as_candidate);
 	}

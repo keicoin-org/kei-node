@@ -1,8 +1,10 @@
 #include <nano/lib/work.hpp>
+#include <nano/node/election.hpp>
 #include <nano/secure/buffer.hpp>
 #include <nano/secure/ledger.hpp>
 #include <nano/secure/store.hpp>
 #include <nano/test_common/ledger.hpp>
+#include <nano/test_common/system.hpp>
 #include <nano/test_common/testutil.hpp>
 
 #include <gtest/gtest.h>
@@ -152,6 +154,38 @@ nano::asset_payload commit_payload (uint32_t count_a)
 	payload.count = count_a;
 	return payload;
 }
+
+/** A `swap_offer` payload: what the offerer wants back, and until when (§9.2, §9.3). */
+nano::asset_payload offer_payload (nano::uint256_union const & want_asset_a, nano::uint128_t const & want_amount_a, uint64_t expires_at_a = 0)
+{
+	nano::asset_payload payload;
+	payload.want_asset = want_asset_a;
+	payload.want_amount = nano::amount (want_amount_a);
+	payload.expires_at = expires_at_a;
+	return payload;
+}
+
+/** A mint the recipient has already collected, so they hold the asset outright. */
+struct funded final
+{
+	std::shared_ptr<nano::asset_block> mint;
+	std::shared_ptr<nano::asset_block> collect;
+};
+
+/**
+ * Mint `amount_a` of `asset_id_a` to `recipient_a` and have them collect it,
+ * off the team allocation's chain at `issuer_previous_a`. Every swap test needs
+ * at least one player who already holds something to offer.
+ */
+funded fund_player (nano::ledger & ledger_a, nano::write_transaction const & transaction_a, nano::work_pool & pool_a, nano::uint256_union const & asset_id_a, nano::block_hash const & issuer_previous_a, nano::keypair const & recipient_a, nano::uint128_t const & amount_a)
+{
+	funded result;
+	result.mint = signed_asset (pool_a, nano::dev::team_key, issuer_previous_a, nano::amount (after_issuing (1)), nano::asset_op::mint, asset_id_a, amount_a, recipient_a.pub);
+	EXPECT_EQ (nano::process_result::progress, ledger_a.process (transaction_a, *result.mint).code);
+	result.collect = signed_asset (pool_a, recipient_a, 0, 0, nano::asset_op::asset_receive, asset_id_a, 0, result.mint->hash ());
+	EXPECT_EQ (nano::process_result::progress, ledger_a.process (transaction_a, *result.collect).code);
+	return result;
+}
 }
 
 // Every op has to survive the record the block store writes — a type byte, the
@@ -224,7 +258,7 @@ TEST (asset_ledger, every_op_survives_the_record_the_store_writes)
 	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
 	nano::keypair key;
 
-	for (auto const op : { nano::asset_op::issue, nano::asset_op::mint, nano::asset_op::burn, nano::asset_op::transfer, nano::asset_op::asset_receive, nano::asset_op::commit, nano::asset_op::commit_close, nano::asset_op::claim })
+	for (auto const op : { nano::asset_op::issue, nano::asset_op::mint, nano::asset_op::burn, nano::asset_op::transfer, nano::asset_op::asset_receive, nano::asset_op::commit, nano::asset_op::commit_close, nano::asset_op::claim, nano::asset_op::swap_offer, nano::asset_op::swap_accept, nano::asset_op::swap_cancel })
 	{
 		SCOPED_TRACE (nano::asset_op_to_string (op));
 		nano::asset_payload payload;
@@ -239,6 +273,10 @@ TEST (asset_ledger, every_op_survives_the_record_the_store_writes)
 		else if (op == nano::asset_op::commit)
 		{
 			payload.count = 4096;
+		}
+		else if (op == nano::asset_op::swap_offer)
+		{
+			payload = offer_payload (nano::uint256_union (7), 300, 1234567890);
 		}
 		else if (op == nano::asset_op::claim)
 		{
@@ -1404,4 +1442,724 @@ TEST (asset_ledger, rolling_back_a_close_reopens_the_root)
 	ASSERT_FALSE (published.closed);
 	auto claim (signed_asset (pool, player, 0, 0, nano::asset_op::claim, issued.id, 500, tree.root (), claim_payload (tree.proof (0))));
 	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *claim).code);
+}
+
+// SPEC §5.6.4: all three swap legs sit at tier B, alongside `send` and
+// `transfer` — an offer nobody accepts still costs the offerer their own
+// asset until they cancel, so the spam it buys is self-funded.
+TEST (asset_ledger, swap_ops_are_priced_at_tier_b)
+{
+	for (auto const op : { nano::asset_op::swap_offer, nano::asset_op::swap_accept, nano::asset_op::swap_cancel })
+	{
+		SCOPED_TRACE (nano::asset_op_to_string (op));
+		ASSERT_EQ (nano::dev::network_params.work.tier_b (), nano::dev::network_params.work.threshold_asset (op));
+	}
+}
+
+// SPEC §9.2: the offer debits the offerer's own asset out of their spendable
+// balance and into a locked entry keyed by the offer's own hash, and lists it
+// for the market (SPEC §9.3) — nothing moves to anybody yet.
+TEST (asset_ledger, swap_offer_locks_the_asset_and_lists_it)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	// Open to anyone (no `to`), asking 50 raw Kei for 200 GEM.
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+
+	ASSERT_EQ (nano::amount (300), store.asset.balance (transaction, player.pub, issued.id));
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	ASSERT_TRUE (lock.open ());
+	ASSERT_EQ (player.pub, lock.offerer);
+	ASSERT_EQ (issued.id, lock.asset_id);
+	ASSERT_EQ (nano::amount (200), lock.amount);
+	ASSERT_TRUE (lock.want_asset.is_zero ());
+	ASSERT_EQ (nano::amount (50), lock.want_amount);
+	ASSERT_TRUE (lock.counterparty.is_zero ());
+
+	auto found (store.asset.offers_begin (transaction, nano::offer_key (issued.id, 0)));
+	ASSERT_NE (store.asset.offers_end (), found);
+	ASSERT_TRUE (nano::offer_key (issued.id, offer->hash ()) == found->first);
+	ASSERT_EQ (player.pub, found->second);
+}
+
+// Locking an asset moves none of the offerer's Kei, so the fixed header's
+// own balance field must restate the previous one exactly — the same
+// invariant `swap_accept`/`swap_cancel` already enforce on their own asset
+// branches. Without it, any account holding any asset could write whatever
+// it likes into this field and mint itself Kei.
+TEST (asset_ledger, swap_offer_locking_an_asset_cannot_forge_the_balance_field)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	// The player's chain has never received Kei — its balance is 0 — so any
+	// nonzero value here is a forgery, not a restatement.
+	auto forged (signed_asset (pool, player, held.collect->hash (), nano::amount (1'000'000), nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::asset_balance_mismatch, ledger.process (transaction, *forged).code);
+}
+
+// The first time an asset-typed block moves Kei itself: locking Kei is the
+// fixed header's own balance field, exactly like a send (SPEC §9.2).
+TEST (asset_ledger, an_offer_may_lock_kei_itself)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+
+	auto offer (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1) - 5), nano::asset_op::swap_offer, 0, 5, 0, offer_payload (issued.id, 100)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+
+	ASSERT_EQ (after_issuing (1) - 5, ledger.account_balance (transaction, nano::dev::team_key.pub));
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	ASSERT_TRUE (lock.asset_id.is_zero ());
+	ASSERT_EQ (nano::amount (5), lock.amount);
+	ASSERT_EQ (issued.id, lock.want_asset);
+}
+
+// SPEC §9.2: `swap_accept` debits the accepter and creates a receivable of
+// each side to the other, in the one block that settles both legs.
+TEST (asset_ledger, swap_accept_settles_both_legs_and_each_side_collects)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+
+	// The team allocation pays 50 raw Kei for the 200 GEM the offer locked.
+	auto accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	ASSERT_FALSE (lock.open ());
+	ASSERT_EQ (accept->hash (), lock.settled_by);
+	auto gone (store.asset.offers_begin (transaction, nano::offer_key (issued.id, 0)));
+	ASSERT_TRUE (gone == store.asset.offers_end () || !(nano::offer_key (issued.id, offer->hash ()) == gone->first));
+
+	// The player collects Kei exactly like any other receivable — a state
+	// block, because a swap leg denominated in Kei is Kei (SPEC §9.2).
+	nano::pending_info kei_pending;
+	ASSERT_FALSE (store.pending.get (transaction, nano::pending_key (player.pub, accept->hash ()), kei_pending));
+	ASSERT_EQ (nano::dev::team_key.pub, kei_pending.source);
+	ASSERT_EQ (nano::amount (50), kei_pending.amount);
+	// The player's chain is not new — `held.collect` already opened it, and
+	// `offer` is its current head — so this receive continues it rather than
+	// opening a fresh account.
+	nano::block_builder builder;
+	auto open (builder.state ()
+			   .make_block ()
+			   .account (player.pub)
+			   .previous (offer->hash ())
+			   .representative (player.pub)
+			   .balance (50)
+			   .link (accept->hash ())
+			   .sign (player.prv, player.pub)
+			   // Root is `previous` once the chain is non-empty, not the
+			   // account — work generated for the wrong root reads as
+			   // insufficient no matter how much of it there is.
+			   .work (*pool.generate (offer->hash ()))
+			   .build_shared ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *open).code);
+	ASSERT_EQ (nano::uint128_t (50), ledger.account_balance (transaction, player.pub));
+
+	// The team allocation collects the 200 GEM the same way any mint is
+	// collected — the asset side of the same block's other leg.
+	nano::asset_pending_info gem_pending;
+	ASSERT_FALSE (store.asset.pending_get (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ()), gem_pending));
+	ASSERT_EQ (player.pub, gem_pending.source);
+	ASSERT_EQ (issued.id, gem_pending.asset_id);
+	ASSERT_EQ (nano::amount (200), gem_pending.amount);
+	auto collect (signed_asset (pool, nano::dev::team_key, accept->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::asset_receive, issued.id, 0, accept->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *collect).code);
+	ASSERT_EQ (nano::amount (200), store.asset.balance (transaction, nano::dev::team_key.pub, issued.id));
+}
+
+// SPEC §9.2: "the same sword cannot be promised into ten swaps because after
+// the first offer the sword is not in A's spendable balance to offer again."
+TEST (asset_ledger, self_locking_prevents_offering_units_already_locked)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 500, 0, offer_payload (0, 10)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+
+	auto second (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_offer, issued.id, 100, 0, offer_payload (0, 1)));
+	ASSERT_EQ (nano::process_result::insufficient_asset_balance, ledger.process (transaction, *second).code);
+}
+
+// The offerer recovers their own asset whenever they like — the lock's own
+// garbage collector (SPEC §9.3).
+TEST (asset_ledger, swap_cancel_returns_the_locked_asset)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto cancel (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *cancel).code);
+
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
+	auto gone (store.asset.offers_begin (transaction, nano::offer_key (issued.id, 0)));
+	ASSERT_TRUE (gone == store.asset.offers_end () || !(nano::offer_key (issued.id, offer->hash ()) == gone->first));
+}
+
+TEST (asset_ledger, swap_cancel_returns_locked_kei)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+
+	auto offer (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1) - 5), nano::asset_op::swap_offer, 0, 5, 0, offer_payload (issued.id, 100)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto cancel (signed_asset (pool, nano::dev::team_key, offer->hash (), nano::amount (after_issuing (1)), nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *cancel).code);
+
+	ASSERT_EQ (after_issuing (1), ledger.account_balance (transaction, nano::dev::team_key.pub));
+	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
+}
+
+// SPEC §9.2 point 4: the accept-vs-cancel race. Whichever the ledger applies
+// first wins, and the second is a retryable "nothing moved" rather than a
+// fault — this is the ledger's half of ORV resolving that conflict.
+TEST (asset_ledger, an_accept_after_a_cancel_is_rejected_as_offer_consumed)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto cancel (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *cancel).code);
+
+	auto accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::offer_consumed, ledger.process (transaction, *accept).code);
+}
+
+TEST (asset_ledger, a_cancel_after_an_accept_is_rejected_as_offer_consumed)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+
+	// The rightful offerer, trying to cancel a lock that already settled.
+	auto cancel (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::offer_consumed, ledger.process (transaction, *cancel).code);
+}
+
+TEST (asset_ledger, an_elected_accept_replaces_an_applied_cancel)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto cancel (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *cancel).code);
+	auto accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::offer_consumed, ledger.process (transaction, *accept).code);
+
+	std::vector<std::shared_ptr<nano::block>> rolled_back;
+	ASSERT_FALSE (ledger.rollback_swap_conflict (transaction, offer->hash (), accept->hash (), rolled_back));
+	ASSERT_EQ (1, rolled_back.size ());
+	ASSERT_EQ (cancel->hash (), rolled_back.front ()->hash ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+	ASSERT_TRUE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_FALSE (store.block.exists (transaction, cancel->hash ()));
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	ASSERT_EQ (accept->hash (), lock.settled_by);
+}
+
+TEST (asset_ledger, an_elected_cancel_replaces_an_applied_accept)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+	auto cancel (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::offer_consumed, ledger.process (transaction, *cancel).code);
+
+	std::vector<std::shared_ptr<nano::block>> rolled_back;
+	ASSERT_FALSE (ledger.rollback_swap_conflict (transaction, offer->hash (), cancel->hash (), rolled_back));
+	ASSERT_EQ (1, rolled_back.size ());
+	ASSERT_EQ (accept->hash (), rolled_back.front ()->hash ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *cancel).code);
+	ASSERT_TRUE (store.block.exists (transaction, cancel->hash ()));
+	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
+	ASSERT_FALSE (store.pending.exists (transaction, nano::pending_key (player.pub, accept->hash ())));
+	ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+}
+
+TEST (asset_ledger, cross_account_swap_consumers_join_one_active_election)
+{
+	nano::test::system system;
+	auto & node = *system.add_node ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair offerer;
+	nano::keypair accepter;
+	nano::block_hash const offer_hash{ 42 };
+
+	auto cancel = signed_asset (pool, offerer, offer_hash, 1000, nano::asset_op::swap_cancel, 0, 0, offer_hash);
+	auto accept = signed_asset (pool, accepter, nano::block_hash{ 7 }, 950, nano::asset_op::swap_accept, 0, 50, offer_hash);
+	cancel->sideband_set ({});
+	accept->sideband_set ({});
+
+	auto inserted = node.active.insert (cancel);
+	ASSERT_TRUE (inserted.inserted);
+	ASSERT_NE (nullptr, inserted.election);
+	ASSERT_FALSE (node.active.publish (accept));
+	ASSERT_EQ (1, node.active.size ());
+	ASSERT_EQ (2, inserted.election->blocks ().size ());
+	ASSERT_EQ (inserted.election, node.active.election (accept->election_qualified_root ()));
+}
+
+TEST (asset_ledger, final_vote_store_allows_only_one_swap_consumer_per_offer)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair offerer;
+	nano::keypair accepter;
+	nano::block_hash const offer_hash{ 42 };
+	auto cancel = signed_asset (pool, offerer, offer_hash, 1000, nano::asset_op::swap_cancel, 0, 0, offer_hash);
+	auto accept = signed_asset (pool, accepter, nano::block_hash{ 7 }, 950, nano::asset_op::swap_accept, 0, 50, offer_hash);
+	auto transaction = store.tx_begin_write ({ nano::tables::final_votes });
+
+	ASSERT_EQ (cancel->election_qualified_root (), accept->election_qualified_root ());
+	ASSERT_TRUE (store.final_vote.put (transaction, cancel->election_qualified_root (), cancel->hash ()));
+	ASSERT_FALSE (store.final_vote.put (transaction, accept->election_qualified_root (), accept->hash ()));
+	auto const persisted = store.final_vote.get (transaction, cancel->election_root ());
+	ASSERT_EQ (1, persisted.size ());
+	ASSERT_EQ (cancel->hash (), persisted.front ());
+}
+
+TEST (asset_ledger, block_processor_seeds_and_reconciles_a_cross_chain_swap_election)
+{
+	nano::test::system system;
+	auto & node = *system.add_node ();
+	auto & ledger = node.ledger;
+	auto & store = node.store;
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	std::shared_ptr<nano::asset_block> offer;
+	std::shared_ptr<nano::asset_block> cancel;
+	std::shared_ptr<nano::asset_block> accept;
+	{
+		auto transaction = store.tx_begin_write ();
+		auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+		offer = signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50));
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+		cancel = signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ());
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *cancel).code);
+		accept = signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ());
+	}
+
+	// There was no active election when the cancel was applied directly. The
+	// rejected accept must make block_publisher recover that applied consumer
+	// and seed the shared resource election before publishing the contender.
+	node.process_active (accept);
+	node.block_processor.flush ();
+	auto election = node.active.election (accept->election_qualified_root ());
+	ASSERT_NE (nullptr, election);
+	ASSERT_EQ (2, election->blocks ().size ());
+
+	// Simulate the election switching to the accept. Forced processing must
+	// roll back the cancel on the other account chain without erasing this
+	// election, and then apply the accept.
+	node.block_processor.force (accept);
+	node.block_processor.flush ();
+	auto transaction = store.tx_begin_read ();
+	ASSERT_TRUE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_FALSE (store.block.exists (transaction, cancel->hash ()));
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	ASSERT_EQ (accept->hash (), lock.settled_by);
+	ASSERT_EQ (election, node.active.election (accept->election_qualified_root ()));
+}
+
+TEST (asset_ledger, only_the_named_counterparty_may_accept)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player, named;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, named.pub, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+
+	// The team allocation is not who this offer named.
+	auto wrong (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::swap_not_counterparty, ledger.process (transaction, *wrong).code);
+}
+
+TEST (asset_ledger, an_accept_must_restate_the_offers_own_terms)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+
+	// 40, not the 50 the offer asked for.
+	auto cheap (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 40), nano::asset_op::swap_accept, 0, 40, offer->hash ()));
+	ASSERT_EQ (nano::process_result::swap_terms_mismatch, ledger.process (transaction, *cheap).code);
+}
+
+TEST (asset_ledger, an_offerer_cannot_accept_their_own_offer)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (issued.id, 1)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+
+	auto self_accept (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_accept, issued.id, 1, offer->hash ()));
+	ASSERT_EQ (nano::process_result::swap_not_counterparty, ledger.process (transaction, *self_accept).code);
+}
+
+// SPEC §5.4: a swap leg answers to the same immutable policy a `transfer`
+// does — the SDK does not get to trade its way around it.
+TEST (asset_ledger, an_issuer_only_asset_can_only_be_offered_to_or_by_the_issuer)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::issuer_only, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	// Listed for anyone: not the issuer on either side, so nobody could
+	// legally accept it, and the offer is refused rather than left open forever.
+	auto open_listing (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::transfer_not_permitted, ledger.process (transaction, *open_listing).code);
+
+	// Sold directly back to the issuer: the escape hatch the policy exists for.
+	auto to_issuer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, nano::dev::team_key.pub, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *to_issuer).code);
+}
+
+TEST (asset_ledger, a_soulbound_asset_cannot_be_offered)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::none, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::transfer_not_permitted, ledger.process (transaction, *offer).code);
+}
+
+TEST (asset_ledger, rolling_back_an_offer_returns_the_lock_and_the_balance)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	ASSERT_FALSE (ledger.rollback (transaction, offer->hash ()));
+
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
+	auto gone (store.asset.offers_begin (transaction, nano::offer_key (issued.id, 0)));
+	ASSERT_TRUE (gone == store.asset.offers_end () || !(nano::offer_key (issued.id, offer->hash ()) == gone->first));
+}
+
+TEST (asset_ledger, rolling_back_a_cancel_relocks_the_asset)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto cancel (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *cancel).code);
+	ASSERT_FALSE (ledger.rollback (transaction, cancel->hash ()));
+
+	ASSERT_EQ (nano::amount (300), store.asset.balance (transaction, player.pub, issued.id));
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	ASSERT_TRUE (lock.open ());
+	auto found (store.asset.offers_begin (transaction, nano::offer_key (issued.id, 0)));
+	ASSERT_NE (store.asset.offers_end (), found);
+	ASSERT_TRUE (nano::offer_key (issued.id, offer->hash ()) == found->first);
+}
+
+TEST (asset_ledger, rolling_back_an_accept_takes_back_both_arrivals_and_reopens_the_lock)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+	ASSERT_FALSE (ledger.rollback (transaction, accept->hash ()));
+
+	ASSERT_EQ (after_issuing (1), ledger.account_balance (transaction, nano::dev::team_key.pub));
+	ASSERT_FALSE (store.pending.exists (transaction, nano::pending_key (player.pub, accept->hash ())));
+	ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	ASSERT_TRUE (lock.open ());
+	auto found (store.asset.offers_begin (transaction, nano::offer_key (issued.id, 0)));
+	ASSERT_NE (store.asset.offers_end (), found);
+	ASSERT_TRUE (nano::offer_key (issued.id, offer->hash ()) == found->first);
+
+	// The offerer can still cancel it after the reopen — the lock is not just
+	// present but genuinely usable again.
+	auto cancel (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *cancel).code);
+}
+
+// The sharp edge of §9.2 point 4: undoing an offer that was already accepted
+// has to undo the accept first, even though it sits on a different account's
+// chain that ordinary tip-first rollback never walks on its own.
+TEST (asset_ledger, rolling_back_an_offer_that_was_accepted_undoes_the_accept_first)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+
+	ASSERT_FALSE (ledger.rollback (transaction, offer->hash ()));
+
+	// The accept is gone from the team allocation's own chain, taking it back
+	// to exactly where it stood after the mint.
+	ASSERT_EQ (held.mint->hash (), ledger.latest (transaction, nano::dev::team_key.pub));
+	ASSERT_EQ (after_issuing (1), ledger.account_balance (transaction, nano::dev::team_key.pub));
+	ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	// `held.collect` opened the offerer's account before the offer ever
+	// existed, so rolling the offer back — a single non-open block — leaves
+	// the account in place, at the block before it, with its asset restored.
+	ASSERT_EQ (held.collect->hash (), ledger.latest (transaction, player.pub));
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
+}
+
+// An offer cannot name its own author: `swap_accept` already refuses a
+// self-accept independently (`an_offerer_cannot_accept_their_own_offer`
+// above), but a *named* self-offer could never be accepted by anyone, so it
+// is refused here instead of locking the asset forever for nothing.
+TEST (asset_ledger, an_offer_naming_its_own_author_as_counterparty_is_refused)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, player.pub, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::self_swap, ledger.process (transaction, *offer).code);
+
+	// Refused before anything is written: the asset never left spendable
+	// balance and no lock or listing exists for a block that never applied.
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
+}
+
+// The sharp edge of §9.2 point 4, one step sharper than
+// `rolling_back_an_offer_that_was_accepted_undoes_the_accept_first`: the
+// accepter's chain has grown *since* the accept, so undoing the accept is
+// not "roll back the accepter's current tip once" but "roll back the
+// accepter's chain until the specific accept block is gone." A single,
+// unlooped rollback call here would delete the offer's lock while the
+// accept — and the receivables it created — silently survived underneath
+// the accepter's newer block, which is a real double-spend: the offerer's
+// own balance would be restored *and* the accepted receivable would remain
+// collectible.
+TEST (asset_ledger, rolling_back_an_offer_whose_accepter_has_since_grown_their_chain_still_undoes_the_accept_in_full)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+
+	// The accepter does something else entirely afterward — a second,
+	// unrelated issuance — so their chain's tip is no longer the accept.
+	auto const second (issuance ("GEM2", nano::transfer_policy::open, 1000));
+	auto const second_id (nano::derive_asset_id (nano::dev::team_key.pub, second.symbol));
+	auto extra (signed_asset (pool, nano::dev::team_key, accept->hash (), nano::amount (after_issuing (2) - 50), nano::asset_op::issue, second_id, 0, 0, second));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *extra).code);
+
+	ASSERT_FALSE (ledger.rollback (transaction, offer->hash ()));
+
+	// Both blocks the accepter wrote after the offer are gone, not just
+	// pushed out of the way — the extra issuance never happened either.
+	ASSERT_FALSE (store.block.exists (transaction, extra->hash ()));
+	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_EQ (held.mint->hash (), ledger.latest (transaction, nano::dev::team_key.pub));
+	ASSERT_EQ (after_issuing (1), ledger.account_balance (transaction, nano::dev::team_key.pub));
+	nano::asset_info second_asset;
+	ASSERT_TRUE (store.asset.get (transaction, second_id, second_asset));
+
+	// The accept's own effects are fully undone, not left dangling under
+	// the block that grew on top of them.
+	ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_FALSE (store.pending.exists (transaction, nano::pending_key (player.pub, accept->hash ())));
+
+	// The offerer's own side unwound exactly once — not doubled by a lock
+	// that was deleted while the accept it belonged to was still standing.
+	// `held.collect` opened this account before the offer, so it survives
+	// rollback at the block before the offer, with its asset restored.
+	ASSERT_EQ (held.collect->hash (), ledger.latest (transaction, player.pub));
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
 }

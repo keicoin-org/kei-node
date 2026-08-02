@@ -211,6 +211,8 @@ std::string nano::error_rpc_messages::message (int ev) const
 			return "Invalid shape argument";
 		case nano::error_rpc::invalid_shape_account_filter:
 			return "Shape \"block\" cannot be combined with account_filter";
+		case nano::error_rpc::invalid_swap_state:
+			return "\"state\" is one of open, accepted or cancelled -- leave it out for all three";
 		case nano::error_rpc::invalid_sources:
 			return "Invalid sources number";
 		case nano::error_rpc::invalid_subtype:
@@ -308,6 +310,21 @@ std::string nano::error_process_messages::message (int ev) const
 			return "This account has already claimed from that root";
 		case nano::error_process::bad_claim_proof:
 			return "That proof does not lead from this account, asset and amount to the committed root";
+		case nano::error_process::no_such_offer:
+			return "No swap offer with that hash exists on this network";
+		case nano::error_process::offer_consumed:
+			// The one error in this list a correct client is expected to meet.
+			// SPEC §9.2 asks for a lost accept/cancel race to read as retryable
+			// rather than as a fault, because a wasted block is all it costs.
+			return "That swap offer was already accepted or cancelled; nothing moved, so retry against another offer";
+		case nano::error_process::not_offerer:
+			return "Only the account that locked the asset may cancel that swap offer";
+		case nano::error_process::swap_terms_mismatch:
+			return "This block does not restate the asset and amount the swap offer asked for";
+		case nano::error_process::swap_not_counterparty:
+			return "That swap offer names a different counterparty";
+		case nano::error_process::self_swap:
+			return "An offer cannot name its own author as the counterparty";
 		case nano::error_process::other:
 			return "Error processing block";
 	}

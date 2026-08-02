@@ -268,7 +268,7 @@ void nano::network::broadcast_confirm_req_base (std::shared_ptr<nano::block> con
 	while (!endpoints_a->empty () && count < max_reps)
 	{
 		auto channel (endpoints_a->back ());
-		send_confirm_req (channel, std::make_pair (block_a->hash (), block_a->root ().as_block_hash ()));
+		send_confirm_req (channel, std::make_pair (block_a->hash (), block_a->election_root ().as_block_hash ()));
 		endpoints_a->pop_back ();
 		count++;
 	}
@@ -428,7 +428,7 @@ public:
 		{
 			if (message_a.block != nullptr)
 			{
-				node.aggregator.add (channel, { { message_a.block->hash (), message_a.block->root () } });
+				node.aggregator.add (channel, { { message_a.block->hash (), message_a.block->election_root () } });
 			}
 			else if (!message_a.roots_hashes.empty ())
 			{
