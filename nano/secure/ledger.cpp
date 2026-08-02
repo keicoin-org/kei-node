@@ -2300,7 +2300,7 @@ bool nano::ledger::rollback_swap_conflict (nano::write_transaction const & trans
 	return error;
 }
 
-std::shared_ptr<nano::block> nano::ledger::swap_consumer (nano::transaction const & transaction_a, nano::block_hash const & offer_hash_a) const
+std::shared_ptr<nano::block> nano::ledger::swap_consumer (nano::transaction const & transaction_a, nano::block_hash const & offer_hash_a)
 {
 	nano::asset_lock_info lock;
 	if (!store.asset.lock_get (transaction_a, offer_hash_a, lock))

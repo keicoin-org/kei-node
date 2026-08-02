@@ -84,7 +84,7 @@ public:
 	 */
 	bool rollback_swap_conflict (nano::write_transaction const &, nano::block_hash const & offer_hash_a, nano::block_hash const & desired_hash_a, std::vector<std::shared_ptr<nano::block>> &);
 	/** Return the accept or cancel that currently consumes an offer lock. */
-	std::shared_ptr<nano::block> swap_consumer (nano::transaction const &, nano::block_hash const & offer_hash_a) const;
+	std::shared_ptr<nano::block> swap_consumer (nano::transaction const &, nano::block_hash const & offer_hash_a);
 	void update_account (nano::write_transaction const &, nano::account const &, nano::account_info const &, nano::account_info const &);
 	uint64_t pruning_action (nano::write_transaction &, nano::block_hash const &, uint64_t const);
 	void dump_account_chain (nano::account const &, std::ostream & = std::cout);
