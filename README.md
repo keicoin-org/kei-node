@@ -10,7 +10,11 @@ The Kei node. A fork of [Banano](https://github.com/BananoCoin/banano), itself a
 fork of [Nano](https://github.com/nanocurrency/nano-node), adding a **native
 token primitive** and a Kei genesis.
 
-> **Status: M2, in progress.** This is a Banano V25.1 checkout plus
+> **Status: M3 testnet.** The M2 genesis/token gate is complete. A single
+> best-effort Hetzner dev-network node is served through the rate-limited,
+> allowlisted HTTPS boundary documented in
+> [`docs/decisions-m3.md`](docs/decisions-m3.md). It has weak consensus, no
+> uptime promise, and no monetary value. This is a Banano V25.1 checkout plus
 > [`docs/decisions-m2.md`](docs/decisions-m2.md), its own build, and its own
 > repository identity. In: the 10^18-raw ratio, `kei_` addresses, the `asset`
 > block primitive (§7), the `holdings`/`holders` tables (§9), ledger validation
@@ -30,7 +34,7 @@ token primitive** and a Kei genesis.
 > was rejected at a legacy ingress threshold before its A/B/C rule ran, and a
 > bad signature cost fifteen seconds and reported "Stopped".
 >
-> **Not finished** (§16, §17): `commit`/`claim` remain M4 and live in separate
+> **Not in M3** (§16, §17): `commit`/`claim` remain M4 and live in separate
 > M4 suites rather than weakening M2's gate. Kei-payment memos are likewise
 > deferred and rejected explicitly. The dev genesis now includes the
 > reproducible §5.7 allocation: a null-representative reserve plus four
@@ -93,10 +97,10 @@ described:
 - `packages/core/test/m2-node.test.ts` and `packages/kei/test/over-http.test.ts`
   — the conformance suite
 
-**M2's RPC gate is green when those two exact files pass unchanged against both
-the mock and a clean dev node; `KEI_NODE_URL` is the only switch.** M4's
-commit/claim cases are preserved separately. M3 remains blocked until every M2
-definition-of-done item passes.
+**M2's RPC gate is green because those two exact files pass unchanged against
+both the mock and a clean dev node; `KEI_NODE_URL` is the only switch.** M3 runs
+them against the public endpoint as operational evidence. M4's commit/claim
+cases remain preserved separately.
 
 ## Building
 

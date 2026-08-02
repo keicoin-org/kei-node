@@ -79,13 +79,13 @@ that describes nothing is a mistake, not a degenerate case worth supporting.
 
 ## 3. The leaf, the tree, and what a proof does not prove
 
-A leaf is `blake2b-256(leaf-domain ‖ account ‖ asset_id ‖ amount)`.
+A leaf is `blake2b-256(0x00 ‖ account ‖ asset_id ‖ amount)`.
 
 **The leaf binds the asset id, not just the amount.** Without it, a proof cut
 from a drop of one asset could be replayed against a root of another — and roots
 are global, so "another asset" includes another issuer's.
 
-Interior nodes are `blake2b-256(node-domain ‖ min(a,b) ‖ max(a,b))`. Two
+Interior nodes are `blake2b-256(0x01 ‖ min(a,b) ‖ max(a,b))`. Two
 consequences, both deliberate:
 
 - **Pairs are ordered by value, so a proof is siblings alone.** There are no
@@ -96,6 +96,17 @@ consequences, both deliberate:
   separate domains, a 64-byte "leaf" could be presented as an interior node and
   prove a membership the issuer never committed to. `a_leaf_cannot_be_passed_off_as_an_interior_node`
   is the test that pins this.
+
+**The tag is a single byte, not a hashed label, and that is not a detail this
+side gets to choose.** The node verifies proofs the SDK's tree builder
+produces (`@keicoin/claims`, built on `packages/core/src/merkle.ts` in
+kei-transaction); it is the frozen contract, and `0x00`/`0x01` is its exact
+encoding. A node that hashes a longer or different separator computes a
+different leaf and a different root from the same inputs — every proof from
+that SDK then fails `bad_claim_proof`, silently, because nothing about the
+mismatch is visible from either side alone. `conformance/` vectors generated
+straight from that SDK module are what catch this; do not re-derive the tag
+bytes from this document, read them from the SDK source.
 
 The tree's *shape* is the issuer's business. The node folds whatever siblings it
 is given and never learns how many leaves there were, how they were ordered, or
@@ -173,6 +184,16 @@ This is the issuer's mistake surfacing at the only place the node can see it.
 The SDK should check a batch against remaining headroom before publishing its
 root, and that check is advice, not enforcement — as it must be, since the node
 cannot verify it either way.
+
+**The check subtracts, and it runs on uncapped assets too.** A leaf's amount is
+whatever the issuer wrote into the tree, and the same goes for a mint's, so
+`circulating + amount` is an attacker-chosen uint128 sum that can carry past
+2^128 — comparing that sum against the cap would let it wrap, compare small,
+and be credited as the remainder. Both the mint and the claim therefore ask
+`amount > max_supply - circulating` instead, behind `amount > 2^128 - 1 -
+circulating`. That ceiling test runs whether or not the asset is capped: an
+uncapped asset has no cap to compare against but still has the arithmetic
+ceiling, and that is exactly the case a capped-only check skips.
 
 ## 7. `claim` is a tier-C operation
 

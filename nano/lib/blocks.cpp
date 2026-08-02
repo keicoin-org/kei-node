@@ -1666,42 +1666,14 @@ nano::uint256_union nano::derive_asset_id (nano::public_key const & issuer_a, st
 namespace
 {
 /**
- * The two separators that keep a leaf from ever being read as an interior node.
- * They are hashed labels rather than raw strings for the same reason
- * `kei_block_domain` is: a fixed-width prefix cannot be confused with the
- * variable-width thing that follows it.
+ * The two separators that keep a leaf from ever being read as an interior
+ * node. This is the frozen SDK's own encoding (`packages/core/src/merkle.ts`
+ * in kei-transaction): a single tag byte, not a hashed label. The two must
+ * match bit for bit, because the SDK builds the tree and the node only
+ * verifies against it — there is no negotiation between them.
  */
-nano::uint256_union const & claim_leaf_domain ()
-{
-	static nano::uint256_union const domain = [] () {
-		nano::uint256_union result;
-		blake2b_state hash;
-		auto status (blake2b_init (&hash, sizeof (result.bytes)));
-		debug_assert (status == 0);
-		char const * const label = "kei-claim-leaf-v1";
-		blake2b_update (&hash, label, std::strlen (label));
-		status = blake2b_final (&hash, result.bytes.data (), sizeof (result.bytes));
-		debug_assert (status == 0);
-		return result;
-	}();
-	return domain;
-}
-
-nano::uint256_union const & claim_node_domain ()
-{
-	static nano::uint256_union const domain = [] () {
-		nano::uint256_union result;
-		blake2b_state hash;
-		auto status (blake2b_init (&hash, sizeof (result.bytes)));
-		debug_assert (status == 0);
-		char const * const label = "kei-claim-node-v1";
-		blake2b_update (&hash, label, std::strlen (label));
-		status = blake2b_final (&hash, result.bytes.data (), sizeof (result.bytes));
-		debug_assert (status == 0);
-		return result;
-	}();
-	return domain;
-}
+constexpr uint8_t claim_leaf_tag = 0x00;
+constexpr uint8_t claim_node_tag = 0x01;
 }
 
 nano::uint256_union nano::asset_claim_leaf (nano::account const & account_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a)
@@ -1710,8 +1682,7 @@ nano::uint256_union nano::asset_claim_leaf (nano::account const & account_a, nan
 	blake2b_state hash;
 	auto status (blake2b_init (&hash, sizeof (result.bytes)));
 	debug_assert (status == 0);
-	auto const & domain (claim_leaf_domain ());
-	blake2b_update (&hash, domain.bytes.data (), domain.bytes.size ());
+	blake2b_update (&hash, &claim_leaf_tag, sizeof (claim_leaf_tag));
 	blake2b_update (&hash, account_a.bytes.data (), account_a.bytes.size ());
 	blake2b_update (&hash, asset_id_a.bytes.data (), asset_id_a.bytes.size ());
 	blake2b_update (&hash, amount_a.bytes.data (), amount_a.bytes.size ());
@@ -1730,8 +1701,7 @@ nano::uint256_union nano::asset_claim_root (nano::uint256_union const & leaf_a, 
 		blake2b_state hash;
 		auto status (blake2b_init (&hash, sizeof (result.bytes)));
 		debug_assert (status == 0);
-		auto const & domain (claim_node_domain ());
-		blake2b_update (&hash, domain.bytes.data (), domain.bytes.size ());
+		blake2b_update (&hash, &claim_node_tag, sizeof (claim_node_tag));
 		blake2b_update (&hash, first.bytes.data (), first.bytes.size ());
 		blake2b_update (&hash, second.bytes.data (), second.bytes.size ());
 		status = blake2b_final (&hash, result.bytes.data (), sizeof (result.bytes));

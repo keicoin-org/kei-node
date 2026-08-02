@@ -38,6 +38,9 @@ jobs:
           # CMakeLists.txt add_subdirectory()s each Boost library directly.
           submodules: recursive
 
+      - name: Test the public RPC gateway boundary
+        run: python3 -m unittest ops/testnet/test_rpc_gateway.py
+
       # M2's contract lives in the SDK repository. Pinning the revision makes
       # a green node build a claim about one reviewable contract, not whatever
       # happened to be at the tip of another repository when the job started.
@@ -56,6 +59,17 @@ jobs:
       - name: Install SDK dependencies
         working-directory: kei-transaction
         run: bun install --frozen-lockfile
+
+      # This is a pure hash comparison against the pinned SDK source — no
+      # node build or running instance needed — so it runs first and fails
+      # fast, before ~40 minutes of Boost/RocksDB compilation, if the M4 claim
+      # hashing on either side of the contract has drifted. See
+      # conformance/generate-claim-vectors.ts for what this actually checks
+      # and why it exists.
+      - name: Check M4 claim vectors against the frozen SDK
+        env:
+          KEI_SDK_DIR: ${{ github.workspace }}/kei-transaction
+        run: bun run conformance/generate-claim-vectors.ts --check
 
       # gcc-12 rather than whatever ubuntu-latest ships. RocksDB 7.8.3 is
       # vendored at submodules/rocksdb and predates GCC 13's removal of the
