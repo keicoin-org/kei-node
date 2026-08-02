@@ -1789,6 +1789,51 @@ TEST (asset_ledger, final_vote_store_allows_only_one_swap_consumer_per_offer)
 	ASSERT_EQ (cancel->hash (), persisted.front ());
 }
 
+TEST (asset_ledger, block_processor_seeds_and_reconciles_a_cross_chain_swap_election)
+{
+	nano::test::system system;
+	auto & node = *system.add_node ();
+	auto & ledger = node.ledger;
+	auto & store = node.store;
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	std::shared_ptr<nano::asset_block> offer;
+	std::shared_ptr<nano::asset_block> cancel;
+	std::shared_ptr<nano::asset_block> accept;
+	{
+		auto transaction = store.tx_begin_write ();
+		auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+		offer = signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50));
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+		cancel = signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ());
+		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *cancel).code);
+		accept = signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ());
+	}
+
+	// There was no active election when the cancel was applied directly. The
+	// rejected accept must make block_publisher recover that applied consumer
+	// and seed the shared resource election before publishing the contender.
+	node.process_active (accept);
+	node.block_processor.flush ();
+	auto election = node.active.election (accept->election_qualified_root ());
+	ASSERT_NE (nullptr, election);
+	ASSERT_EQ (2, election->blocks ().size ());
+
+	// Simulate the election switching to the accept. Forced processing must
+	// roll back the cancel on the other account chain without erasing this
+	// election, and then apply the accept.
+	node.block_processor.force (accept);
+	node.block_processor.flush ();
+	auto transaction = store.tx_begin_read ();
+	ASSERT_TRUE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_FALSE (store.block.exists (transaction, cancel->hash ()));
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	ASSERT_EQ (accept->hash (), lock.settled_by);
+	ASSERT_EQ (election, node.active.election (accept->election_qualified_root ()));
+}
+
 TEST (asset_ledger, only_the_named_counterparty_may_accept)
 {
 	auto ctx = nano::test::context::ledger_empty ();
