@@ -1561,7 +1561,10 @@ TEST (asset_ledger, swap_accept_settles_both_legs_and_each_side_collects)
 			   .balance (50)
 			   .link (accept->hash ())
 			   .sign (player.prv, player.pub)
-			   .work (*pool.generate (player.pub))
+			   // Root is `previous` once the chain is non-empty, not the
+			   // account — work generated for the wrong root reads as
+			   // insufficient no matter how much of it there is.
+			   .work (*pool.generate (offer->hash ()))
 			   .build_shared ());
 	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *open).code);
 	ASSERT_EQ (nano::uint128_t (50), ledger.account_balance (transaction, player.pub));
@@ -2046,9 +2049,11 @@ TEST (asset_ledger, rolling_back_an_offer_that_was_accepted_undoes_the_accept_fi
 	ASSERT_EQ (held.mint->hash (), ledger.latest (transaction, nano::dev::team_key.pub));
 	ASSERT_EQ (after_issuing (1), ledger.account_balance (transaction, nano::dev::team_key.pub));
 	ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
-	// The offerer never existed before the offer, so rolling the offer back
-	// closes their account entirely, the same as rolling back any open block.
-	ASSERT_FALSE (ledger.account_info (transaction, player.pub));
+	// `held.collect` opened the offerer's account before the offer ever
+	// existed, so rolling the offer back — a single non-open block — leaves
+	// the account in place, at the block before it, with its asset restored.
+	ASSERT_EQ (held.collect->hash (), ledger.latest (transaction, player.pub));
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
 	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
 }
 
@@ -2129,6 +2134,9 @@ TEST (asset_ledger, rolling_back_an_offer_whose_accepter_has_since_grown_their_c
 
 	// The offerer's own side unwound exactly once — not doubled by a lock
 	// that was deleted while the accept it belonged to was still standing.
-	ASSERT_FALSE (ledger.account_info (transaction, player.pub));
+	// `held.collect` opened this account before the offer, so it survives
+	// rollback at the block before the offer, with its asset restored.
+	ASSERT_EQ (held.collect->hash (), ledger.latest (transaction, player.pub));
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
 	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
 }
