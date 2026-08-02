@@ -7,12 +7,13 @@ namespace nano
 class active_transactions;
 class block_processor;
 class block;
+class ledger;
 
 // This class tracks processed blocks to be published.
 class block_publisher
 {
 public:
-	block_publisher (nano::active_transactions & active);
+	block_publisher (nano::active_transactions & active, nano::ledger & ledger);
 	void connect (nano::block_processor & block_processor);
 
 private:
@@ -20,5 +21,6 @@ private:
 	void observe (std::shared_ptr<nano::block> block);
 
 	nano::active_transactions & active;
+	nano::ledger & ledger;
 };
 }

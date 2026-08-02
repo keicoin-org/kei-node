@@ -200,6 +200,16 @@ nano::qualified_root nano::block::qualified_root () const
 	return nano::qualified_root (root (), previous ());
 }
 
+nano::root nano::block::election_root () const
+{
+	return root ();
+}
+
+nano::qualified_root nano::block::election_qualified_root () const
+{
+	return qualified_root ();
+}
+
 nano::amount const & nano::block::balance () const
 {
 	static nano::amount amount{ 0 };
@@ -2564,6 +2574,29 @@ nano::root const & nano::asset_block::root () const
 	{
 		return hashables.account;
 	}
+}
+
+nano::root nano::asset_block::election_root () const
+{
+	// `link` carries the offer hash for both consumers. Using it as the vote
+	// root gives local vote history and vote spacing one shared namespace.
+	if (hashables.op == nano::asset_op::swap_accept || hashables.op == nano::asset_op::swap_cancel)
+	{
+		return hashables.link;
+	}
+	return root ();
+}
+
+nano::qualified_root nano::asset_block::election_qualified_root () const
+{
+	if (hashables.op == nano::asset_op::swap_accept || hashables.op == nano::asset_op::swap_cancel)
+	{
+		auto const offer_hash = hashables.link.as_block_hash ();
+		// A cancel immediately following its offer already has this ordinary
+		// qualified root. An accept on another account deliberately adopts it.
+		return nano::qualified_root{ offer_hash, offer_hash };
+	}
+	return qualified_root ();
 }
 
 nano::link const & nano::asset_block::link () const

@@ -310,10 +310,44 @@ auto nano::block_processor::process_batch (nano::unique_lock<nano::mutex> & lock
 				// Deleting from votes cache, stop active transaction
 				for (auto & i : rollback_list)
 				{
-					node.history.erase (i->root ());
+					node.history.erase (i->election_root ());
 					// Stop all rolled back active transactions except initial
 					if (i->hash () != successor->hash ())
 					{
+						node.active.erase (*i);
+					}
+				}
+			}
+			if (auto const asset = dynamic_cast<nano::asset_block const *> (block.get ()); asset != nullptr && (asset->hashables.op == nano::asset_op::swap_accept || asset->hashables.op == nano::asset_op::swap_cancel))
+			{
+				auto const resource = asset->hashables.link.as_block_hash ();
+				// This block's own qualified_root has no conflicting successor
+				// to detect — a swap_accept/swap_cancel that lost the race to
+				// apply against the ledger never wrote anything at its own
+				// chain position, because it is the *other* chain, the one
+				// holding the offer's lock, that has to be undone
+				// (SPEC §9.2 point 4). The election settled on this block
+				// anyway, so find and roll back whichever block currently
+				// consumes the lock instead.
+				std::vector<std::shared_ptr<nano::block>> rollback_list;
+				if (node.ledger.rollback_swap_conflict (transaction, resource, hash, rollback_list))
+				{
+					node.stats.inc (nano::stat::type::ledger, nano::stat::detail::rollback_failed);
+					node.logger.always_log (nano::severity_level::error, boost::str (boost::format ("Failed to roll back the consumer of swap lock %1% to make way for %2%") % resource.to_string () % hash.to_string ()));
+				}
+				else if (node.config.logging.ledger_rollback_logging () && !rollback_list.empty ())
+				{
+					node.logger.always_log (boost::str (boost::format ("%1% blocks rolled back to resolve a swap lock conflict") % rollback_list.size ()));
+				}
+				for (auto & i : rollback_list)
+				{
+					// The displaced consumer is a candidate in the election we
+					// are resolving. Keep that election and its shared resource
+					// vote history alive; only descendants have independent
+					// elections which must be stopped.
+					if (i->election_qualified_root () != block->election_qualified_root ())
+					{
+						node.history.erase (i->election_root ());
 						node.active.erase (*i);
 					}
 				}

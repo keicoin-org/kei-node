@@ -1024,7 +1024,7 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 	// The rooted ops put the root where every other op puts a destination or a
 	// source, which is what lets them reuse the fixed header unchanged
 	// (decisions-m4.md §2).
-	nano::uint256_union const root (block_a.hashables.link.as_block_hash ());
+	nano::block_hash const root (block_a.hashables.link.as_block_hash ());
 	bool asset_dirty (false);
 	std::vector<staged_arrival> arrivals;
 	boost::optional<nano::amount> credit;
@@ -2238,6 +2238,90 @@ bool nano::ledger::rollback (nano::write_transaction const & transaction_a, nano
 	return rollback (transaction_a, block_a, rollback_list);
 }
 
+bool nano::ledger::rollback_swap_conflict (nano::write_transaction const & transaction_a, nano::block_hash const & offer_hash_a, nano::block_hash const & desired_hash_a, std::vector<std::shared_ptr<nano::block>> & list_a)
+{
+	auto const offer_block (store.block.get (transaction_a, offer_hash_a));
+	if (offer_block == nullptr)
+	{
+		// The offer itself is gone — nothing left to reconcile a consumer of.
+		return false;
+	}
+	auto const offer_asset (dynamic_cast<nano::asset_block const *> (offer_block.get ()));
+	release_assert (offer_asset != nullptr);
+	auto const offerer (offer_asset->hashables.account);
+	auto error (false);
+	while (!error)
+	{
+		nano::asset_lock_info lock;
+		auto const exists (!store.asset.lock_get (transaction_a, offer_hash_a, lock));
+		if (exists && lock.open ())
+		{
+			// Free. Either nothing has consumed it yet, or the rollback below
+			// already undid whichever block did.
+			break;
+		}
+		if (exists)
+		{
+			// Settled by a swap_accept, which sits on the accepter's chain —
+			// a different chain than the offer's, so nothing here orders it
+			// against this rollback except walking that chain down directly
+			// (decisions-m5.md §7).
+			if (lock.settled_by == desired_hash_a)
+			{
+				break;
+			}
+			auto const settler (account (transaction_a, lock.settled_by));
+			error = rollback (transaction_a, latest (transaction_a, settler), list_a);
+		}
+		else
+		{
+			// The lock record is gone, which only a swap_cancel does, and a
+			// cancel is always on the offerer's own chain (decisions-m5.md §7).
+			auto const offerer_head (latest (transaction_a, offerer));
+			if (offerer_head.is_zero () || offerer_head == desired_hash_a)
+			{
+				break;
+			}
+			error = rollback (transaction_a, offerer_head, list_a);
+		}
+	}
+	return error;
+}
+
+std::shared_ptr<nano::block> nano::ledger::swap_consumer (nano::transaction const & transaction_a, nano::block_hash const & offer_hash_a) const
+{
+	nano::asset_lock_info lock;
+	if (!store.asset.lock_get (transaction_a, offer_hash_a, lock))
+	{
+		return lock.open () ? nullptr : store.block.get (transaction_a, lock.settled_by);
+	}
+
+	// Cancellation removes the lock record, so locate the cancel on the
+	// offerer's chain. It need not immediately follow the offer.
+	auto const offer = store.block.get (transaction_a, offer_hash_a);
+	auto const offer_asset = dynamic_cast<nano::asset_block const *> (offer.get ());
+	if (offer_asset == nullptr)
+	{
+		return nullptr;
+	}
+	auto hash = latest (transaction_a, offer_asset->hashables.account);
+	while (!hash.is_zero () && hash != offer_hash_a)
+	{
+		auto block = store.block.get (transaction_a, hash);
+		if (block == nullptr)
+		{
+			return nullptr;
+		}
+		auto const asset = dynamic_cast<nano::asset_block const *> (block.get ());
+		if (asset != nullptr && asset->hashables.op == nano::asset_op::swap_cancel && asset->hashables.link.as_block_hash () == offer_hash_a)
+		{
+			return block;
+		}
+		hash = block->previous ();
+	}
+	return nullptr;
+}
+
 nano::account nano::ledger::account (nano::transaction const & transaction_a, nano::block_hash const & hash_a) const
 {
 	return store.block.account (transaction_a, hash_a);
@@ -2418,7 +2502,14 @@ public:
 		// entry by. A claim that arrives before the root it proves against is
 		// rejected rather than held, and comes back on rebroadcast
 		// (decisions-m4.md §5).
-		if (block_a.hashables.op == nano::asset_op::asset_receive)
+		//
+		// A swap leg's `link` is the offer it consumes, on a different chain
+		// than this block. Waiting for the offer to confirm before scheduling
+		// an accept or a cancel for its own election narrows the window in
+		// which two nodes could each start an independent, unlinked election
+		// for a competing consumer before either one's active_transactions
+		// entry exists to be joined by the other (SPEC §9.2 point 4).
+		if (block_a.hashables.op == nano::asset_op::asset_receive || block_a.hashables.op == nano::asset_op::swap_accept || block_a.hashables.op == nano::asset_op::swap_cancel)
 		{
 			result[1] = block_a.hashables.link.as_block_hash ();
 		}

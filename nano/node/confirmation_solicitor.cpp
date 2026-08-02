@@ -71,7 +71,7 @@ bool nano::confirmation_solicitor::add (nano::election const & election_a)
 			auto & request_queue (requests[rep.channel]);
 			if (!rep.channel->max ())
 			{
-				request_queue.emplace_back (election_a.status.winner->hash (), election_a.status.winner->root ());
+				request_queue.emplace_back (election_a.status.winner->hash (), election_a.root);
 				count += different ? 0 : 1;
 				error = false;
 			}

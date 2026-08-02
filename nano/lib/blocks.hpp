@@ -10,6 +10,7 @@
 #include <nano/lib/utility.hpp>
 #include <nano/lib/work.hpp>
 
+#include <boost/optional.hpp>
 #include <boost/property_tree/ptree_fwd.hpp>
 
 #include <unordered_map>
@@ -271,6 +272,11 @@ public:
 	virtual nano::root const & root () const = 0;
 	// Qualified root value based on previous() and root()
 	virtual nano::qualified_root qualified_root () const;
+	// Consensus-conflict identity. These are the chain root/qualified root for
+	// ordinary blocks. Swap consumers override them with the offer hash so an
+	// accept and cancel on different account chains share one ORV election.
+	virtual nano::root election_root () const;
+	virtual nano::qualified_root election_qualified_root () const;
 	// Link field for state blocks, zero otherwise.
 	virtual nano::link const & link () const;
 	virtual nano::account const & representative () const;
@@ -606,6 +612,8 @@ public:
 	nano::block_hash const & previous () const override;
 	nano::account const & account () const override;
 	nano::root const & root () const override;
+	nano::root election_root () const override;
+	nano::qualified_root election_qualified_root () const override;
 	nano::link const & link () const override;
 	nano::account const & representative () const override;
 	nano::amount const & balance () const override;

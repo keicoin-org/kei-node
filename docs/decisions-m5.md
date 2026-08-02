@@ -261,3 +261,189 @@ than silently shipped as if it were finished: **do not deploy M5 swaps to a
 network where an unresolved accept-vs-cancel race has real value on either
 side of it until this is closed.** Budget it as its own item, the size SPEC
 §5.7 asks the reserve-governance voting work to be budgeted at.
+
+## 10. What a second pass over this diff found, and fixed
+
+This document was written alongside the implementation it describes; a later
+review pass, done before any of it was committed, checked the code against
+its own description rather than trusting that the two already agreed. Three
+did not, until fixed:
+
+1. **§5's self-swap refusal was documented but not implemented.** `swap_offer`
+   had no check for `counterparty == account`; only `swap_accept`'s
+   independent `swap_not_counterparty` check would have caught it, and only
+   after the offer had already locked the asset. Added as `process_result::
+   self_swap`, wired through `to_error_process`, `to_stat_detail`, and the RPC
+   error-code switch, matching every other asset-rejection code's plumbing.
+2. **§7's rollback loop was documented but written as a single call.** Rolling
+   back a `swap_offer` whose lock an accept had settled called
+   `ledger.rollback` on the settler's chain exactly once — correct only if
+   the settler's tip *was* the `swap_accept` block, silently wrong the moment
+   the accepter posted anything afterward. Rewritten to loop and re-read the
+   lock each pass, the same shape `take_back_receivable` and
+   `take_back_arrival` already use.
+3. **The five swap `process_result` codes were absent from two switches
+   downstream of the ledger**, both of which fell through to a generic
+   catch-all rather than the specific code: `nano::json_handler`'s `process`
+   RPC handler (silently returning `error_process::other`, "Error processing
+   block," for every swap rejection instead of the reason), and
+   `nano::block_processor::process_one`'s logging switch, which has **no**
+   `default:` case and would not have compiled at all once a sixth value
+   (`self_swap`, above) was added. Both now list all six explicitly.
+
+None of the three change what a correctly-behaving client already observed
+for the cases its own tests reached — they are gaps that only a client
+exercising self-swap, a grown accepter chain under rollback, or reading the
+`process` RPC's error text for a swap rejection, would have hit. Recorded
+here because "the document already says this is how it works" turned out to
+be a stronger claim than "the code does this," and the gap between the two is
+exactly what a partial, uncommitted diff can hide.
+
+## 11. Why the `resource_root` side table was rejected, and its replacement
+
+A second, separate uncommitted diff attempted to close §9's cross-chain gap by
+giving `asset_block::resource_root()` (the offer hash a `swap_accept`/
+`swap_cancel` consumes) a side table in `active_transactions`
+(`resource_roots`) so a losing block on one account's chain could join the
+election already running for the winning block on a different account's
+chain. An independent review found it unsafe, and closer reading of
+`election.cpp`, `voting.cpp`, and `active_transactions.cpp` confirmed why that
+side-table shape cannot be made safe by patching lookup alone. It was not
+landed; the review below records the failures which the replacement has to
+close.
+
+**The root cause: `qualified_root`/`root` is not just a lookup key in this
+codebase, it is the unit of identity for every part of the vote/confirm
+pipeline, and that pipeline assumes all candidates for one election share one
+root (the definition of a "fork" — competing tips at the same predecessor).**
+`resource_root` only patched the *lookup* step (`active_transactions::
+insert_impl`/`publish`/`cleanup_election`). It left every downstream
+consumer of "root" believing it still means one account-chain position:
+
+1. **Vote generation and final-vote storage use the election's frozen seed
+   root, not the actual winner's root, and diverge the moment the winner
+   is cross-chain.** `election::root` is set once, at construction, from the
+   seeding block (`election.cpp:28`). `confirm_if_quorum`/
+   `broadcast_vote_impl` call `node.final_generator.add(root, status.winner->
+   hash())` and `node.generator.add(root, status.winner->hash())`
+   (`election.cpp:357,522,527`) — always the *frozen* `root`, even after
+   `status.winner` has switched to a block from the other chain
+   (`confirm_if_quorum`, `election.cpp:345-350`, is exactly what
+   `active_transactions::publish` now lets happen across accounts).
+   `vote_generator::process` then does
+   `debug_assert (block == nullptr || root_a == block->root ())`
+   (`voting.cpp:194`) — a direct, load-bearing encoding of the single-root
+   assumption — which fires the instant a resource election's winner is on
+   the non-seed chain. Whether or not `debug_assert` aborts in a given build,
+   `local_vote_history::add` and `vote_spacing::flag` (`voting.cpp:372-373`)
+   file the vote under the *wrong* (stale, seed-chain) root regardless, while
+   `final_vote_store::put` correctly uses `block->qualified_root ()`
+   (`voting.cpp:193`) — so the history cache and the persisted final-vote
+   table disagree about which root this vote belongs to. Vote replay,
+   spacing, and rebroadcast (all keyed by root) silently break for the
+   resource election's actual winner.
+2. **`resource_roots` is memory-only and is not consulted by the guard that
+   decides whether to start a new election.** `insert_impl`
+   (`active_transactions.cpp:387-391`) only checks `roots` (by
+   `qualified_root`) and `recently_confirmed` (also `qualified_root`-keyed)
+   before creating a new election; it never checks `resource_roots`. Two
+   blocks that reach the ordinary "schedule a new election" path (as opposed
+   to the ledger-rejection/`offer_consumed` → `publish()` path) for the two
+   different accounts of the same offer — plausible any time both legs are
+   in flight before either has gone through `ledger.process()` — get two
+   independent `election` objects; the second `resource_roots.emplace` is a
+   silent no-op (`unordered_map::emplace` does not overwrite), so nothing
+   ever merges them. And once the winning election's `cleanup_election` runs
+   (`active_transactions.cpp:283-287`), the `resource_roots` entry is erased
+   with it, so any block for the losing side that arrives afterward — late,
+   or after a restart, when the map is empty again — finds no entry to join
+   and either falls on the floor (via `publish`, which only joins, never
+   creates) or, if it comes in through the ordinary scheduling path instead,
+   starts a brand-new, unlinked election. Either way, the joint identity
+   that was supposed to make the two sides mutually exclusive at the
+   consensus layer exists only as long as one specific in-memory map entry
+   survives, which nothing about elections, cleanup, or restart was designed
+   to guarantee.
+3. **Confirmation and forced ledger application are not atomic with each
+   other, and the gap is exactly where the unsafe window is.**
+   `confirm_if_quorum` marks an election confirmed and broadcasts a final
+   vote as soon as tallied weight clears quorum (`election.cpp:351-368`);
+   applying the winner to the *other* account's chain — rolling back
+   whatever currently holds the lock — happens later and asynchronously, in
+   `block_processor::process_batch`, only once that specific `force`d block
+   is dequeued and processed (`blockprocessor.cpp`, the new
+   `resource`-branch calling `ledger.rollback_swap_conflict`). Between those
+   two events, the election reports "confirmed" while the ledger has not yet
+   been made consistent with that outcome, and `rollback_swap_conflict`
+   itself walks and rolls back an arbitrary suffix of whichever chain
+   currently holds the lock with no coordination with that chain's own,
+   independently-running confirmation height/cementing — so it can roll back
+   blocks other nodes have already cemented through the ordinary per-account
+   path, not just the disputed leg.
+4. **Nano's confirmation-height/cementing pipeline is per-account by
+   construction.** "Confirmed" here means "this account's chain is cemented
+   up to this height." A resource election's whole premise — one election,
+   two different accounts' chains, only one of which should have its
+   conflicting tail survive — has no equivalent atomic operation in that
+   pipeline. Item 3 is a direct consequence: there is no single ledger
+   action that cements "the resource election's outcome" the way there is
+   for an ordinary same-root fork.
+
+**Why this is not a bounded patch.** Every one of these is a different
+symptom of the same fact: `root`/`qualified_root` is threaded through
+vote generation, local vote history, vote spacing, the final-vote table, the
+recently-confirmed/restart-safety cache, and cementing as *the* identity of
+an election, not merely a map key active_transactions happens to use.
+Making a resource-consuming pair of blocks safely share one election
+identity means giving that identity the same properties `qualified_root`
+already has in all of those places — persistent (survives restart, not just
+in an `unordered_map`), exclusive (a rep can final-vote at most once for the
+resource, the same guarantee `voting.cpp`'s per-root uniqueness gives today),
+and atomic with respect to ledger application (confirmed ⇒ applied, not
+"confirmed, and eventually applied"). That requires a persisted, first-class
+identity throughout the existing election lifecycle, not an additional lookup
+table on `active_transactions`. The first attempt was right to stop: it had
+not yet found the bounded way to express that identity.
+
+**Two directions considered:**
+
+- **Give the resource lock its own persisted consensus lifecycle** — a
+  table keyed by offer hash recording which consumer is provisionally
+  winning, its own vote/final-vote namespace distinct from
+  `qualified_root`, its own restart-safe finality record, and a cementing
+  step that only lets one consumer's chain keep its conflicting tail once
+  that record is final. Real protocol work: wire format, persistence
+  schema/migration, and a new arm of the confirmation pipeline.
+- **Remove the race instead of arbitrating it.** Make `swap_accept`/
+  `swap_cancel` resolution deterministic without a cross-chain vote at all —
+  e.g. require the accept to prove non-cancellation against a cemented
+  ledger state, or give cancellation a confirmed-delay that guarantees any
+  in-flight accept has already resolved first — the same shape the M4
+  claim/commit model already uses to avoid needing a joint election
+  (`asset_claim_roots`, decisions-m4.md §4). Ledger/spec-level work, not
+  node-consensus work, and changes the SPEC §9.2 race's user-visible
+  semantics, so it needs sign-off there first.
+
+The first direction does not require a new wire object or database table.
+The existing election and persisted `final_votes` lifecycle already has the
+required properties once the resource becomes a first-class conflict identity:
+
+- `block::election_root()` and `election_qualified_root()` equal the
+  ordinary chain roots for every block except swap consumers. Both
+  `swap_accept` and `swap_cancel` use the offer hash and
+  `{ offer_hash, offer_hash }`.
+- Active insertion/publish/erase, election construction, confirm requests,
+  local vote history, vote spacing, final-vote persistence, and
+  recently-confirmed all use that shared identity. Representatives therefore
+  see one conflict and can persist only one final vote for it, across arrival
+  order and restart.
+- On `offer_consumed`, the publisher finds the applied consumer in the
+  ledger and seeds its election before adding the rejected contender. If the
+  vote changes the winner, forced processing rolls back an intervening suffix
+  on the winner's own chain and the applied cross-chain consumer without
+  erasing the shared election or its votes, then applies the winner.
+
+Tests pin the shared identity, the single active election, persisted final-vote
+exclusivity, and reconciliation in both accept/cancel arrival orders. This
+remains consensus-critical code: deployment requires branch CI evidence, not
+the design argument alone.
