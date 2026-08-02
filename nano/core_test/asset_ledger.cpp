@@ -1492,6 +1492,29 @@ TEST (asset_ledger, swap_offer_locks_the_asset_and_lists_it)
 	ASSERT_EQ (player.pub, found->second);
 }
 
+// Locking an asset moves none of the offerer's Kei, so the fixed header's
+// own balance field must restate the previous one exactly — the same
+// invariant `swap_accept`/`swap_cancel` already enforce on their own asset
+// branches. Without it, any account holding any asset could write whatever
+// it likes into this field and mint itself Kei.
+TEST (asset_ledger, swap_offer_locking_an_asset_cannot_forge_the_balance_field)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	// The player's chain has never received Kei — its balance is 0 — so any
+	// nonzero value here is a forgery, not a restatement.
+	auto forged (signed_asset (pool, player, held.collect->hash (), nano::amount (1'000'000), nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::asset_balance_mismatch, ledger.process (transaction, *forged).code);
+}
+
 // The first time an asset-typed block moves Kei itself: locking Kei is the
 // fixed header's own balance field, exactly like a send (SPEC §9.2).
 TEST (asset_ledger, an_offer_may_lock_kei_itself)

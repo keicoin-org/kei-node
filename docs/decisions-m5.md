@@ -32,7 +32,7 @@ reading blocks this node already stores.
 |---|---|---|
 | Price history (`medianPrice`) | `@keicoin/market` | It is a client-side aggregation over ordinary account history (SPEC §9.1); the node adds no new capability for it. |
 | Advisory `expires_at` enforcement | Nowhere, ever | SPEC §9.3 is explicit that this is client-side only. A block-lattice has no clock (SPEC §5.5), and this project does not add one for a listing deadline. |
-| Cross-chain election prioritisation | Unscheduled — see §9 below | Real consensus work, separately budgeted, not a ledger-validation change. Read §9 before assuming this is finished. |
+| Cross-chain election prioritisation | Implemented — see §9 below | Real consensus work, not a ledger-validation change. §9 walks through why it needed a first-class shared election identity rather than a lookup table, and how that identity is threaded through the existing election lifecycle. |
 
 ## 1. The reserved numbers are spent exactly as reserved
 
@@ -217,7 +217,11 @@ of this writing states plainly that "`swap_offer`/`swap_accept`/`swap_cancel`
 and the market read model are M5" — future work for that repository, not a
 contradiction of it.
 
-## 9. What is not finished: cross-chain conflict prioritisation
+## 9. Cross-chain conflict prioritisation
+
+*(Written before the gap below was closed — kept as-is for the reasoning
+trail. The election-level fix is in §11; this PR ships it, not just the
+gap analysis.)*
 
 Read this section before assuming M5's "accept-vs-cancel conflict rule" is
 complete, because the ledger-level work and the network-level work are two
@@ -261,6 +265,12 @@ than silently shipped as if it were finished: **do not deploy M5 swaps to a
 network where an unresolved accept-vs-cancel race has real value on either
 side of it until this is closed.** Budget it as its own item, the size SPEC
 §5.7 asks the reserve-governance voting work to be budgeted at.
+
+**This was subsequently closed, in this same PR — see §11.** The shared
+election identity described there gives representatives one conflict to vote
+on instead of two independent ones, which is exactly the gap this section
+describes. The warning above no longer applies once §11's change is deployed;
+it is left in place as the reasoning that the fix in §11 had to satisfy.
 
 ## 10. What a second pass over this diff found, and fixed
 

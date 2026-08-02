@@ -1405,6 +1405,17 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 					result.code = nano::process_result::insufficient_asset_balance;
 					return;
 				}
+				// Locking an asset moves none of the account's Kei — the fixed
+				// header's balance field must restate the previous one exactly,
+				// the same invariant `swap_accept`/`swap_cancel` enforce on their
+				// own asset branches. Without this, the block never runs the
+				// Kei-branch check above either, so nothing here would stop the
+				// header from claiming any balance the offerer wants.
+				if (new_balance != previous_balance)
+				{
+					result.code = nano::process_result::asset_balance_mismatch;
+					return;
+				}
 				debit = nano::amount (held - amount);
 			}
 			// Keyed by this block's own hash, not `root` — `link` here holds an
