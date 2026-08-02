@@ -41,14 +41,14 @@ jobs:
       - name: Test the public RPC gateway boundary
         run: python3 -m unittest ops/testnet/test_rpc_gateway.py
 
-      # M2's contract lives in the SDK repository. Pinning the revision makes
+      # The M2 and M4 contracts live in the SDK repository. Pinning the revision makes
       # a green node build a claim about one reviewable contract, not whatever
       # happened to be at the tip of another repository when the job started.
       - name: Check out the pinned SDK contract
         uses: actions/checkout@v4
         with:
           repository: keicoin-org/kei-transaction
-          ref: a4a52c6a04fb4d19c38f51a58c7211ff11239264
+          ref: dcfa82d41de095f455e0effabe6f8094483e0743
           path: kei-transaction
 
       - name: Set up Bun
@@ -187,7 +187,7 @@ jobs:
       # the inherited RPC suite is red on genesis balances §14 changed on
       # purpose, and widening this before that is fixed would bury the signal.
       - name: Run Kei RPC tests
-        run: ./build/rpc_test --gtest_filter='rpc.account_history_block_shape'
+        run: ./build/rpc_test --gtest_filter='rpc.account_history_block_shape:rpc.commit_info_claim_status_contract'
 
       - name: Start a clean dev node and wait for RPC
         env:
@@ -232,6 +232,15 @@ jobs:
           KEI_SDK_DIR: ${{ github.workspace }}/kei-transaction
           KEI_NODE_URL: http://127.0.0.1:45000
         run: bash conformance/run-m2.sh
+
+      # commit_info/claim_status are M4; the pinned SDK revision above carries
+      # both their executable coverage and the native commit/claim wire layout.
+      # See conformance/README.md.
+      - name: Run the exact M4 SDK contract against the node
+        env:
+          KEI_SDK_DIR: ${{ github.workspace }}/kei-transaction
+          KEI_NODE_URL: http://127.0.0.1:45000
+        run: bash conformance/run-m4.sh
 
       - name: Stop dev node
         if: always()

@@ -1,4 +1,4 @@
-# M2 conformance
+# M2 and M4 conformance
 
 M2 has one executable SDK contract and two transports. These exact files run
 against `MockNode` when `KEI_NODE_URL` is absent and against the native node
@@ -14,8 +14,22 @@ The shared history case exercises the faucet's state-open community account;
 legacy `open`, so the two wire shapes cannot accidentally be conflated.
 
 Commit and claim are M4 by the boundary in `docs/decisions-m2.md` section 0.
-Their SDK coverage remains executable against the mock in `m4-node.test.ts` and
-`m4-over-http.test.ts`, but those files are not part of M2's native-node gate.
+Their SDK coverage is these exact files, run the same way by
+[`run-m4.sh`](run-m4.sh):
+
+- `packages/core/test/m4-node.test.ts`
+- `packages/kei/test/m4-over-http.test.ts`
+
+The pinned SDK revision in `.github/workflows/build.yml` carries both the M4
+tests and the native commit/claim wire layout they exercise. Earlier SDK
+revisions already contained deferred M4 test files, but still encoded only the
+M2 operations; pinning one of those revisions makes every live M4 block fail as
+invalid. Before this, the build workflow ran only `run-m2.sh`: a node could pass
+its gate while `commit_info` and `claim_status` answered under the wrong names
+and in the wrong shapes, because nothing in CI ever asked them a question
+through the SDK. `docs/decisions-m4.md` §8.4 has the history of what those wrong
+names were (`asset_commit`, `asset_claims`) and why they still answer, as
+deprecated aliases, alongside the frozen ones.
 
 ## M4 claim hashing
 
@@ -50,19 +64,23 @@ KEI_SDK_DIR=/path/to/kei-transaction bun run conformance/generate-claim-vectors.
 
 ## Run by hand
 
-Start a dev-network node with RPC enabled, then point the launcher at a checkout
-of the SDK:
+Start a dev-network node with RPC enabled, then point either launcher at a
+checkout of the SDK:
 
 ```sh
 KEI_SDK_DIR=/path/to/kei-transaction \
 KEI_NODE_URL=http://127.0.0.1:45000 \
 bash conformance/run-m2.sh
+
+KEI_SDK_DIR=/path/to/kei-transaction \
+KEI_NODE_URL=http://127.0.0.1:45000 \
+bash conformance/run-m4.sh
 ```
 
 The build workflow does the same thing from a clean temporary node database. It
 checks out the SDK at an explicit commit, starts `bananode`, waits for the
-`version` action to answer, runs the two files above, and uploads the node log
-even when the suite fails.
+`version` action to answer, runs both sets of files above, and uploads the
+node log even when either suite fails.
 
 ## Dependency order
 

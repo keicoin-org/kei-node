@@ -39,8 +39,9 @@ public:
 	void account_holdings ();
 	void asset_balance ();
 	void asset_holders ();
-	void asset_commit ();
-	void asset_claims ();
+	/** docs/rpc.md's frozen names. `asset_commit`/`asset_claims` alias these. */
+	void commit_info ();
+	void claim_status ();
 	/** The one-account, Kei-and-assets shape of `accounts_receivable`. */
 	void kei_receivables ();
 	void work_thresholds ();
