@@ -277,6 +277,9 @@ bool nano::rocksdb::store::do_upgrades (nano::write_transaction const & transact
 			upgrade_v22_to_v23 (transaction_a);
 			[[fallthrough]];
 		case 23:
+			upgrade_v23_to_v24 (transaction_a);
+			[[fallthrough]];
+		case 24:
 			break;
 		default:
 			logger.always_log (boost::str (boost::format ("The version of the ledger (%1%) is too high for this node") % version_l));
@@ -295,6 +298,29 @@ void nano::rocksdb::store::upgrade_v22_to_v23 (nano::write_transaction const & t
 	// create_column_families () when the database is opened.
 	version.put (transaction_a, 23);
 	logger.always_log ("Finished creating the asset tables");
+}
+
+void nano::rocksdb::store::upgrade_v23_to_v24 (nano::write_transaction const & transaction_a)
+{
+	logger.always_log ("Preparing v23 to v24 database upgrade...");
+	// The LMDB side of this upgrade explains why it exists: M4's and M5's tables
+	// were folded into v23 instead of getting a version, so a database stamped
+	// v23 by an M2 or M3 node does not have them. RocksDB fails less loudly than
+	// LMDB does — an existing database is reopened with the column families it
+	// actually has (get_current_column_families ()), so it starts and then finds
+	// nothing where a claim or an offer should be — but the repair is the same.
+	for (auto const & name : { "asset_commits", "asset_claims", "asset_claim_roots", "swap_locks", "swap_offers" })
+	{
+		if (!column_family_exists (name))
+		{
+			::rocksdb::ColumnFamilyHandle * handle = nullptr;
+			auto status = db->CreateColumnFamily (get_cf_options (name), name, &handle);
+			release_assert (status.ok ());
+			handles.emplace_back (handle);
+		}
+	}
+	version.put (transaction_a, 24);
+	logger.always_log ("Finished creating the claim and swap tables");
 }
 
 void nano::rocksdb::store::upgrade_v21_to_v22 (nano::write_transaction const & transaction_a)
