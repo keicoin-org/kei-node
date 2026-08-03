@@ -707,12 +707,15 @@ namespace lmdb
 			store.initialize (transaction, ledger.cache, nano::dev::constants);
 
 			// Drop the tables an M2 node never wrote, then put the version back
-			// to the one it would have stamped.
-			ASSERT_FALSE (mdb_drop (store.env.tx (transaction), store.asset_store.asset_commits_handle, 1));
-			ASSERT_FALSE (mdb_drop (store.env.tx (transaction), store.asset_store.asset_claims_handle, 1));
-			ASSERT_FALSE (mdb_drop (store.env.tx (transaction), store.asset_store.asset_claim_roots_handle, 1));
-			ASSERT_FALSE (mdb_drop (store.env.tx (transaction), store.asset_store.swap_locks_handle, 1));
-			ASSERT_FALSE (mdb_drop (store.env.tx (transaction), store.asset_store.swap_offers_handle, 1));
+			// to the one it would have stamped. By name rather than by handle:
+			// the store owns its handles privately, and the database is what this
+			// test is describing anyway.
+			for (auto const & name : { "asset_commits", "asset_claims", "asset_claim_roots", "swap_locks", "swap_offers" })
+			{
+				MDB_dbi handle{ 0 };
+				ASSERT_FALSE (mdb_dbi_open (store.env.tx (transaction), name, 0, &handle));
+				ASSERT_FALSE (mdb_drop (store.env.tx (transaction), handle, 1));
+			}
 			store.version.put (transaction, 23);
 		}
 
