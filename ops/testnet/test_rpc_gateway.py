@@ -75,6 +75,15 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(body, {"action": "account_info"})
         self.assertEqual(headers["Access-Control-Allow-Origin"], "*")
 
+    def test_forwards_the_reads_the_market_needs(self) -> None:
+        # Publishing an offer only needs `process`, so a gateway missing these
+        # two looks fine right up until the SDK reads an offer back and the
+        # market reports it cannot see its own listing.
+        for action in ("swap_info", "account_swaps"):
+            status, body, _ = self.post({"action": action, "hash": "0" * 64})
+            self.assertEqual(status, 200)
+            self.assertEqual(body, {"action": action})
+
     def test_refuses_inherited_control_actions(self) -> None:
         before = len(Upstream.calls)
         status, body, _ = self.post({"action": "wallet_create"})
