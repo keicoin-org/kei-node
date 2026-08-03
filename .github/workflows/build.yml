@@ -41,14 +41,20 @@ jobs:
       - name: Test the public RPC gateway boundary
         run: python3 -m unittest ops/testnet/test_rpc_gateway.py
 
-      # The M2 and M4 contracts live in the SDK repository. Pinning the revision makes
-      # a green node build a claim about one reviewable contract, not whatever
+      # The M2, M4 and M5 contracts live in the SDK repository. Pinning the revision
+      # makes a green node build a claim about one reviewable contract, not whatever
       # happened to be at the tip of another repository when the job started.
+      #
+      # Moved from dcfa82d4 to 9ac5d85. The old pin predated M5's SDK tests
+      # entirely, so run-m5.sh below had nothing to run against it. The new one is
+      # the first revision carrying packages/kei/test/market-over-http.test.ts
+      # *including* its ledger-lock case (kei-transaction#24), which is the one
+      # assertion in that file the mock cannot fake.
       - name: Check out the pinned SDK contract
         uses: actions/checkout@v4
         with:
           repository: keicoin-org/kei-transaction
-          ref: dcfa82d41de095f455e0effabe6f8094483e0743
+          ref: 9ac5d85b4cffd6dd33f3fad32ce177d76c6565d0
           path: kei-transaction
 
       - name: Set up Bun
@@ -246,6 +252,17 @@ jobs:
           KEI_SDK_DIR: ${{ github.workspace }}/kei-transaction
           KEI_NODE_URL: http://127.0.0.1:45000
         run: bash conformance/run-m4.sh
+
+      # M5's swap blocks. The SDK has run the market over HTTP since M5 landed,
+      # but never against a node in CI — the pin predated the file, so nothing
+      # here could reach it. The node side is what this gates: a swap_offer that
+      # the ledger accepts, a lock only the ledger can enforce, and an accept
+      # that moves both legs or neither.
+      - name: Run the exact M5 SDK contract against the node
+        env:
+          KEI_SDK_DIR: ${{ github.workspace }}/kei-transaction
+          KEI_NODE_URL: http://127.0.0.1:45000
+        run: bash conformance/run-m5.sh
 
       - name: Stop dev node
         if: always()

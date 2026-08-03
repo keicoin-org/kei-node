@@ -31,6 +31,24 @@ through the SDK. `docs/decisions-m4.md` §8.4 has the history of what those wron
 names were (`asset_commit`, `asset_claims`) and why they still answer, as
 deprecated aliases, alongside the frozen ones.
 
+M5's market is the same arrangement again, run by
+[`run-m5.sh`](run-m5.sh):
+
+- `packages/kei/test/market-over-http.test.ts`
+
+That file has existed since M5 landed in the SDK and already swaps its transport
+on `KEI_NODE_URL`, so it could always have run against the node. Nothing ever
+did: there was no runner here, and the pinned SDK revision in
+`.github/workflows/build.yml` predated the file, so a bump was needed before a
+step could reach it. Until then "the market works" rested on the mock enforcing
+the same rules the ledger does — and the mock is a second implementation of those
+rules, not the same one.
+
+The case worth naming is the lock. Offering an item twice fails whether the lock
+is real or the item is simply singular; offering 4 of 10 fungible units and then
+7 of the remaining 6 does not, and that is what separates a ledger-enforced lock
+from the SDK's own bookkeeping.
+
 ## M4 claim hashing
 
 `asset_claim_leaf` and `asset_claim_root` (nano/lib/blocks.cpp) reimplement,
