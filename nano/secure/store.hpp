@@ -1034,7 +1034,7 @@ public:
 	account_store & account;
 	pending_store & pending;
 	static int constexpr version_minimum{ 14 };
-	static int constexpr version_current{ 23 };
+	static int constexpr version_current{ 24 };
 
 public:
 	online_weight_store & online_weight;

@@ -227,15 +227,16 @@ void nano::lmdb::store::open_databases (bool & error_a, nano::transaction const 
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "holders", flags, &asset_store.holders_handle) != 0;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "asset_pending", flags, &asset_store.asset_pending_handle) != 0;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "issued", flags, &asset_store.issued_handle) != 0;
-	// M4's three (decisions-m4.md §4). A database written by an M2 node simply
-	// gains them empty on the next open, so they need no version bump and no
-	// upgrade step: there is no old data to reinterpret, only new tables that
-	// were never written before.
+	// M4's three (decisions-m4.md §4) and M5's two (decisions-m5.md §6). These
+	// are only created when `flags` carries MDB_CREATE, which happens on the
+	// upgrade path alone — a database already stamped version_current is opened
+	// from here with flags of 0, and a missing table is MDB_NOTFOUND and a hard
+	// init error. That is why they arrive with a version bump (v23 -> v24)
+	// rather than by appearing here: "created empty on the next open" is true
+	// of a fresh or upgrading database and of nothing else.
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "asset_commits", flags, &asset_store.asset_commits_handle) != 0;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "asset_claims", flags, &asset_store.asset_claims_handle) != 0;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "asset_claim_roots", flags, &asset_store.asset_claim_roots_handle) != 0;
-	// M5's two (decisions-m5.md §6). Same story: new tables that were never
-	// written before, so an M4 database gains them empty and needs no upgrade.
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "swap_locks", flags, &asset_store.swap_locks_handle) != 0;
 	error_a |= mdb_dbi_open (env.tx (transaction_a), "swap_offers", flags, &asset_store.swap_offers_handle) != 0;
 
@@ -328,6 +329,9 @@ bool nano::lmdb::store::do_upgrades (nano::write_transaction & transaction_a, na
 			upgrade_v22_to_v23 (transaction_a);
 			[[fallthrough]];
 		case 23:
+			upgrade_v23_to_v24 (transaction_a);
+			[[fallthrough]];
+		case 24:
 			break;
 		default:
 			logger.always_log (boost::str (boost::format ("The version of the ledger (%1%) is too high for this node") % version_l));
@@ -819,6 +823,29 @@ void nano::lmdb::store::upgrade_v22_to_v23 (nano::write_transaction const & tran
 	release_assert (!mdb_dbi_open (env.tx (transaction_a), "swap_offers", MDB_CREATE, &asset_store.swap_offers_handle));
 	version.put (transaction_a, 23);
 	logger.always_log ("Finished creating the asset tables");
+}
+
+void nano::lmdb::store::upgrade_v23_to_v24 (nano::write_transaction const & transaction_a)
+{
+	logger.always_log ("Preparing v23 to v24 database upgrade...");
+	// M4's and M5's tables were added to upgrade_v22_to_v23 above rather than
+	// given a version of their own, so a database stamped v23 by an M2 or M3
+	// node has only the five asset tables that existed then. Nothing reopens it
+	// with MDB_CREATE afterwards — open_databases () passes 0 once the version
+	// matches — so those nodes could not be upgraded in place at all: they
+	// failed at MDB_NOTFOUND with "Error initializing node" and no further
+	// detail. This version exists to give them a write transaction that creates
+	// what they are missing.
+	//
+	// MDB_CREATE on a table that is already there is a plain open, so this is
+	// idempotent and costs a v22 database (which just got all ten) nothing.
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "asset_commits", MDB_CREATE, &asset_store.asset_commits_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "asset_claims", MDB_CREATE, &asset_store.asset_claims_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "asset_claim_roots", MDB_CREATE, &asset_store.asset_claim_roots_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "swap_locks", MDB_CREATE, &asset_store.swap_locks_handle));
+	release_assert (!mdb_dbi_open (env.tx (transaction_a), "swap_offers", MDB_CREATE, &asset_store.swap_offers_handle));
+	version.put (transaction_a, 24);
+	logger.always_log ("Finished creating the claim and swap tables");
 }
 
 void nano::lmdb::store::upgrade_v21_to_v22 (nano::write_transaction const & transaction_a)

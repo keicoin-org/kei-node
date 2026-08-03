@@ -682,6 +682,50 @@ namespace lmdb
 			ASSERT_FALSE (store.init_error ());
 		}
 	}
+
+	// A database stamped v23 by an M2 or M3 node has the five asset tables that
+	// existed then and none of M4's or M5's, because those were added to
+	// upgrade_v22_to_v23 rather than to a version of their own. Reopening one is
+	// the public testnet's exact situation, and before v24 it failed at
+	// MDB_NOTFOUND: open_databases () passes flags of 0 once the version already
+	// matches, so nothing ever created the missing tables.
+	TEST (mdb_block_store, a_v23_database_without_the_claim_and_swap_tables_still_opens)
+	{
+		if (nano::rocksdb_config::using_rocksdb_in_tests ())
+		{
+			// Don't test this in rocksdb mode
+			GTEST_SKIP ();
+		}
+		auto path (nano::unique_path ());
+		nano::logger_mt logger;
+		{
+			nano::lmdb::store store (logger, path, nano::dev::constants);
+			ASSERT_FALSE (store.init_error ());
+			nano::stats stats;
+			nano::ledger ledger (store, stats, nano::dev::constants);
+			auto transaction (store.tx_begin_write ());
+			store.initialize (transaction, ledger.cache, nano::dev::constants);
+
+			// Drop the tables an M2 node never wrote, then put the version back
+			// to the one it would have stamped.
+			ASSERT_FALSE (mdb_drop (store.env.tx (transaction), store.asset_store.asset_commits_handle, 1));
+			ASSERT_FALSE (mdb_drop (store.env.tx (transaction), store.asset_store.asset_claims_handle, 1));
+			ASSERT_FALSE (mdb_drop (store.env.tx (transaction), store.asset_store.asset_claim_roots_handle, 1));
+			ASSERT_FALSE (mdb_drop (store.env.tx (transaction), store.asset_store.swap_locks_handle, 1));
+			ASSERT_FALSE (mdb_drop (store.env.tx (transaction), store.asset_store.swap_offers_handle, 1));
+			store.version.put (transaction, 23);
+		}
+
+		{
+			nano::lmdb::store store (logger, path, nano::dev::constants);
+			ASSERT_FALSE (store.init_error ());
+			auto transaction (store.tx_begin_read ());
+			ASSERT_EQ (store.version.get (transaction), store.version_current);
+			// Upgraded, not merely opened: the recreated table has to be readable,
+			// which an unopened handle would not be.
+			ASSERT_FALSE (store.asset.commit_exists (transaction, nano::uint256_union (0)));
+		}
+	}
 }
 }
 
