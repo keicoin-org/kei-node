@@ -39,6 +39,8 @@ ALLOWED_ACTIONS = frozenset(
         "asset_holders",
         "commit_info",
         "claim_status",
+        "swap_info",
+        "account_swaps",
         "faucet",
     }
 )
