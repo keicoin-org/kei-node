@@ -9,8 +9,11 @@
 
 #include <gtest/gtest.h>
 
+#include <boost/property_tree/json_parser.hpp>
+
 #include <array>
 #include <limits>
+#include <sstream>
 
 // The five asset operations, taken through nano::ledger::process and back out
 // again through nano::ledger::rollback (decisions-m2.md §7, §10, §12).
@@ -182,9 +185,25 @@ funded fund_player (nano::ledger & ledger_a, nano::write_transaction const & tra
 	funded result;
 	result.mint = signed_asset (pool_a, nano::dev::team_key, issuer_previous_a, nano::amount (after_issuing (1)), nano::asset_op::mint, asset_id_a, amount_a, recipient_a.pub);
 	EXPECT_EQ (nano::process_result::progress, ledger_a.process (transaction_a, *result.mint).code);
-	result.collect = signed_asset (pool_a, recipient_a, 0, 0, nano::asset_op::asset_receive, asset_id_a, 0, result.mint->hash ());
+	result.collect = signed_asset (pool_a, recipient_a, 0, 0, nano::asset_op::asset_receive, 0, 0, result.mint->hash ());
 	EXPECT_EQ (nano::process_result::progress, ledger_a.process (transaction_a, *result.collect).code);
 	return result;
+}
+
+/** The JSON shape used by RPC must reproduce an accepted signed block exactly. */
+void assert_rpc_json_round_trip (nano::asset_block const & block_a)
+{
+	std::string json;
+	block_a.serialize_json (json);
+	boost::property_tree::ptree tree;
+	std::stringstream input (json);
+	boost::property_tree::read_json (input, tree);
+	bool error (false);
+	nano::asset_block decoded (error, tree);
+	ASSERT_FALSE (error);
+	ASSERT_EQ (block_a.hash (), decoded.hash ());
+	ASSERT_EQ (block_a.signature, decoded.signature);
+	ASSERT_FALSE (nano::validate_message (decoded.hashables.account, decoded.hash (), decoded.signature));
 }
 }
 
@@ -422,7 +441,7 @@ TEST (asset_ledger, a_mint_arrives_as_receivable_and_the_holder_collects_it)
 
 	// An asset block can open an account: a player who has never held Kei can
 	// still be minted a token (§10).
-	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
+	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
 	{
 		auto transaction (store.tx_begin_write ());
 		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *collect).code);
@@ -448,6 +467,96 @@ TEST (asset_ledger, a_mint_arrives_as_receivable_and_the_holder_collects_it)
 	// If it did, capturing the chain would cost one issuance and one mint.
 	ASSERT_EQ (nano::uint128_t (0), ledger.weight (player.pub));
 	ASSERT_TRUE (ledger.account_balance (transaction, player.pub).is_zero ());
+}
+
+TEST (asset_ledger, asset_receive_rejects_noncanonical_signed_headers_without_mutation)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
+	auto const block_count (ledger.cache.block_count.load ());
+	auto const stored_block_count (store.block.count (transaction));
+	auto const issuer_head (ledger.latest (transaction, nano::dev::team_key.pub));
+	auto const issuer_frontier (store.frontier.get (transaction, issuer_head));
+
+	std::array<std::shared_ptr<nano::asset_block>, 2> noncanonical{
+		signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()),
+		signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 999, mint->hash ())
+	};
+	for (auto const & rejected : noncanonical)
+	{
+		SCOPED_TRACE (rejected->hash ().to_string ());
+		ASSERT_EQ (nano::process_result::bad_asset_payload, ledger.process (transaction, *rejected).code);
+		ASSERT_EQ (block_count, ledger.cache.block_count.load ());
+		ASSERT_EQ (stored_block_count, store.block.count (transaction));
+		ASSERT_FALSE (ledger.account_info (transaction, player.pub));
+		ASSERT_TRUE (store.frontier.get (transaction, rejected->hash ()).is_zero ());
+		ASSERT_FALSE (store.block.exists (transaction, rejected->hash ()));
+		ASSERT_TRUE (store.asset.balance (transaction, player.pub, issued.id).is_zero ());
+		ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, mint->hash ())));
+		ASSERT_FALSE (store.pending.exists (transaction, nano::pending_key (player.pub, rejected->hash ())));
+		nano::asset_info asset;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+		ASSERT_EQ (nano::amount (500), asset.circulating);
+		ASSERT_EQ (issuer_head, ledger.latest (transaction, nano::dev::team_key.pub));
+		ASSERT_EQ (issuer_frontier, store.frontier.get (transaction, issuer_head));
+	}
+
+	auto canonical (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *canonical).code);
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+	ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, mint->hash ())));
+	assert_rpc_json_round_trip (*canonical);
+}
+
+TEST (asset_ledger, burn_rejects_noncanonical_link_without_mutation)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	auto const & issuer (nano::dev::team_key);
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto mint (signed_asset (pool, issuer, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, issuer.pub));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
+	auto collect (signed_asset (pool, issuer, mint->hash (), nano::amount (after_issuing (1)), nano::asset_op::asset_receive, 0, 0, mint->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *collect).code);
+	auto rejected (signed_asset (pool, issuer, collect->hash (), nano::amount (after_issuing (1)), nano::asset_op::burn, issued.id, 100, nano::block_hash{ 1 }));
+	auto const block_count (ledger.cache.block_count.load ());
+	auto const stored_block_count (store.block.count (transaction));
+	auto const head (ledger.latest (transaction, issuer.pub));
+	auto const frontier (store.frontier.get (transaction, head));
+	auto const kei_balance (ledger.account_balance (transaction, issuer.pub));
+
+	ASSERT_EQ (nano::process_result::bad_asset_payload, ledger.process (transaction, *rejected).code);
+	ASSERT_EQ (block_count, ledger.cache.block_count.load ());
+	ASSERT_EQ (stored_block_count, store.block.count (transaction));
+	ASSERT_EQ (head, ledger.latest (transaction, issuer.pub));
+	ASSERT_EQ (kei_balance, ledger.account_balance (transaction, issuer.pub));
+	ASSERT_EQ (frontier, store.frontier.get (transaction, head));
+	ASSERT_TRUE (store.frontier.get (transaction, rejected->hash ()).is_zero ());
+	ASSERT_FALSE (store.block.exists (transaction, rejected->hash ()));
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, issuer.pub, issued.id));
+	ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (issuer.pub, rejected->hash ())));
+	ASSERT_FALSE (store.pending.exists (transaction, nano::pending_key (issuer.pub, rejected->hash ())));
+	nano::asset_info asset;
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+	ASSERT_EQ (nano::amount (500), asset.circulating);
+
+	auto canonical (signed_asset (pool, issuer, collect->hash (), nano::amount (after_issuing (1)), nano::asset_op::burn, issued.id, 100, 0));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *canonical).code);
+	ASSERT_EQ (nano::amount (400), store.asset.balance (transaction, issuer.pub, issued.id));
+	ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+	ASSERT_EQ (nano::amount (400), asset.circulating);
+	assert_rpc_json_round_trip (*canonical);
 }
 
 // The cap is on circulating supply, and it is the node that enforces it.
@@ -596,7 +705,7 @@ TEST (asset_ledger, burning_frees_headroom_to_mint_again)
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
 	// The issuer mints to itself, which is still a receivable it has to collect.
 	auto mint (signed_asset (pool, issuer, issued.block->hash (), balance, nano::asset_op::mint, issued.id, 1000, issuer.pub));
-	auto collect (signed_asset (pool, issuer, mint->hash (), balance, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
+	auto collect (signed_asset (pool, issuer, mint->hash (), balance, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
 	auto burn (signed_asset (pool, issuer, collect->hash (), balance, nano::asset_op::burn, issued.id, 400, 0));
 	{
 		auto transaction (store.tx_begin_write ());
@@ -630,7 +739,7 @@ TEST (asset_ledger, a_soulbound_asset_cannot_be_transferred)
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::none, 1000));
 	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
-	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
+	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
 	auto transfer (signed_asset (pool, player, collect->hash (), 0, nano::asset_op::transfer, issued.id, 100, other.pub));
 	auto burn (signed_asset (pool, player, collect->hash (), 0, nano::asset_op::burn, issued.id, 100, 0));
 
@@ -655,7 +764,7 @@ TEST (asset_ledger, issuer_only_permits_only_the_issuer_side)
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::issuer_only, 1000));
 	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
-	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
+	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
 	auto to_player = signed_asset (pool, player, collect->hash (), 0, nano::asset_op::transfer, issued.id, 100, other.pub);
 	auto to_issuer = signed_asset (pool, player, collect->hash (), 0, nano::asset_op::transfer, issued.id, 100, nano::dev::team_key.pub);
 
@@ -697,7 +806,7 @@ TEST (asset_ledger, transferring_everything_deletes_both_entries)
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
 	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
-	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
+	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
 	auto transfer (signed_asset (pool, player, collect->hash (), 0, nano::asset_op::transfer, issued.id, 500, other.pub));
 	{
 		auto transaction (store.tx_begin_write ());
@@ -785,7 +894,7 @@ TEST (asset_ledger, rolling_back_a_mint_the_holder_already_collected)
 
 	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
 	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
-	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
+	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
 	{
 		auto transaction (store.tx_begin_write ());
 		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
@@ -821,7 +930,7 @@ TEST (asset_ledger, rolling_back_a_collect_makes_it_receivable_again)
 	nano::asset_payload payload;
 	payload.memo = "quest reward";
 	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub, payload));
-	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, issued.id, 0, mint->hash ()));
+	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
 	{
 		auto transaction (store.tx_begin_write ());
 		ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
@@ -1599,7 +1708,7 @@ TEST (asset_ledger, swap_accept_settles_both_legs_and_each_side_collects)
 	ASSERT_EQ (player.pub, gem_pending.source);
 	ASSERT_EQ (issued.id, gem_pending.asset_id);
 	ASSERT_EQ (nano::amount (200), gem_pending.amount);
-	auto collect (signed_asset (pool, nano::dev::team_key, accept->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::asset_receive, issued.id, 0, accept->hash ()));
+	auto collect (signed_asset (pool, nano::dev::team_key, accept->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::asset_receive, 0, 0, accept->hash ()));
 	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *collect).code);
 	ASSERT_EQ (nano::amount (200), store.asset.balance (transaction, nano::dev::team_key.pub, issued.id));
 }
@@ -1627,6 +1736,59 @@ TEST (asset_ledger, self_locking_prevents_offering_units_already_locked)
 
 // The offerer recovers their own asset whenever they like — the lock's own
 // garbage collector (SPEC §9.3).
+TEST (asset_ledger, swap_cancel_rejects_noncanonical_signed_headers_without_mutation)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto const block_count (ledger.cache.block_count.load ());
+	auto const stored_block_count (store.block.count (transaction));
+	auto const frontier (store.frontier.get (transaction, offer->hash ()));
+
+	std::array<std::shared_ptr<nano::asset_block>, 2> noncanonical{
+		signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, issued.id, 0, offer->hash ()),
+		signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 1, offer->hash ())
+	};
+	for (auto const & rejected : noncanonical)
+	{
+		SCOPED_TRACE (rejected->hash ().to_string ());
+		ASSERT_EQ (nano::process_result::bad_asset_payload, ledger.process (transaction, *rejected).code);
+		ASSERT_EQ (block_count, ledger.cache.block_count.load ());
+		ASSERT_EQ (stored_block_count, store.block.count (transaction));
+		ASSERT_EQ (offer->hash (), ledger.latest (transaction, player.pub));
+		ASSERT_TRUE (ledger.account_balance (transaction, player.pub).is_zero ());
+		ASSERT_EQ (frontier, store.frontier.get (transaction, offer->hash ()));
+		ASSERT_TRUE (store.frontier.get (transaction, rejected->hash ()).is_zero ());
+		ASSERT_FALSE (store.block.exists (transaction, rejected->hash ()));
+		ASSERT_EQ (nano::amount (300), store.asset.balance (transaction, player.pub, issued.id));
+		ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, rejected->hash ())));
+		ASSERT_FALSE (store.pending.exists (transaction, nano::pending_key (player.pub, rejected->hash ())));
+		nano::asset_info asset;
+		ASSERT_FALSE (store.asset.get (transaction, issued.id, asset));
+		ASSERT_EQ (nano::amount (500), asset.circulating);
+		nano::asset_lock_info lock;
+		ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+		ASSERT_TRUE (lock.open ());
+		auto listing (store.asset.offers_begin (transaction, nano::offer_key (issued.id, offer->hash ())));
+		ASSERT_NE (store.asset.offers_end (), listing);
+		ASSERT_TRUE (nano::offer_key (issued.id, offer->hash ()) == listing->first);
+	}
+
+	auto canonical (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *canonical).code);
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
+	assert_rpc_json_round_trip (*canonical);
+}
+
 TEST (asset_ledger, swap_cancel_returns_the_locked_asset)
 {
 	auto ctx = nano::test::context::ledger_empty ();
