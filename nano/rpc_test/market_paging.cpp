@@ -100,6 +100,12 @@ boost::property_tree::ptree swaps_request (nano::account const & account_a, uint
 	return request;
 }
 
+boost::property_tree::ptree wait_swaps (nano::test::system & system_a, nano::test::rpc_context const & rpc_ctx_a, nano::account const & account_a, uint64_t count_a, uint64_t scan_count_a, std::string const & before_a = "")
+{
+	auto request (swaps_request (account_a, count_a, scan_count_a, before_a));
+	return wait_response (system_a, rpc_ctx_a, request, 10s);
+}
+
 std::vector<std::string> offer_hashes (boost::property_tree::ptree const & response_a)
 {
 	std::vector<std::string> hashes;
@@ -124,7 +130,7 @@ TEST (rpc, account_swaps_pages_without_duplicate_or_skip_and_freezes_head)
 	append_market_block (*node, chain, false);
 	auto const frozen_head (append_market_block (*node, chain, true));
 
-	auto page1 (wait_response (system, rpc_ctx, swaps_request (chain.key.pub, 2, 2), 10s));
+	auto page1 (wait_swaps (system, rpc_ctx, chain.key.pub, 2, 2));
 	ASSERT_EQ ((std::vector<std::string>{ chain.offers[2].to_string () }), offer_hashes (page1));
 	ASSERT_EQ (2, page1.get<uint64_t> ("scanned"));
 	ASSERT_FALSE (page1.get<bool> ("exhausted"));
@@ -134,13 +140,13 @@ TEST (rpc, account_swaps_pages_without_duplicate_or_skip_and_freezes_head)
 
 	// A new offer after page one must not appear in the frozen backward walk.
 	append_market_block (*node, chain, true);
-	auto page2 (wait_response (system, rpc_ctx, swaps_request (chain.key.pub, 2, 2, cursor1), 10s));
+	auto page2 (wait_swaps (system, rpc_ctx, chain.key.pub, 2, 2, cursor1));
 	ASSERT_EQ ((std::vector<std::string>{ chain.offers[1].to_string () }), offer_hashes (page2));
 	ASSERT_EQ (2, page2.get<uint64_t> ("scanned"));
 	ASSERT_FALSE (page2.get<bool> ("exhausted"));
 	ASSERT_EQ (frozen_head.to_string (), page2.get<std::string> ("snapshot"));
 
-	auto page3 (wait_response (system, rpc_ctx, swaps_request (chain.key.pub, 1, 1, page2.get<std::string> ("next")), 10s));
+	auto page3 (wait_swaps (system, rpc_ctx, chain.key.pub, 1, 1, page2.get<std::string> ("next")));
 	ASSERT_EQ ((std::vector<std::string>{ chain.offers[0].to_string () }), offer_hashes (page3));
 	ASSERT_EQ (1, page3.get<uint64_t> ("scanned"));
 	ASSERT_TRUE (page3.get<bool> ("exhausted"));
@@ -163,7 +169,7 @@ TEST (rpc, account_swaps_rejects_malformed_tampered_cross_scope_and_stale_cursor
 	append_market_block (*node, chain, true);
 	append_market_block (*node, chain, false);
 	append_market_block (*node, chain, true);
-	auto page (wait_response (system, rpc_ctx, swaps_request (chain.key.pub, 1, 1), 10s));
+	auto page (wait_swaps (system, rpc_ctx, chain.key.pub, 1, 1));
 	auto const cursor (page.get<std::string> ("next"));
 
 	auto malformed (swaps_request (chain.key.pub, 1, 1, "not-a-cursor"));
@@ -201,7 +207,7 @@ TEST (rpc, account_swaps_scan_count_is_independent_and_legacy_request_still_work
 	append_market_block (*node, chain, false);
 	append_market_block (*node, chain, false);
 
-	auto bounded (wait_response (system, rpc_ctx, swaps_request (chain.key.pub, 10, 1), 10s));
+	auto bounded (wait_swaps (system, rpc_ctx, chain.key.pub, 10, 1));
 	ASSERT_TRUE (offer_hashes (bounded).empty ());
 	ASSERT_EQ (1, bounded.get<uint64_t> ("scanned"));
 	ASSERT_FALSE (bounded.get<bool> ("exhausted"));
