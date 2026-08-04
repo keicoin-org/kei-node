@@ -18,11 +18,133 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <vector>
-
 
 namespace
 {
+bool decode_unsigned (std::string const &, uint64_t &);
+
+constexpr char market_cursor_prefix[]{ "kmp1" };
+constexpr char market_cursor_domain[]{ "kei-market-page-v1:" };
+constexpr std::size_t market_cursor_body_size{ 194 };
+constexpr std::size_t market_cursor_signature_size{ 128 };
+constexpr std::size_t market_cursor_size{ sizeof (market_cursor_prefix) - 1 + market_cursor_body_size + market_cursor_signature_size };
+
+enum class market_cursor_result
+{
+	ok,
+	invalid,
+	scope
+};
+
+struct market_cursor
+{
+	char kind{ 0 };
+	char filter{ 0 };
+	nano::uint256_union scope{};
+	nano::block_hash anchor{};
+	nano::block_hash position{};
+};
+
+std::string market_cursor_body (market_cursor const & cursor_a)
+{
+	std::string body;
+	body.reserve (market_cursor_body_size);
+	body.push_back (cursor_a.kind);
+	body.push_back (cursor_a.filter);
+	body += cursor_a.scope.to_string ();
+	body += cursor_a.anchor.to_string ();
+	body += cursor_a.position.to_string ();
+	return body;
+}
+
+std::string market_cursor_signed_text (std::string const & body_a)
+{
+	return std::string (market_cursor_domain) + body_a;
+}
+
+std::string encode_market_cursor (nano::node const & node_a, market_cursor const & cursor_a)
+{
+	auto const body (market_cursor_body (cursor_a));
+	auto const signed_text (market_cursor_signed_text (body));
+	auto const signature (nano::sign_message (node_a.node_id.prv, node_a.node_id.pub, reinterpret_cast<uint8_t const *> (signed_text.data ()), signed_text.size ()));
+	return std::string (market_cursor_prefix) + body + signature.to_string ();
+}
+
+market_cursor_result decode_market_cursor (nano::node const & node_a, std::string const & text_a, char expected_kind_a, char expected_filter_a, nano::uint256_union const & expected_scope_a, market_cursor & cursor_a)
+{
+	if (text_a.size () != market_cursor_size || text_a.compare (0, sizeof (market_cursor_prefix) - 1, market_cursor_prefix) != 0)
+	{
+		return market_cursor_result::invalid;
+	}
+	auto const body (text_a.substr (sizeof (market_cursor_prefix) - 1, market_cursor_body_size));
+	nano::signature signature;
+	if (signature.decode_hex (text_a.substr (sizeof (market_cursor_prefix) - 1 + market_cursor_body_size)))
+	{
+		return market_cursor_result::invalid;
+	}
+	auto const signed_text (market_cursor_signed_text (body));
+	if (nano::validate_message (node_a.node_id.pub, reinterpret_cast<uint8_t const *> (signed_text.data ()), signed_text.size (), signature))
+	{
+		return market_cursor_result::invalid;
+	}
+	cursor_a.kind = body[0];
+	cursor_a.filter = body[1];
+	if (cursor_a.scope.decode_hex (body.substr (2, 64)) || cursor_a.anchor.decode_hex (body.substr (66, 64)) || cursor_a.position.decode_hex (body.substr (130, 64)))
+	{
+		return market_cursor_result::invalid;
+	}
+	if (cursor_a.kind != expected_kind_a || cursor_a.filter != expected_filter_a || cursor_a.scope != expected_scope_a)
+	{
+		return market_cursor_result::scope;
+	}
+	return market_cursor_result::ok;
+}
+
+char swap_state_cursor_filter (std::string const & state_a)
+{
+	if (state_a == "open")
+	{
+		return 'o';
+	}
+	if (state_a == "accepted")
+	{
+		return 'a';
+	}
+	if (state_a == "cancelled")
+	{
+		return 'c';
+	}
+	return '*';
+}
+
+uint64_t scan_count_impl (boost::property_tree::ptree const & request_a, std::error_code & ec_a)
+{
+	uint64_t result (std::numeric_limits<uint64_t>::max ());
+	auto const text (request_a.get_optional<std::string> ("scan_count"));
+	if (!ec_a && text.is_initialized () && (text->empty () || !std::all_of (text->begin (), text->end (), [] (char character_a) { return character_a >= '0' && character_a <= '9'; }) || decode_unsigned (*text, result)))
+	{
+		ec_a = nano::error_rpc::invalid_scan_count;
+	}
+	return result;
+}
+
+void add_market_page_metadata (boost::property_tree::ptree & response_a, uint64_t scanned_a, bool exhausted_a, char const * stopped_a, std::string const & next_a)
+{
+	nano::json::put_number (response_a, "scanned", scanned_a);
+	nano::json::put_boolean (response_a, "exhausted", exhausted_a);
+	response_a.put ("stopped", stopped_a);
+	if (next_a.empty ())
+	{
+		nano::json::put_null (response_a, "next");
+	}
+	else
+	{
+		response_a.put ("next", next_a);
+	}
+}
+
 void construct_json (nano::container_info_component * component, boost::property_tree::ptree & parent);
 using ipc_json_handler_no_arg_func_map = std::unordered_map<std::string, std::function<void (nano::json_handler *)>>;
 ipc_json_handler_no_arg_func_map create_ipc_json_handler_no_arg_func_map ();
@@ -5960,6 +6082,7 @@ void swap_offer_to_json (nano::node & node_a, nano::transaction const & transact
 	// `seenAt`/`settledAt`. The sideband keeps this in seconds; the SDK's
 	// contract wants milliseconds.
 	nano::json::put_number (entry_a, "seenAt", offer_a.sideband ().timestamp * 1000);
+	nano::json::put_boolean (entry_a, "confirmed", node_a.ledger.block_confirmed (transaction_a, hash_a));
 
 	nano::asset_lock_info lock;
 	if (!node_a.store.asset.lock_get (transaction_a, hash_a, lock))
@@ -6060,6 +6183,7 @@ void nano::json_handler::account_swaps ()
 {
 	auto const account (account_impl ());
 	auto const count (count_optional_impl ());
+	auto const scan_count (scan_count_impl (request, ec));
 	std::string state_filter;
 	auto const state_text (request.get_optional<std::string> ("state"));
 	if (!ec && state_text.is_initialized ())
@@ -6078,15 +6202,49 @@ void nano::json_handler::account_swaps ()
 		boost::property_tree::ptree offers;
 		auto transaction (node.store.tx_begin_read ());
 		uint64_t returned (0);
+		uint64_t scanned (0);
+		auto const filter_code (swap_state_cursor_filter (state_filter));
+		nano::block_hash anchor;
+		nano::block_hash hash;
+		auto const before (request.get_optional<std::string> ("before"));
+		if (before.is_initialized ())
+		{
+			market_cursor cursor;
+			auto const result (decode_market_cursor (node, *before, 'a', filter_code, account, cursor));
+			if (result == market_cursor_result::invalid)
+			{
+				ec = nano::error_rpc::invalid_market_cursor;
+			}
+			else if (result == market_cursor_result::scope)
+			{
+				ec = nano::error_rpc::market_cursor_scope;
+			}
+			else
+			{
+				anchor = cursor.anchor;
+				hash = cursor.position;
+				auto const anchor_block (node.store.block.get (transaction, anchor));
+				auto const position_block (node.store.block.get (transaction, hash));
+				if (anchor.is_zero () || hash.is_zero () || anchor_block == nullptr || position_block == nullptr || node.ledger.account (transaction, anchor) != account || node.ledger.account (transaction, hash) != account)
+				{
+					ec = nano::error_rpc::stale_market_cursor;
+				}
+			}
+		}
+		else
+		{
+			anchor = node.ledger.latest (transaction, account);
+			hash = anchor;
+		}
 		// One account's own chain is a bounded scan (SPEC §9.1), and every
 		// `swap_offer` that account ever made lives on it — open, accepted or
 		// cancelled — which is what lets this answer every `state` without a
 		// second index. Walked tip-first, the same direction
 		// `account_history` reads by default.
-		auto hash (node.ledger.latest (transaction, account));
 		auto block (hash.is_zero () ? nullptr : node.store.block.get (transaction, hash));
-		while (block != nullptr && returned < count)
+		while (!ec && block != nullptr && returned < count && scanned < scan_count)
 		{
+			++scanned;
 			auto const offer (dynamic_cast<nano::asset_block const *> (block.get ()));
 			if (offer != nullptr && offer->hashables.op == nano::asset_op::swap_offer)
 			{
@@ -6101,7 +6259,33 @@ void nano::json_handler::account_swaps ()
 			hash = block->previous ();
 			block = hash.is_zero () ? nullptr : node.store.block.get (transaction, hash);
 		}
-		nano::json::add_array (response_l, "offers", offers);
+		if (hash.is_zero ())
+		{
+			nano::json::add_array (response_l, "offers", offers);
+			add_market_page_metadata (response_l, scanned, true, "exhausted", "");
+		}
+		else if (block == nullptr)
+		{
+			ec = nano::error_rpc::stale_market_cursor;
+		}
+		else
+		{
+			nano::json::add_array (response_l, "offers", offers);
+			auto const stopped (returned >= count ? "result_limit" : "scan_limit");
+			auto const next (encode_market_cursor (node, market_cursor{ 'a', filter_code, account, anchor, hash }));
+			add_market_page_metadata (response_l, scanned, false, stopped, next);
+		}
+		if (!ec)
+		{
+			if (anchor.is_zero ())
+			{
+				nano::json::put_null (response_l, "snapshot");
+			}
+			else
+			{
+				response_l.put ("snapshot", anchor.to_string ());
+			}
+		}
 	}
 	response_errors ();
 }

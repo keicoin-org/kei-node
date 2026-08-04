@@ -196,9 +196,19 @@ which §7 establishes leaves no trace in `swap_locks` at all.
   `settledBy`, `settledAt`), or `{ "offer": null }` if the hash never named a
   `swap_offer`.
 - **`account_swaps`** — `{ "account": "<addr>", "count": N, "state"?:
-  "open"|"accepted"|"cancelled" }` → every `swap_offer` that account has ever
+  "open"|"accepted"|"cancelled", "before"?: "<opaque>", "scan_count"?: N }`
+  → every `swap_offer` that account has ever
   made, in any state, found by walking that account's own chain tip-first —
-  a bounded, per-account scan by construction (SPEC §9.1), and the only place
+  a per-account scan whose inspected work is strictly bounded by `scan_count`
+  independently of returned rows. The response preserves `offers` and adds
+  `next`, `exhausted`, `scanned`, `stopped`, and the frozen `snapshot` head.
+  `next` is an opaque, node-identity-signed cursor bound to the account, state
+  filter, direction, original head, and exact next block. It survives node
+  restart, rejects tampering/cross-scope reuse, and keeps concurrent new head
+  blocks out of an in-progress backward traversal. A missing anchor or next
+  block is a typed stale-cursor error rather than a silent restart. Each row's
+  `confirmed` boolean distinguishes processed ledger state from finality.
+  This is the only place
   a *cancelled* offer's outcome can be answered from at all (§7): the record
   in `swap_locks` is gone, so the state and the settling block are recovered
   by walking forward from the offer, on the offerer's own chain, to the
