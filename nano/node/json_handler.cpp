@@ -6364,6 +6364,10 @@ void nano::json_handler::account_swaps ()
 			{
 				anchor = cursor.anchor;
 				hash = cursor.position;
+				if (!state_filter.empty () && node.ledger.latest (transaction, account) != anchor)
+				{
+					ec = nano::error_rpc::stale_market_cursor;
+				}
 				nano::uint256_union expected_snapshot;
 				if (!market_account_swaps_snapshot_hash (node, transaction, account, anchor, hash, expected_snapshot) || expected_snapshot != cursor.snapshot)
 				{

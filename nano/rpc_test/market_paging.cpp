@@ -1,5 +1,8 @@
 #include <nano/lib/blocks.hpp>
 #include <nano/node/node.hpp>
+#include <nano/node/ipc/ipc_server.hpp>
+#include <nano/node/node_rpc_config.hpp>
+#include <nano/rpc/rpc_request_processor.hpp>
 #include <nano/rpc_test/common.hpp>
 #include <nano/secure/store.hpp>
 #include <nano/crypto/blake2/blake2.h>
@@ -364,6 +367,48 @@ TEST (rpc, account_swaps_scan_count_is_independent_and_legacy_request_still_work
 		request.put ("scan_count", invalid);
 		ASSERT_EQ ("Invalid scan_count", wait_response (system, rpc_ctx, request, 10s).get<std::string> ("error"));
 	}
+}
+
+TEST (rpc, account_swaps_scan_count_bounds_cancelled_state_walk)
+{
+	nano::test::system system;
+	auto node (add_ipc_enabled_node (system));
+	auto const rpc_ctx (add_rpc (system, node));
+	fake_market_chain chain;
+	auto const offer (append_market_block (*node, chain, true));
+	append_market_block (*node, chain, false);
+	append_market_block (*node, chain, false);
+
+	{
+		auto transaction (node->store.tx_begin_write ());
+		node->store.asset.lock_del (transaction, offer);
+	}
+
+	auto bounded (wait_swaps (system, rpc_ctx, chain.key.pub, 10, 3));
+	ASSERT_TRUE (offer_hashes (bounded).empty ());
+	ASSERT_EQ (3, bounded.get<uint64_t> ("scanned"));
+	ASSERT_FALSE (bounded.get<bool> ("exhausted"));
+	ASSERT_EQ ("scan_limit", bounded.get<std::string> ("stopped"));
+}
+
+TEST (rpc, account_swaps_stale_cursor_on_state_filter_when_head_advances)
+{
+	nano::test::system system;
+	auto node (add_ipc_enabled_node (system));
+	auto const rpc_ctx (add_rpc (system, node));
+	fake_market_chain chain;
+	append_market_block (*node, chain, true);
+	append_market_block (*node, chain, true);
+
+	auto page1 (swaps_request (chain.key.pub, 1));
+	page1.put ("state", "open");
+	auto response1 (wait_response (system, rpc_ctx, page1, 10s));
+	ASSERT_NE ("null", response1.get<std::string> ("next"));
+
+	append_market_block (*node, chain, true);
+	auto page2 (swaps_request (chain.key.pub, 1, boost::none, response1.get<std::string> ("next")));
+	page2.put ("state", "open");
+	ASSERT_EQ ("Market cursor is stale because its ledger position is no longer available", wait_response (system, rpc_ctx, page2, 10s).get<std::string> ("error"));
 }
 
 TEST (rpc, account_swaps_first_page_works_when_history_is_pruned)
