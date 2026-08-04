@@ -986,6 +986,31 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 		return;
 	}
 
+	// These fields are part of the signed fixed header, but the operation's
+	// canonical JSON does not carry them. Reject any second representation
+	// before consulting the state which supplies the operation's real values;
+	// otherwise a stored block cannot round-trip through RPC with the same hash.
+	switch (block_a.hashables.op)
+	{
+		case nano::asset_op::burn:
+			if (!block_a.hashables.link.is_zero ())
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			break;
+		case nano::asset_op::asset_receive:
+		case nano::asset_op::swap_cancel:
+			if (!block_a.hashables.asset_id.is_zero () || !block_a.hashables.amount.is_zero ())
+			{
+				result.code = nano::process_result::bad_asset_payload;
+				return;
+			}
+			break;
+		default:
+			break;
+	}
+
 	auto const previous_balance (info.balance.number ());
 	auto const new_balance (block_a.hashables.balance.number ());
 	// How many this account has issued already, which is what prices the next
