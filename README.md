@@ -141,9 +141,11 @@ cmake --build build --target nano_node
 **It does not build on the machine this was cloned onto**, which is worth stating
 rather than discovering. MSVC 2022 Build Tools is installed but unusable — there
 is no Windows SDK, so `cl` fails on `stdio.h` — and MinGW `g++` compiles trivial
-C++ but is not a toolchain upstream supports. There is no `cmake`, no `ninja`, no
-Docker, and WSL has no distribution. The binding constraint is that the account is
-**not an administrator**, so every local fix needs the machine's owner:
+C++ but is not a toolchain upstream supports. `cmake` is now present (4.4.2), so a
+configure runs as far as the compiler probe and stops there — enough to check the
+build files, not the build. There is no `ninja`, no Docker, and WSL has no
+distribution. The binding constraint is that the account is **not an
+administrator**, so every local fix needs the machine's owner:
 
 1. **GitHub Actions** — [`.github/workflows/build.yml`](.github/workflows/build.yml).
    No admin, no local install, and the only option that works today.
