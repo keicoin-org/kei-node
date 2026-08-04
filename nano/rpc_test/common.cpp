@@ -84,6 +84,8 @@ nano::test::rpc_context::rpc_context (std::shared_ptr<nano::rpc> & rpc_a, std::u
 	node_rpc_config = std::move (node_rpc_config_a);
 }
 
+nano::test::rpc_context::~rpc_context () = default;
+
 std::shared_ptr<nano::node> nano::test::add_ipc_enabled_node (nano::test::system & system, nano::node_config & node_config, nano::node_flags const & node_flags)
 {
 	node_config.ipc_config.transport_tcp.enabled = true;

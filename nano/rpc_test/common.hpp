@@ -47,6 +47,7 @@ namespace test
 	{
 	public:
 		rpc_context (std::shared_ptr<nano::rpc> & rpc_a, std::unique_ptr<nano::ipc::ipc_server> & ipc_server_a, std::unique_ptr<nano::ipc_rpc_processor> & ipc_rpc_processor_a, std::unique_ptr<nano::node_rpc_config> & node_rpc_config_a);
+		~rpc_context ();
 
 		std::shared_ptr<nano::rpc> rpc;
 		std::unique_ptr<nano::ipc::ipc_server> ipc_server;
