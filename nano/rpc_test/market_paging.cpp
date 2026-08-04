@@ -361,11 +361,18 @@ TEST (rpc, account_swaps_scan_count_is_independent_and_legacy_request_still_work
 	ASSERT_EQ (3, legacy_response.get<uint64_t> ("scanned"));
 	ASSERT_TRUE (legacy_response.get<bool> ("exhausted"));
 
-	for (auto const & invalid : { "0", "-1", "1x", "18446744073709551616" })
+	for (auto const & invalid : { "0", "-1", "1x", "18446744073709551616", "1025" })
 	{
 		auto request (swaps_request (chain.key.pub, 1, 1));
 		request.put ("scan_count", invalid);
 		ASSERT_EQ ("Invalid scan_count", wait_response (system, rpc_ctx, request, 10s).get<std::string> ("error"));
+	}
+
+	for (auto const & invalid : { "0", "1025" })
+	{
+		auto request (swaps_request (chain.key.pub, static_cast<uint64_t> (1), static_cast<uint64_t> (1)));
+		request.put ("count", invalid);
+		ASSERT_EQ ("Invalid count", wait_response (system, rpc_ctx, request, 10s).get<std::string> ("error"));
 	}
 }
 
