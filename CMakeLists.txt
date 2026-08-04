@@ -1,4 +1,11 @@
-cmake_minimum_required(VERSION 3.4)
+# 3.14 rather than the inherited 3.4, matching nanocurrency/nano-node. CMake
+# 4.0 removed compatibility with minimums below 3.5 outright, so on any CMake
+# 4.x this file was a hard configure error on its own first line — before a
+# compiler, a submodule or an option was ever looked at. CMP0074 and CMP0077
+# below are both implied NEW by a 3.14 minimum and so are now redundant; they
+# stay because upstream's copy of this prologue still carries them, and
+# matching it byte for byte is what keeps a later rebase onto Banano cheap.
+cmake_minimum_required(VERSION 3.14)
 
 if(CMAKE_VERSION VERSION_GREATER 3.12 OR CMAKE_VERSION VERSION_EQUAL 3.12)
   # find_package uses <PACKAGENAME>_ROOT variables
@@ -683,7 +690,17 @@ if(NANO_TEST OR RAIBLOCKS_TEST)
 
   # FIXME: This fixes googletest GOOGLETEST_VERSION requirement
   set(GOOGLETEST_VERSION 1.11.0)
+  # And the same shape of fix for the same vendored copy: googletest 1.11.0
+  # declares `cmake_minimum_required(VERSION 2.8.12)`, which CMake 4.0 rejects
+  # the way it rejected this file's own first line. Raising the floor for this
+  # subdirectory only is the escape hatch CMake names in that error, and it is
+  # smaller than moving the submodule pin — which is a build the local machine
+  # cannot run (docs/decisions-m2.md §3) and which this repository has already
+  # had to revert once. Older CMake ignores the variable. Unset after, so it
+  # never silently covers for a directory that should be fixed properly.
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
   add_subdirectory(submodules/gtest/googletest)
+  unset(CMAKE_POLICY_VERSION_MINIMUM)
   # FIXME: This fixes gtest include directories without modifying gtest's
   # CMakeLists.txt. Ideally we should use GTest::GTest and GTest::Main as
   # dependencies but it requires building gtest differently
