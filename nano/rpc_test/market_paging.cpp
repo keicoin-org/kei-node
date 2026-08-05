@@ -452,3 +452,168 @@ TEST (rpc, account_swaps_first_page_works_when_history_is_pruned)
 	ASSERT_EQ ("pruned", page.get<std::string> ("stopped"));
 	ASSERT_EQ ("null", page.get<std::string> ("next"));
 }
+
+namespace
+{
+// `asset_offers` and `asset_holders` read two store tables and never look at a
+// block, so the rows are written directly. Building 1,030 real `swap_offer`
+// chains would cost the test several seconds to prove something
+// `account_swaps` above already proves.
+std::set<std::string> seed_offers (nano::node & node_a, nano::uint256_union const & asset_a, nano::account const & offerer_a, std::size_t count_a)
+{
+	std::set<std::string> hashes;
+	auto transaction (node_a.store.tx_begin_write ());
+	for (std::size_t i (0); i < count_a; ++i)
+	{
+		nano::block_hash const hash (i + 1);
+		node_a.store.asset.offer_put (transaction, asset_a, hash, offerer_a);
+		hashes.insert (hash.to_string ());
+	}
+	return hashes;
+}
+
+std::set<std::string> seed_holders (nano::node & node_a, nano::uint256_union const & asset_a, std::size_t count_a)
+{
+	std::set<std::string> accounts;
+	auto transaction (node_a.store.tx_begin_write ());
+	for (std::size_t i (0); i < count_a; ++i)
+	{
+		nano::account const holder (i + 1);
+		node_a.store.asset.balance_put (transaction, holder, asset_a, nano::amount (5));
+		accounts.insert (holder.to_account ());
+	}
+	return accounts;
+}
+
+// Collected rather than compared position by position: what the issue asks for
+// is that paging returns every row exactly once, and asserting that directly
+// does not also assert an ordering the store is free to choose.
+std::vector<std::string> page_values (boost::property_tree::ptree const & response_a, char const * array_a, char const * field_a)
+{
+	std::vector<std::string> values;
+	for (auto const & child : response_a.get_child (array_a))
+	{
+		values.push_back (child.second.get<std::string> (field_a));
+	}
+	return values;
+}
+}
+
+TEST (rpc, asset_offers_bounds_count_and_pages_each_offer_once)
+{
+	nano::test::system system;
+	auto node (add_ipc_enabled_node (system));
+	auto const rpc_ctx (add_rpc (system, node));
+	nano::uint256_union const asset{ 7 };
+	nano::keypair offerer;
+	auto const expected (seed_offers (*node, asset, offerer.pub, 1030));
+
+	boost::property_tree::ptree request;
+	request.put ("action", "asset_offers");
+	request.put ("asset", asset.to_string ());
+
+	// A bare request used to walk every open offer for the asset into one
+	// response body. It now stops at the same 1,024 `account_swaps` stops at.
+	auto const page1 (wait_response (system, rpc_ctx, request, 10s));
+	auto const values1 (page_values (page1, "offers", "offer"));
+	ASSERT_EQ (1024, values1.size ());
+	ASSERT_EQ (1025, page1.get<uint64_t> ("scanned"));
+	ASSERT_FALSE (page1.get<bool> ("exhausted"));
+	ASSERT_EQ ("result_limit", page1.get<std::string> ("stopped"));
+	auto const next (page1.get<std::string> ("next"));
+	ASSERT_NE ("null", next);
+
+	auto request2 (request);
+	request2.put ("start", next);
+	auto const page2 (wait_response (system, rpc_ctx, request2, 10s));
+	auto const values2 (page_values (page2, "offers", "offer"));
+	ASSERT_EQ (6, values2.size ());
+	ASSERT_TRUE (page2.get<bool> ("exhausted"));
+	ASSERT_EQ ("exhausted", page2.get<std::string> ("stopped"));
+	ASSERT_EQ ("null", page2.get<std::string> ("next"));
+	// `start` is inclusive, the way `account_swaps` resumes at its cursor, so
+	// the first row of page two is the one page one stopped before.
+	ASSERT_EQ (next, values2.front ());
+
+	std::set<std::string> seen;
+	for (auto const & values : { values1, values2 })
+	{
+		for (auto const & value : values)
+		{
+			ASSERT_TRUE (seen.insert (value).second) << value << " was returned twice";
+		}
+	}
+	ASSERT_EQ (expected, seen);
+
+	for (auto const & invalid : { "0", "1025" })
+	{
+		auto bad (request);
+		bad.put ("count", invalid);
+		auto const response (wait_response (system, rpc_ctx, bad, 10s));
+		ASSERT_EQ ("Invalid count", response.get<std::string> ("error"));
+		ASSERT_EQ (invalid, response.get<std::string> ("requested"));
+		ASSERT_EQ ("count", response.get<std::string> ("field"));
+		ASSERT_EQ ("1024", response.get<std::string> ("max"));
+		ASSERT_EQ ("1024", response.get<std::string> ("maxAllowed"));
+		ASSERT_EQ ("Retry with a lower value and the same request.", response.get<std::string> ("suggestion"));
+	}
+}
+
+TEST (rpc, asset_holders_bounds_count_and_pages_each_holder_once)
+{
+	nano::test::system system;
+	auto node (add_ipc_enabled_node (system));
+	auto const rpc_ctx (add_rpc (system, node));
+	nano::uint256_union const asset{ 9 };
+	auto const expected (seed_holders (*node, asset, 1030));
+
+	boost::property_tree::ptree request;
+	request.put ("action", "asset_holders");
+	request.put ("asset", asset.to_string ());
+
+	auto const page1 (wait_response (system, rpc_ctx, request, 10s));
+	auto const values1 (page_values (page1, "holders", "account"));
+	ASSERT_EQ (1024, values1.size ());
+	ASSERT_EQ (1025, page1.get<uint64_t> ("scanned"));
+	ASSERT_FALSE (page1.get<bool> ("exhausted"));
+	ASSERT_EQ ("result_limit", page1.get<std::string> ("stopped"));
+	auto const next (page1.get<std::string> ("next"));
+	ASSERT_NE ("null", next);
+
+	auto request2 (request);
+	request2.put ("start", next);
+	auto const page2 (wait_response (system, rpc_ctx, request2, 10s));
+	auto const values2 (page_values (page2, "holders", "account"));
+	ASSERT_EQ (6, values2.size ());
+	ASSERT_TRUE (page2.get<bool> ("exhausted"));
+	ASSERT_EQ ("exhausted", page2.get<std::string> ("stopped"));
+	ASSERT_EQ ("null", page2.get<std::string> ("next"));
+	ASSERT_EQ (next, values2.front ());
+
+	std::set<std::string> seen;
+	for (auto const & values : { values1, values2 })
+	{
+		for (auto const & value : values)
+		{
+			ASSERT_TRUE (seen.insert (value).second) << value << " was returned twice";
+		}
+	}
+	ASSERT_EQ (expected, seen);
+
+	// A holder count that fits still answers in one page, and says so.
+	nano::uint256_union const small{ 11 };
+	seed_holders (*node, small, 3);
+	auto small_request (request);
+	small_request.put ("asset", small.to_string ());
+	auto const small_page (wait_response (system, rpc_ctx, small_request, 10s));
+	ASSERT_EQ (3, page_values (small_page, "holders", "account").size ());
+	ASSERT_TRUE (small_page.get<bool> ("exhausted"));
+	ASSERT_EQ ("null", small_page.get<std::string> ("next"));
+
+	auto bad (request);
+	bad.put ("count", "1025");
+	auto const response (wait_response (system, rpc_ctx, bad, 10s));
+	ASSERT_EQ ("Invalid count", response.get<std::string> ("error"));
+	ASSERT_EQ ("count", response.get<std::string> ("field"));
+	ASSERT_EQ ("1024", response.get<std::string> ("maxAllowed"));
+}
