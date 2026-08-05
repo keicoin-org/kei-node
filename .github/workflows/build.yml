@@ -157,6 +157,7 @@ jobs:
       # "It compiles" is a weaker claim than "it works", and until this step
       # existed it was the only claim this workflow could support.
       - name: Build tests
+        id: build_tests
         run: |
           set -o pipefail
           if ! cmake --build build --target core_test -- -k 0 2>&1 | tee test-build.log; then
@@ -203,7 +204,16 @@ jobs:
       # also never run here, and a fresh RocksDB database is the one place the
       # v23→v24 column families for the claim and swap tables get created from
       # scratch.
+      # `if` for the same reason the build steps pass `-k 0`: when CI is the
+      # only place the tree runs, a job that stops at the first failing step
+      # spends forty minutes to report a strict subset of what it already knows.
+      # A red lmdb filter should not also cost you the RocksDB answer. This
+      # still fails the job when it fails — it only declines to be silenced by
+      # the step above it. Conditioned on the build rather than on `always()`,
+      # so a run that never produced a `core_test` reports the compile error
+      # instead of a confusing "no such file".
       - name: Run the RocksDB store tests
+        if: ${{ !cancelled() && steps.build_tests.outcome == 'success' }}
         env:
           TEST_USE_ROCKSDB: 1
         run: ./build/core_test --gtest_filter='rocksdb_block_store.*'
