@@ -313,10 +313,25 @@ public:
 				// Put the receivable back exactly as it was, which means
 				// reading the source block for the source account and the memo.
 				auto const source_hash (block_a.hashables.link.as_block_hash ());
+				[[maybe_unused]] bool source_is_pruned (false);
+				[[maybe_unused]] auto const source_account (ledger.account_safe (transaction, source_hash, source_is_pruned));
+				if (source_is_pruned)
+				{
+					error = true;
+					break;
+				}
 				auto const source (ledger.store.block.get (transaction, source_hash));
-				release_assert (source != nullptr);
+				if (source == nullptr)
+				{
+					error = true;
+					break;
+				}
 				auto const source_asset (dynamic_cast<nano::asset_block const *> (source.get ()));
-				release_assert (source_asset != nullptr);
+				if (source_asset == nullptr)
+				{
+					error = true;
+					break;
+				}
 				asset_id = source_asset->hashables.asset_id;
 				auto const collected (source_asset->hashables.amount.number ());
 				auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
@@ -329,7 +344,7 @@ public:
 				{
 					ledger.store.asset.balance_put (transaction, block_a.hashables.account, asset_id, nano::amount (held - collected));
 				}
-				ledger.store.asset.pending_put (transaction, nano::pending_key (block_a.hashables.account, source_hash), nano::asset_pending_info (source_asset->hashables.account, asset_id, collected, source_asset->hashables.payload.memo));
+				ledger.store.asset.pending_put (transaction, nano::pending_key (block_a.hashables.account, source_hash), nano::asset_pending_info (source_account, asset_id, collected, source_asset->hashables.payload.memo));
 				break;
 			}
 			case nano::asset_op::commit:
@@ -391,7 +406,13 @@ public:
 				// touches this record from over there.
 				while (!error && exists && !lock.open ())
 				{
-					auto const settler (ledger.account (transaction, lock.settled_by));
+					[[maybe_unused]] bool settler_is_pruned (false);
+					auto const settler (ledger.account_safe (transaction, lock.settled_by, settler_is_pruned));
+					if (settler_is_pruned)
+					{
+						error = true;
+						break;
+					}
 					error = ledger.rollback (transaction, ledger.latest (transaction, settler), list);
 					exists = !error && !ledger.store.asset.lock_get (transaction, hash, lock);
 				}
@@ -418,7 +439,11 @@ public:
 				auto const offer_hash (block_a.hashables.link.as_block_hash ());
 				nano::asset_lock_info lock;
 				auto const missing (ledger.store.asset.lock_get (transaction, offer_hash, lock));
-				release_assert (!missing);
+				if (missing)
+				{
+					error = true;
+					break;
+				}
 				// Both arrivals this block created might already be collected,
 				// on either side — each a different chain than this one.
 				take_back_arrival (lock.offerer, lock.want_asset, hash);
@@ -441,11 +466,23 @@ public:
 			case nano::asset_op::swap_cancel:
 			{
 				auto const offer_hash (block_a.hashables.link.as_block_hash ());
-				auto const offer_block (ledger.store.block.get (transaction, offer_hash));
-				release_assert (offer_block != nullptr);
-				auto const offer_asset (dynamic_cast<nano::asset_block const *> (offer_block.get ()));
-				release_assert (offer_asset != nullptr);
-				auto const lock (lock_from_offer (*offer_asset));
+				nano::asset_lock_info lock;
+				if (ledger.store.asset.lock_get (transaction, offer_hash, lock))
+				{
+					auto const offer_block (ledger.store.block.get (transaction, offer_hash));
+					if (offer_block == nullptr)
+					{
+						error = true;
+						break;
+					}
+					auto const offer_asset (dynamic_cast<nano::asset_block const *> (offer_block.get ()));
+					if (offer_asset == nullptr)
+					{
+						error = true;
+						break;
+					}
+					lock = lock_from_offer (*offer_asset);
+				}
 				ledger.store.asset.lock_put (transaction, offer_hash, lock);
 				ledger.store.asset.offer_put (transaction, lock.asset_id, offer_hash, lock.offerer);
 				if (!lock.asset_id.is_zero ())
@@ -2295,7 +2332,10 @@ bool nano::ledger::rollback_swap_conflict (nano::write_transaction const & trans
 		return false;
 	}
 	auto const offer_asset (dynamic_cast<nano::asset_block const *> (offer_block.get ()));
-	release_assert (offer_asset != nullptr);
+	if (offer_asset == nullptr)
+	{
+		return false;
+	}
 	auto const offerer (offer_asset->hashables.account);
 	auto error (false);
 	while (!error)
@@ -2318,8 +2358,25 @@ bool nano::ledger::rollback_swap_conflict (nano::write_transaction const & trans
 			{
 				break;
 			}
-			auto const settler (account (transaction_a, lock.settled_by));
-			error = rollback (transaction_a, latest (transaction_a, settler), list_a);
+			if (lock.settled_by.is_zero ())
+			{
+				error = true;
+				break;
+			}
+			[[maybe_unused]] bool settler_is_pruned (false);
+			auto const settler (account_safe (transaction_a, lock.settled_by, settler_is_pruned));
+			if (settler_is_pruned)
+			{
+				error = true;
+				break;
+			}
+			auto const rollback_settler (latest (transaction_a, settler));
+			if (rollback_settler.is_zero ())
+			{
+				error = true;
+				break;
+			}
+			error = rollback (transaction_a, rollback_settler, list_a);
 		}
 		else
 		{
@@ -2347,6 +2404,10 @@ std::shared_ptr<nano::block> nano::ledger::swap_consumer (nano::transaction cons
 	// Cancellation removes the lock record, so locate the cancel on the
 	// offerer's chain. It need not immediately follow the offer.
 	auto const offer = store.block.get (transaction_a, offer_hash_a);
+	if (offer == nullptr)
+	{
+		return nullptr;
+	}
 	auto const offer_asset = dynamic_cast<nano::asset_block const *> (offer.get ());
 	if (offer_asset == nullptr)
 	{

@@ -953,6 +953,107 @@ TEST (asset_ledger, rolling_back_a_collect_makes_it_receivable_again)
 	ASSERT_EQ (nano::amount (500), asset.circulating);
 }
 
+// A pruned source block should make rollback fail safely rather than crash.
+TEST (asset_ledger, rolling_back_a_collect_with_pruned_source_rejected_safely)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction = store.tx_begin_write ();
+	nano::asset_payload payload;
+	payload.memo = "quest reward";
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub, payload));
+	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
+
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *collect).code);
+
+	ledger.pruning = true;
+	ASSERT_GT (ledger.pruning_action (transaction, mint->hash (), 1), 0);
+	ASSERT_FALSE (store.block.exists (transaction, mint->hash ()));
+	ASSERT_TRUE (store.pruned.exists (transaction, mint->hash ()));
+
+	ASSERT_TRUE (ledger.rollback (transaction, collect->hash ()));
+	ASSERT_TRUE (store.block.exists (transaction, collect->hash ()));
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+	nano::asset_pending_info pending;
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, mint->hash ())));
+	ASSERT_FALSE (store.asset.pending_get (transaction, nano::pending_key (player.pub, mint->hash ()), pending));
+	ASSERT_EQ (nano::dev::team_key.pub, pending.source);
+	ASSERT_EQ (issued.id, pending.asset_id);
+	ASSERT_EQ (nano::amount (500), pending.amount);
+	ASSERT_EQ ("quest reward", pending.memo);
+}
+
+// If the accepter's tip is pruned, offer rollback cannot walk back to it.
+TEST (asset_ledger, rolling_back_an_accepted_offer_with_pruned_settler_rejected_safely)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction = store.tx_begin_write ();
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto const offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto const accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+
+	ledger.pruning = true;
+	ASSERT_GT (ledger.pruning_action (transaction, accept->hash (), 1), 0);
+	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.pruned.exists (transaction, accept->hash ()));
+
+	ASSERT_TRUE (ledger.rollback (transaction, offer->hash ()));
+	ASSERT_TRUE (store.block.exists (transaction, offer->hash ()));
+	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.pruned.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, accept->hash ())));
+	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_EQ (after_issuing (1) - 50, ledger.account_balance (transaction, nano::dev::team_key.pub));
+}
+
+// If the swap lock record disappears, accept rollback must fail cleanly.
+TEST (asset_ledger, rolling_back_a_swap_accept_with_missing_lock_rejected_safely)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction = store.tx_begin_write ();
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto const offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto const accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	store.asset.lock_del (transaction, offer->hash ());
+
+	ASSERT_TRUE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, accept->hash ())));
+	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_TRUE (ledger.rollback (transaction, accept->hash ()));
+	ASSERT_TRUE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, accept->hash ())));
+	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_EQ (after_issuing (1) - 50, ledger.account_balance (transaction, nano::dev::team_key.pub));
+}
+
+
 // The claim model (SPEC §5.5). Everything below is about the one property that
 // makes it worth having: the issuer writes one block, and the claims that block
 // underwrites are written by other accounts, in parallel, on their own chains.
@@ -1875,6 +1976,69 @@ TEST (asset_ledger, a_cancel_after_an_accept_is_rejected_as_offer_consumed)
 	// The rightful offerer, trying to cancel a lock that already settled.
 	auto cancel (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
 	ASSERT_EQ (nano::process_result::offer_consumed, ledger.process (transaction, *cancel).code);
+}
+
+TEST (asset_ledger, swap_consumer_with_pruned_or_missing_offer_is_safe)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued = issue_one (ledger, store, pool, nano::transfer_policy::open, 1000);
+	auto transaction = store.tx_begin_write ();
+	auto const held = fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500);
+
+	auto const offer = signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto const accept = signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+
+	// A closed lock pointing at a pruned block should not crash on lookup.
+	nano::asset_lock_info synthetic_lock;
+	synthetic_lock.offerer = player.pub;
+	synthetic_lock.amount = nano::amount (200);
+	synthetic_lock.settled_by = accept->hash ();
+	store.asset.lock_put (transaction, nano::block_hash{ 99 }, synthetic_lock);
+
+	ledger.pruning = true;
+	ASSERT_GT (ledger.pruning_action (transaction, accept->hash (), 1), 0);
+	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.pruned.exists (transaction, accept->hash ()));
+
+	ASSERT_FALSE (ledger.swap_consumer (transaction, nano::block_hash{ 99 }));
+	auto missing_offer_consumer = ledger.swap_consumer (transaction, nano::block_hash{ 100 });
+	ASSERT_FALSE (missing_offer_consumer);
+}
+
+TEST (asset_ledger, rollback_swap_conflict_with_pruned_settler_is_rejected_safely)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued = issue_one (ledger, store, pool, nano::transfer_policy::open, 1000);
+	auto transaction = store.tx_begin_write ();
+	auto const held = fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500);
+
+	auto const offer = signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto const accept = signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+
+	ledger.pruning = true;
+	ASSERT_GT (ledger.pruning_action (transaction, accept->hash (), 1), 0);
+	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.pruned.exists (transaction, accept->hash ()));
+
+	std::vector<std::shared_ptr<nano::block>> rolled_back;
+	ASSERT_TRUE (ledger.rollback_swap_conflict (transaction, offer->hash (), accept->hash (), rolled_back));
+	ASSERT_TRUE (rolled_back.empty ());
+	ASSERT_TRUE (store.block.exists (transaction, offer->hash ()));
+	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
 }
 
 TEST (asset_ledger, an_elected_accept_replaces_an_applied_cancel)
