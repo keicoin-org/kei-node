@@ -953,6 +953,42 @@ TEST (asset_ledger, rolling_back_a_collect_makes_it_receivable_again)
 	ASSERT_EQ (nano::amount (500), asset.circulating);
 }
 
+// A pruned source block should make rollback fail safely rather than crash.
+TEST (asset_ledger, rolling_back_a_collect_with_pruned_source_rejected_safely)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction = store.tx_begin_write ();
+	nano::asset_payload payload;
+	payload.memo = "quest reward";
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub, payload));
+	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
+
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *collect).code);
+
+	ledger.pruning = true;
+	ASSERT_GT (ledger.pruning_action (transaction, mint->hash (), 1), 0);
+	ASSERT_FALSE (store.block.exists (transaction, mint->hash ()));
+	ASSERT_TRUE (store.pruned.exists (transaction, mint->hash ()));
+
+	ASSERT_TRUE (ledger.rollback (transaction, collect->hash ()));
+	ASSERT_TRUE (store.block.exists (transaction, collect->hash ()));
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+	nano::asset_pending_info pending;
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, mint->hash ())));
+	ASSERT_FALSE (store.asset.pending_get (transaction, nano::pending_key (player.pub, mint->hash ()), pending));
+	ASSERT_EQ (nano::dev::team_key.pub, pending.source);
+	ASSERT_EQ (issued.id, pending.asset_id);
+	ASSERT_EQ (nano::amount (500), pending.amount);
+	ASSERT_EQ ("quest reward", pending.memo);
+}
+
 // The claim model (SPEC §5.5). Everything below is about the one property that
 // makes it worth having: the issuer writes one block, and the claims that block
 // underwrites are written by other accounts, in parallel, on their own chains.
