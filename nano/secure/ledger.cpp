@@ -1151,6 +1151,22 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 		return was_an_offer ? nano::process_result::offer_consumed : nano::process_result::no_such_offer;
 	};
 
+	// The cap in SPEC §7 is on rows in `holdings`, not on units, so it binds
+	// exactly when a credit would add a row the account does not already have —
+	// `balance` returning zero and the row being absent are the same fact, since
+	// zero entries are deleted rather than kept. Unbounded per-account state in
+	// consensus code is how nodes run out of memory. It cannot be weaponised:
+	// §5.6.3 means only the account itself can add to its own holdings.
+	//
+	// Every op that stages a `credit` below has to ask, because the flush at the
+	// bottom of this function is a single shared `balance_put` and by then the
+	// block is already written — a refusal has to happen up here. The three ops
+	// that stage one asked in three separate copies of these lines, and one of
+	// them (`swap_cancel`) did not ask at all (#46).
+	auto const at_holdings_cap = [this, &block_a] (nano::uint128_t const & held_a) {
+		return held_a == 0 && ledger.store.asset.holdings_count (transaction, block_a.hashables.account) >= nano::max_assets_per_account;
+	};
+
 	switch (block_a.hashables.op)
 	{
 		case nano::asset_op::issue:
@@ -1301,10 +1317,7 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 				return;
 			}
 			auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
-			// Unbounded per-account state in consensus code is how nodes run
-			// out of memory (SPEC §7). Only the account itself can add to its
-			// own holdings, so this cannot be weaponised against anyone else.
-			if (held == 0 && ledger.store.asset.holdings_count (transaction, block_a.hashables.account) >= nano::max_assets_per_account)
+			if (at_holdings_cap (held))
 			{
 				result.code = nano::process_result::too_many_assets;
 				return;
@@ -1437,7 +1450,7 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 				return;
 			}
 			auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
-			if (held == 0 && ledger.store.asset.holdings_count (transaction, block_a.hashables.account) >= nano::max_assets_per_account)
+			if (at_holdings_cap (held))
 			{
 				result.code = nano::process_result::too_many_assets;
 				return;
@@ -1638,6 +1651,23 @@ void ledger_processor::asset_block (nano::asset_block & block_a)
 					return;
 				}
 				auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, lock.asset_id).number ());
+				// An offer for an account's whole balance of an asset deletes
+				// the row (the `debit->is_zero ()` branch below), so the lock is
+				// the one place a holding can be away from `holdings` and come
+				// back. Without this the account can free a slot by offering,
+				// fill it with something else, then cancel — and hold 1,025.
+				//
+				// Refusing does not strand the locked asset. Nothing expires a
+				// lock: `expires_at` is recorded on it but the ledger never
+				// reads it, so `swap_cancel` stays available forever, and `burn`
+				// is gated by no policy at all, so the account can always free a
+				// row and cancel after. That is precisely the fix SPEC §7 says
+				// the error should name — "burn or transfer something".
+				if (at_holdings_cap (held))
+				{
+					result.code = nano::process_result::too_many_assets;
+					return;
+				}
 				credit = nano::amount (held + lock.amount.number ());
 			}
 			// The credit above and the `asset_dirty`-free write below both key
