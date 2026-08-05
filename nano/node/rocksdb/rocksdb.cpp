@@ -829,28 +829,41 @@ int nano::rocksdb::store::drop (nano::write_transaction const & transaction_a, t
 		}
 		else
 		{
-			return clear (col);
+			return clear (transaction_a, col);
 		}
 	}
 	return status;
 }
 
-int nano::rocksdb::store::clear (::rocksdb::ColumnFamilyHandle * column_family)
+// Every delete goes into the caller's transaction, which is the part #40 did
+// not do. Its `WriteBatch` was atomic with respect to itself but was built from
+// `db->NewIterator` and committed by `db->Write`, both of which go straight to
+// the database — so a clear could not see rows its own transaction had written
+// and had not committed, and its deletes landed whether or not that transaction
+// ever committed. `rocksdb_block_store.clear_is_survivable` is what catches the
+// first half: it puts a row, clears, and finds the row still there.
+//
+// Keys are collected before anything is deleted. A transaction iterator merges
+// the snapshot with the transaction's own write batch, so deleting through it
+// while it is still positioned is not something to rely on.
+int nano::rocksdb::store::clear (nano::write_transaction const & transaction_a, ::rocksdb::ColumnFamilyHandle * column_family)
 {
-	::rocksdb::ReadOptions read_options;
-	::rocksdb::WriteOptions write_options;
-	::rocksdb::WriteBatch write_batch;
-	std::unique_ptr<::rocksdb::Iterator> it (db->NewIterator (read_options, column_family));
-
-	for (it->SeekToFirst (); it->Valid (); it->Next ())
+	std::vector<std::string> keys;
 	{
-		write_batch.Delete (column_family, it->key ());
+		std::unique_ptr<::rocksdb::Iterator> it (tx (transaction_a)->GetIterator (::rocksdb::ReadOptions{}, column_family));
+		for (it->SeekToFirst (); it->Valid (); it->Next ())
+		{
+			keys.emplace_back (it->key ().ToString ());
+		}
 	}
 
-	::rocksdb::Status status = db->Write (write_options, &write_batch);
-	release_assert (status.ok ());
+	for (auto const & key : keys)
+	{
+		auto const status (tx (transaction_a)->Delete (column_family, key));
+		release_assert (status.ok ());
+	}
 
-	return status.code ();
+	return static_cast<int> (::rocksdb::Status::Code::kOk);
 }
 
 void nano::rocksdb::store::construct_column_family_mutexes ()
