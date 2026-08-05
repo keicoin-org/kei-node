@@ -507,13 +507,36 @@ public:
 		}
 		if (error)
 		{
-			// A rejected rollback has to leave the block where it found it.
-			// Every `error` above is set before its case writes anything, so
-			// returning here is the whole undo. Falling through would delete
-			// the block and wind the account's head back to its predecessor
-			// while `ledger::rollback ()` reports failure and leaves
-			// `cache.block_count` alone — a chain one block shorter than the
-			// ledger believes it is, which no later block can repair.
+			// A rejected rollback has to leave *this* block where it found it.
+			// Falling through would delete it and wind the account's head back
+			// to its predecessor while `ledger::rollback ()` reports failure and
+			// therefore leaves `cache.block_count` alone — a chain one block
+			// shorter than the ledger believes it is, which no later block
+			// repairs. The caller does not save us: `blockprocessor` logs
+			// `rollback_failed` and carries on with the same write transaction,
+			// so whatever a failed rollback wrote is committed.
+			//
+			// This is not a full undo and is not claimed as one. Any case whose
+			// helper loops over nested `ledger.rollback ()` has already written
+			// by the time it fails, because the earlier passes of that loop
+			// succeeded and really did roll blocks off another account's chain.
+			// At least these five, all reachable — `ledger::rollback ()` returns
+			// true whenever the block sits at or below the confirmation height:
+			//
+			//   `mint`      -> take_back_receivable
+			//   `transfer`  -> take_back_receivable
+			//   `commit`    -> undo_claims
+			//   `swap_offer` -> its settler loop
+			//   `swap_accept` -> take_back_arrival
+			//
+			// `swap_accept` is worse than the rest: it calls take_back_arrival
+			// twice, so the offerer's leg can be deleted outright and the
+			// accepter's then fail, leaving this block claiming two arrivals of
+			// which one is gone.
+			//
+			// Returning here stops that from compounding — the failing block is
+			// no longer destroyed on top of it — and nothing more. The residual
+			// is #52.
 			return;
 		}
 		ledger.stats.inc (nano::stat::type::rollback, nano::stat::detail::asset_block);
