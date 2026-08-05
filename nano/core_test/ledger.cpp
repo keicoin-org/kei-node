@@ -3195,6 +3195,70 @@ TEST (ledger, state_rollback_received_send)
 	ASSERT_EQ (store.account.count (transaction), ledger.cache.account_count);
 }
 
+// The same chain as state_rollback_received_send, but with the receive cemented
+// so the rollback is refused rather than completed. `ledger::rollback` gives up
+// on any block at or below its account's confirmation height, which is the one
+// case `rollback_visitor::state_block` can hit: its nested-rollback loop exits
+// with `error` set, and everything below that loop is destructive.
+TEST (ledger, state_rollback_send_refused_when_receiver_is_cemented)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	auto transaction = store.tx_begin_write ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair key;
+	nano::block_builder builder;
+	auto send1 = builder
+				 .state ()
+				 .account (nano::dev::genesis->account ())
+				 .previous (nano::dev::genesis->hash ())
+				 .representative (nano::dev::genesis->account ())
+				 .balance (nano::dev::constants.genesis_amount - nano::MBAN_ratio)
+				 .link (key.pub)
+				 .sign (nano::dev::genesis_key.prv, nano::dev::genesis_key.pub)
+				 .work (*pool.generate (nano::dev::genesis->hash ()))
+				 .build ();
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *send1).code);
+	auto receive1 = builder
+					.state ()
+					.account (key.pub)
+					.previous (0)
+					.representative (key.pub)
+					.balance (nano::MBAN_ratio)
+					.link (send1->hash ())
+					.sign (key.prv, key.pub)
+					.work (*pool.generate (key.pub))
+					.build ();
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *receive1).code);
+	// The receive consumed the receivable, so unwinding the send means unwinding
+	// the receive first — and this is what makes that impossible.
+	store.confirmation_height.put (transaction, key.pub, { 1, receive1->hash () });
+
+	auto const block_count = ledger.cache.block_count.load ();
+	ASSERT_TRUE (ledger.rollback (transaction, send1->hash ()));
+
+	// Refused has to mean nothing moved. Before the guard, the send was deleted
+	// and the genesis head wound back to the genesis block while the return
+	// value reported failure — so `cache.block_count` was never decremented and
+	// the count outran the chain it was counting.
+	ASSERT_TRUE (store.block.exists (transaction, send1->hash ()));
+	ASSERT_EQ (send1->hash (), ledger.latest (transaction, nano::dev::genesis->account ()));
+	ASSERT_EQ (block_count, ledger.cache.block_count);
+	ASSERT_EQ (nano::dev::constants.genesis_amount - nano::MBAN_ratio, ledger.account_balance (transaction, nano::dev::genesis->account ()));
+	// Weights are the half that asserting on block existence alone misses: they
+	// used to be adjusted at the top of the visitor, above the loop that fails.
+	ASSERT_EQ (nano::dev::constants.genesis_amount - nano::MBAN_ratio, ledger.weight (nano::dev::genesis->account ()));
+	ASSERT_EQ (nano::MBAN_ratio, ledger.weight (key.pub));
+	// And the chain the loop was trying to unwind is untouched, receivable
+	// included — restoring that while leaving the receiver's balance would
+	// credit the same units twice.
+	ASSERT_TRUE (store.block.exists (transaction, receive1->hash ()));
+	ASSERT_EQ (receive1->hash (), ledger.latest (transaction, key.pub));
+	ASSERT_EQ (nano::MBAN_ratio, ledger.account_balance (transaction, key.pub));
+	ASSERT_FALSE (store.pending.exists (transaction, nano::pending_key (key.pub, send1->hash ())));
+}
+
 TEST (ledger, state_rep_change_rollback)
 {
 	auto ctx = nano::test::context::ledger_empty ();
