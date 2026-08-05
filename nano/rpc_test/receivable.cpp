@@ -1,11 +1,16 @@
+#include <nano/lib/blocks.hpp>
 #include <nano/node/ipc/ipc_server.hpp>
+#include <nano/node/node.hpp>
 #include <nano/rpc/rpc_request_processor.hpp>
 #include <nano/rpc_test/common.hpp>
+#include <nano/secure/store.hpp>
 #include <nano/test_common/chains.hpp>
 #include <nano/test_common/system.hpp>
 #include <nano/test_common/testutil.hpp>
 
 #include <gtest/gtest.h>
+
+#include <memory>
 
 using namespace nano::test;
 
@@ -552,4 +557,145 @@ TEST (rpc, accounts_receivable_confirmed)
 	ASSERT_TIMELY (5s, !node->active.active (*block1));
 	request.put ("include_only_confirmed", "true");
 	ASSERT_TRUE (check_block_response_count (system, rpc_ctx, request, 1));
+}
+
+// The Kei branch of `accounts_receivable` — the one a request carrying `account`
+// rather than `accounts` lands in, which is every request `@keicoin/transaction`
+// makes. A `pending` row is written when a send is processed, so before this was
+// gated the branch reported an uncemented send as money that had arrived, and a
+// game's `onPayment` minted against a block that could still lose a fork.
+TEST (rpc, kei_receivables_unconfirmed)
+{
+	nano::test::system system;
+	nano::node_config config;
+	config.backlog_scan_batch_size = 0;
+	auto node = add_ipc_enabled_node (system, config);
+	auto chain = nano::test::setup_chain (system, *node, 1, nano::dev::genesis_key, false);
+	auto block1 = chain[0];
+	ASSERT_TIMELY (5s, !node->active.active (*block1));
+	ASSERT_FALSE (node->block_confirmed (block1->hash ()));
+
+	auto const rpc_ctx = add_rpc (system, node);
+	boost::property_tree::ptree request;
+	request.put ("action", "accounts_receivable");
+	// No `accounts`, no options: the exact shape `HttpNode::pollReceivables`
+	// sends, which is what makes the default the only one that matters here.
+	request.put ("account", block1->link ().to_account ());
+	{
+		auto response (wait_response (system, rpc_ctx, request));
+		ASSERT_EQ (0, response.get_child ("receivables").size ());
+	}
+	request.put ("include_only_confirmed", "false");
+	{
+		auto response (wait_response (system, rpc_ctx, request));
+		auto & receivables (response.get_child ("receivables"));
+		ASSERT_EQ (1, receivables.size ());
+		auto const & entry (receivables.begin ()->second);
+		ASSERT_EQ (block1->hash ().to_string (), entry.get<std::string> ("hash"));
+		ASSERT_EQ (nano::uint256_union (0).to_string (), entry.get<std::string> ("asset"));
+		ASSERT_FALSE (entry.get<bool> ("confirmed"));
+	}
+	ASSERT_TRUE (nano::test::confirm (*node, { block1->hash () }));
+	ASSERT_TIMELY (5s, node->block_confirmed (block1->hash ()));
+	// Erased rather than set to "true", so this asserts the default and not a
+	// value the caller supplied.
+	request.erase ("include_only_confirmed");
+	{
+		auto response (wait_response (system, rpc_ctx, request));
+		auto & receivables (response.get_child ("receivables"));
+		ASSERT_EQ (1, receivables.size ());
+		auto const & entry (receivables.begin ()->second);
+		ASSERT_EQ (block1->hash ().to_string (), entry.get<std::string> ("hash"));
+		ASSERT_TRUE (entry.get<bool> ("confirmed"));
+	}
+}
+
+namespace
+{
+/**
+ * Sign an asset block and find it work at its own tier, as `asset_ledger.cpp`
+ * does — work comes after construction because the hash a signature covers does
+ * not include it.
+ */
+std::shared_ptr<nano::asset_block> signed_asset (nano::node & node_a, nano::keypair const & key_a, nano::block_hash const & previous_a, nano::amount const & balance_a, nano::asset_op op_a, nano::uint256_union const & asset_id_a, nano::amount const & amount_a, nano::link const & link_a, nano::asset_payload const & payload_a = nano::asset_payload{})
+{
+	auto block (std::make_shared<nano::asset_block> (key_a.pub, previous_a, key_a.pub, balance_a, op_a, asset_id_a, amount_a, link_a, payload_a, key_a.prv, key_a.pub, 0));
+	block->block_work_set (*node_a.work_generate_blocking (block->root (), nano::dev::constants.work.threshold_asset (op_a)));
+	return block;
+}
+}
+
+// The asset half of the same handler, which the same race applies to:
+// `world-of-wonder`'s buyback pays gold for an item arriving, so an
+// `asset_pending` row acted on before it is cemented is the same free mint as a
+// Kei row acted on before it is cemented.
+TEST (rpc, kei_receivables_asset_unconfirmed)
+{
+	nano::test::system system;
+	nano::node_config config;
+	config.backlog_scan_batch_size = 0;
+	auto node = add_ipc_enabled_node (system, config);
+	nano::keypair player;
+
+	nano::asset_payload issuance;
+	issuance.name = "Gems";
+	issuance.symbol = "GEM";
+	issuance.decimals = 0;
+	issuance.max_supply = nano::amount (1000);
+	issuance.transfer = nano::transfer_policy::open;
+	issuance.swap = nano::swap_policy::one_way;
+	issuance.kind = nano::asset_kind::token;
+	auto const asset_id (nano::derive_asset_id (nano::dev::team_key.pub, issuance.symbol));
+	// The team allocation issues, because issuance burns Kei (SPEC §5.6.5) and
+	// the reserve deliberately cannot. Its open block is cemented at height 1 by
+	// the genesis ceremony, so the two blocks below it land in the ledger
+	// unconfirmed — the state a live fork leaves behind, without needing one.
+	auto const team_balance (nano::amount (nano::dev::constants.allocation_team () - nano::issuance_burn (0)));
+	auto issue (signed_asset (*node, nano::dev::team_key, nano::dev::constants.genesis_allocations.back ().open->hash (), team_balance, nano::asset_op::issue, asset_id, 0, 0, issuance));
+	nano::asset_payload gift;
+	gift.memo = "Sword of Testing";
+	auto mint (signed_asset (*node, nano::dev::team_key, issue->hash (), team_balance, nano::asset_op::mint, asset_id, 500, player.pub, gift));
+	{
+		auto transaction (node->store.tx_begin_write ());
+		ASSERT_EQ (nano::process_result::progress, node->process (transaction, *issue).code);
+		ASSERT_EQ (nano::process_result::progress, node->process (transaction, *mint).code);
+	}
+	ASSERT_FALSE (node->block_confirmed (mint->hash ()));
+
+	auto const rpc_ctx = add_rpc (system, node);
+	boost::property_tree::ptree request;
+	request.put ("action", "accounts_receivable");
+	request.put ("account", player.pub.to_account ());
+	{
+		auto response (wait_response (system, rpc_ctx, request));
+		ASSERT_EQ (0, response.get_child ("receivables").size ());
+	}
+	request.put ("include_only_confirmed", "false");
+	{
+		auto response (wait_response (system, rpc_ctx, request));
+		auto & receivables (response.get_child ("receivables"));
+		ASSERT_EQ (1, receivables.size ());
+		auto const & entry (receivables.begin ()->second);
+		ASSERT_EQ (mint->hash ().to_string (), entry.get<std::string> ("hash"));
+		ASSERT_EQ (asset_id.to_string (), entry.get<std::string> ("asset"));
+		ASSERT_EQ ("Sword of Testing", entry.get<std::string> ("memo"));
+		ASSERT_FALSE (entry.get<bool> ("confirmed"));
+	}
+	// Written rather than voted, the way `market_paging.cpp` establishes
+	// confirmation for asset blocks: the handler reads the confirmation height,
+	// and driving an election here would be a test of the election instead.
+	{
+		auto transaction (node->store.tx_begin_write ());
+		node->store.confirmation_height.put (transaction, nano::dev::team_key.pub, nano::confirmation_height_info{ static_cast<uint64_t> (3), mint->hash () });
+	}
+	ASSERT_TRUE (node->block_confirmed (mint->hash ()));
+	request.erase ("include_only_confirmed");
+	{
+		auto response (wait_response (system, rpc_ctx, request));
+		auto & receivables (response.get_child ("receivables"));
+		ASSERT_EQ (1, receivables.size ());
+		auto const & entry (receivables.begin ()->second);
+		ASSERT_EQ (mint->hash ().to_string (), entry.get<std::string> ("hash"));
+		ASSERT_TRUE (entry.get<bool> ("confirmed"));
+	}
 }
