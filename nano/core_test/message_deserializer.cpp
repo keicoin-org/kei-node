@@ -151,7 +151,7 @@ TEST (message_deserializer, exact_publish_asset)
 	auto const payload (issue_payload ());
 	auto const id (nano::derive_asset_id (key1.pub, payload.symbol));
 	nano::root const root (1);
-	auto block = std::make_shared<nano::asset_block> (key1.pub, root, key1.pub, 1000, nano::asset_op::issue, id, 0, 0, payload, key1.prv, key1.pub, *system.work.generate (root));
+	auto block = std::make_shared<nano::asset_block> (key1.pub, root.previous (), key1.pub, 1000, nano::asset_op::issue, id, 0, 0, payload, key1.prv, key1.pub, *system.work.generate (root));
 	nano::publish message{ nano::dev::network_params.network, block };
 
 	message_deserializer_success_checker<decltype (message)> (message);
