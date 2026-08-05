@@ -55,7 +55,7 @@ void nano::bootstrap::block_deserializer::received_type (nano::transport::socket
 	{
 		auto const size = nano::asset_block::serialized_prefix_size;
 		read_buffer->resize (size);
-		socket.async_read (read_buffer, size, [this_l = shared_from_this (), callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
+		socket.async_read (read_buffer, size, [this_l = shared_from_this (), &socket, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
 			if (ec)
 			{
 				callback (ec, nullptr);
