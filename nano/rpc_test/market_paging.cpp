@@ -172,7 +172,7 @@ nano::block_hash append_market_block (nano::node & node_a, fake_market_chain & c
 	return block->hash ();
 }
 
-boost::property_tree::ptree swaps_request (nano::account const & account_a, boost::optional<uint64_t> count_a, boost::optional<uint64_t> scan_count_a, std::string const & before_a = "")
+boost::property_tree::ptree swaps_request (nano::account const & account_a, boost::optional<uint64_t> count_a = boost::none, boost::optional<uint64_t> scan_count_a = boost::none, std::string const & before_a = "")
 {
 	boost::property_tree::ptree request;
 	request.put ("action", "account_swaps");
