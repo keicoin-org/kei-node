@@ -31,6 +31,13 @@ void nano::block_broadcast::connect (nano::block_processor & block_processor)
 
 void nano::block_broadcast::observe (std::shared_ptr<nano::block> block)
 {
+	if (block->type () == nano::block_type::asset)
+	{
+		// Asset blocks are still blocked from published wire traffic (issue #29).
+		// Keep them local-only until publish/frame/bulk paths are made variable-length-safe.
+		return;
+	}
+
 	nano::unique_lock<nano::mutex> lock{ mutex };
 	auto existing = local.find (block);
 	auto local_l = existing != local.end ();
