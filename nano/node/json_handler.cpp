@@ -33,6 +33,10 @@ constexpr std::size_t market_cursor_signature_size{ 128 };
 constexpr std::size_t market_cursor_size{ sizeof (market_cursor_prefix) - 1 + market_cursor_body_size + market_cursor_signature_size };
 constexpr uint64_t market_account_swaps_default_count{ 1024 };
 constexpr uint64_t market_account_swaps_default_scan_count{ 1024 };
+// The per-asset prefix scans. Deliberately the same 1,024 rather than a second
+// number to tune: SPEC §9.1 bounds market reads as a class, and two limits that
+// happen to agree today are two limits that drift.
+constexpr uint64_t market_asset_index_default_count{ 1024 };
 constexpr char market_account_swaps_snapshot_salt[]{ "kmp1-account-swaps-snapshot-v1" };
 constexpr char market_account_swaps_snapshot_empty_state{ '*' };
 
@@ -6068,21 +6072,52 @@ void nano::json_handler::asset_holders ()
 	{
 		ec = nano::error_common::bad_asset_id;
 	}
-	auto const count (count_optional_impl ());
+	auto const requested_count_text (request.get_optional<std::string> ("count"));
+	auto const count (count_optional_impl (market_asset_index_default_count, market_asset_index_default_count));
+	if (ec == nano::error_common::invalid_count)
+	{
+		write_market_limit_error (response, "count", requested_count_text, market_asset_index_default_count, ec.message ());
+		return;
+	}
+	nano::account start (0);
+	auto const start_text (request.get_optional<std::string> ("start"));
+	if (!ec && start_text.is_initialized () && start.decode_account (*start_text))
+	{
+		ec = nano::error_common::bad_account_number;
+	}
 	if (!ec)
 	{
 		boost::property_tree::ptree holders;
 		auto transaction (node.store.tx_begin_read ());
 		uint64_t returned (0);
+		uint64_t scanned (0);
+		std::string next;
 		// For a supply-one asset this answers "who owns this item?" in one entry.
-		for (auto i (node.store.asset.holders_begin (transaction, nano::holder_key (id, 0))), n (node.store.asset.holders_end ()); i != n && i->first.first == id && returned < count; ++i, ++returned)
+		//
+		// `start` is the account to resume at, and it is *inclusive* — the same
+		// direction `account_swaps` reads its cursor, which begins the walk at
+		// the position it was handed rather than after it. So `next` names the
+		// first row this page did not return and is fed straight back as the
+		// next `start`. No signed cursor: `account_swaps` needs one because its
+		// position is a place in a chain that can be rolled out from under it,
+		// while this prefix is keyed by identity — an account either holds the
+		// asset or does not, and neither answer moves the rows around it.
+		for (auto i (node.store.asset.holders_begin (transaction, nano::holder_key (id, start))), n (node.store.asset.holders_end ()); i != n && i->first.first == id; ++i)
 		{
+			++scanned;
+			if (returned == count)
+			{
+				next = nano::account (i->first.second.number ()).to_account ();
+				break;
+			}
 			boost::property_tree::ptree entry;
 			entry.put ("account", nano::account (i->first.second.number ()).to_account ());
 			entry.put ("balance", i->second.to_string_dec ());
 			holders.push_back (std::make_pair ("", entry));
+			++returned;
 		}
 		nano::json::add_array (response_l, "holders", holders);
+		add_market_page_metadata (response_l, scanned, next.empty (), next.empty () ? "exhausted" : "result_limit", next);
 	}
 	response_errors ();
 }
@@ -6533,22 +6568,52 @@ void nano::json_handler::asset_offers ()
 	{
 		ec = nano::error_common::bad_asset_id;
 	}
-	auto const count (count_optional_impl ());
+	auto const requested_count_text (request.get_optional<std::string> ("count"));
+	auto const count (count_optional_impl (market_asset_index_default_count, market_asset_index_default_count));
+	if (ec == nano::error_common::invalid_count)
+	{
+		write_market_limit_error (response, "count", requested_count_text, market_asset_index_default_count, ec.message ());
+		return;
+	}
+	nano::block_hash start (0);
+	auto const start_text (request.get_optional<std::string> ("start"));
+	if (!ec && start_text.is_initialized () && start.decode_hex (*start_text))
+	{
+		ec = nano::error_common::bad_root;
+	}
 	if (!ec)
 	{
 		boost::property_tree::ptree offers;
 		auto transaction (node.store.tx_begin_read ());
 		uint64_t returned (0);
+		uint64_t scanned (0);
+		std::string next;
 		// The market's whole read model (SPEC §9.3): every entry here is a
 		// `swap_offer` block that is still open, and nothing else ever appears.
-		for (auto i (node.store.asset.offers_begin (transaction, nano::offer_key (id, 0))), n (node.store.asset.offers_end ()); i != n && i->first.first == id && returned < count; ++i, ++returned)
+		//
+		// This is the per-*asset* walk SPEC §9.1 is bounding, and it was the one
+		// with no bound: one open offer of a single unit costs the offerer one
+		// tier-B block and costs every later reader one row, forever, with no
+		// way to read past the first page except by asking for all of it.
+		// `start` is the offer hash to resume at, inclusive, and `next` names
+		// the first row this page did not return — see `asset_holders` for why
+		// a bare key is enough here where `account_swaps` needs a signed cursor.
+		for (auto i (node.store.asset.offers_begin (transaction, nano::offer_key (id, start))), n (node.store.asset.offers_end ()); i != n && i->first.first == id; ++i)
 		{
+			++scanned;
+			if (returned == count)
+			{
+				next = i->first.second.to_string ();
+				break;
+			}
 			boost::property_tree::ptree entry;
 			entry.put ("offer", i->first.second.to_string ());
 			entry.put ("offerer", i->second.to_account ());
 			offers.push_back (std::make_pair ("", entry));
+			++returned;
 		}
 		nano::json::add_array (response_l, "offers", offers);
+		add_market_page_metadata (response_l, scanned, next.empty (), next.empty () ? "exhausted" : "result_limit", next);
 	}
 	response_errors ();
 }
