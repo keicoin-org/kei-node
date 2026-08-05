@@ -33,6 +33,8 @@ class rocksdb_block_store_tombstone_count_Test;
 namespace rocksdb
 {
 	class rocksdb_block_store_upgrade_v21_v22_Test;
+	class rocksdb_block_store_clear_preserves_column_family_handle_Test;
+	class rocksdb_block_store_clear_is_survivable_Test;
 
 	/**
  	 * rocksdb implementation of the block store
@@ -179,6 +181,8 @@ namespace rocksdb
 
 		friend class nano::rocksdb_block_store_tombstone_count_Test;
 		friend class nano::rocksdb::rocksdb_block_store_upgrade_v21_v22_Test;
+		friend class nano::rocksdb::rocksdb_block_store_clear_preserves_column_family_handle_Test;
+		friend class nano::rocksdb::rocksdb_block_store_clear_is_survivable_Test;
 	};
 } // namespace rocksdb
 } // namespace nano
