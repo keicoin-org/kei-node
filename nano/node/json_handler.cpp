@@ -6591,13 +6591,27 @@ void nano::json_handler::asset_offers ()
 		// The market's whole read model (SPEC §9.3): every entry here is a
 		// `swap_offer` block that is still open, and nothing else ever appears.
 		//
-		// This is the per-*asset* walk SPEC §9.1 is bounding, and it was the one
-		// with no bound: one open offer of a single unit costs the offerer one
-		// tier-B block and costs every later reader one row, forever, with no
-		// way to read past the first page except by asking for all of it.
-		// `start` is the offer hash to resume at, inclusive, and `next` names
-		// the first row this page did not return — see `asset_holders` for why
-		// a bare key is enough here where `account_swaps` needs a signed cursor.
+		// Deliberately not gated on confirmation and carrying no `confirmed`
+		// field, unlike `kei_receivables`. An offer is an advertisement, and
+		// SPEC §9.2's problem 5 is that accepting one costs the accepter nothing
+		// they do not get back: `swap_accept` debits B in the same block that
+		// credits B, so an offer that loses a fork takes the accept down with it
+		// and B is whole. Hiding an uncemented listing would instead drop the
+		// offerer's own offer out of their own market view for a second or two.
+		// A `confirmed` field here would also mean something other than what it
+		// means in `swap_offer_to_json`, which reports the *swap's* completion
+		// and is false for every open offer by construction — and every row here
+		// is an open offer. See issue #50's audit for the naming that would be
+		// needed to say "the offer block is cemented" without the collision.
+		//
+		// This is also the per-*asset* walk SPEC §9.1 is bounding, and it was
+		// the one with no bound: one open offer of a single unit costs the
+		// offerer one tier-B block and costs every later reader one row,
+		// forever, with no way to read past the first page except by asking for
+		// all of it. `start` is the offer hash to resume at, inclusive, and
+		// `next` names the first row this page did not return — see
+		// `asset_holders` for why a bare key is enough here where
+		// `account_swaps` needs a signed cursor.
 		for (auto i (node.store.asset.offers_begin (transaction, nano::offer_key (id, start))), n (node.store.asset.offers_end ()); i != n && i->first.first == id; ++i)
 		{
 			++scanned;
@@ -6650,6 +6664,18 @@ void nano::json_handler::kei_receivables ()
 {
 	auto account (account_impl ());
 	auto const count (count_optional_impl ());
+	// The same two options, with the same defaults, as the `accounts` branch
+	// above. A pending row is written when the sending block is *processed*
+	// (`ledger.cpp`'s send branch and the asset apply), not when it is cemented,
+	// and the rollback path deletes it again — so an unfiltered answer here
+	// tells a game it was paid by a block that can still lose a fork, and the
+	// game mints against it. SPEC §9.2 settles the rule for the other half of
+	// the same question — "a swap is confirmed when the `swap_accept` block is
+	// cemented. Until then the SDK reports it as pending" — and a payment is not
+	// a weaker promise than a trade. Confirmed-only is therefore the default:
+	// the answer that is safe to act on is the one a caller gets by not asking.
+	bool const include_active = request.get<bool> ("include_active", false);
+	bool const include_only_confirmed = request.get<bool> ("include_only_confirmed", true);
 	if (!ec)
 	{
 		boost::property_tree::ptree receivables;
@@ -6659,21 +6685,41 @@ void nano::json_handler::kei_receivables ()
 		// Kei waiting in `pending` and an asset waiting in `asset_pending` are
 		// the same event to the SDK — something arrived and needs a block of
 		// the recipient's own to collect it (SPEC §5.6.3) — so one list carries
-		// both, and Kei is the zero asset id as it is everywhere else.
-		for (auto i (node.store.pending.begin (transaction, nano::pending_key (account, 0))), n (node.store.pending.end ()); i != n && nano::pending_key (i->first).account == account && returned < count; ++i, ++returned)
+		// both, and Kei is the zero asset id as it is everywhere else. `count`
+		// bounds the rows returned rather than the rows scanned, as it does in
+		// the branch above: a row the filter drops was never the caller's, so
+		// it must not spend the caller's budget.
+		for (auto i (node.store.pending.begin (transaction, nano::pending_key (account, 0))), n (node.store.pending.end ()); i != n && nano::pending_key (i->first).account == account && returned < count; ++i)
 		{
 			nano::pending_key const & key (i->first);
+			if (!block_confirmed (node, transaction, key.hash, include_active, include_only_confirmed))
+			{
+				continue;
+			}
 			nano::pending_info const & info (i->second);
 			boost::property_tree::ptree entry;
 			entry.put ("hash", key.hash.to_string ());
 			entry.put ("from", info.source.to_account ());
 			entry.put ("asset", kei);
 			entry.put ("amount", info.amount.to_string_dec ());
+			// Asked of the ledger rather than reused from the filter above,
+			// because the two answer different questions: with `include_active`
+			// the filter answers "may this row be shown", which is true for a
+			// block still in an election, while this is the fact itself. A
+			// caller that opted into unconfirmed rows has to be able to tell
+			// them apart (SPEC §9.6 criterion 3), and this is the same source
+			// `swap_offer_to_json` reports its own `confirmed` from.
+			nano::json::put_boolean (entry, "confirmed", node.ledger.block_confirmed (transaction, key.hash));
 			receivables.push_back (std::make_pair ("", entry));
+			++returned;
 		}
-		for (auto i (node.store.asset.pending_begin (transaction, nano::pending_key (account, 0))), n (node.store.asset.pending_end ()); i != n && nano::pending_key (i->first).account == account && returned < count; ++i, ++returned)
+		for (auto i (node.store.asset.pending_begin (transaction, nano::pending_key (account, 0))), n (node.store.asset.pending_end ()); i != n && nano::pending_key (i->first).account == account && returned < count; ++i)
 		{
 			nano::pending_key const & key (i->first);
+			if (!block_confirmed (node, transaction, key.hash, include_active, include_only_confirmed))
+			{
+				continue;
+			}
 			nano::asset_pending_info const & info (i->second);
 			boost::property_tree::ptree entry;
 			entry.put ("hash", key.hash.to_string ());
@@ -6686,7 +6732,9 @@ void nano::json_handler::kei_receivables ()
 				// one — the SDK matches an order against it (decisions-m1 §5).
 				entry.put ("memo", info.memo);
 			}
+			nano::json::put_boolean (entry, "confirmed", node.ledger.block_confirmed (transaction, key.hash));
 			receivables.push_back (std::make_pair ("", entry));
+			++returned;
 		}
 		nano::json::add_array (response_l, "receivables", receivables);
 	}
