@@ -2060,6 +2060,13 @@ TEST (asset_ledger, rollback_swap_conflict_with_pruned_settler_is_rejected_safel
 	ASSERT_TRUE (ledger.rollback_swap_conflict (transaction, offer->hash (), cancel->hash (), rolled_back));
 	ASSERT_TRUE (rolled_back.empty ());
 	ASSERT_TRUE (store.block.exists (transaction, offer->hash ()));
+	// The assertion with teeth: the pruned accept is still pruned. A rollback
+	// that gave up part-way through unwinding it could have put it back.
+	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.pruned.exists (transaction, accept->hash ()));
+	// The cancel never entered the store — `process` refused it as
+	// `offer_consumed` above — so on its own this line is close to a tautology.
+	// Kept alongside the accept check rather than in place of it.
 	ASSERT_FALSE (store.block.exists (transaction, cancel->hash ()));
 	// The lock is still settled by the accept, exactly as it was found.
 	nano::asset_lock_info lock;
