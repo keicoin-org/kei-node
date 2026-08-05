@@ -1,6 +1,21 @@
 #include <nano/node/node.hpp>
 #include <nano/node/transport/message_deserializer.hpp>
 
+#include <boost/endian/conversion.hpp>
+
+#include <cstring>
+
+namespace
+{
+std::size_t read_asset_payload_size (std::vector<uint8_t> const & data)
+{
+	uint16_t payload_size{ 0 };
+	std::memcpy (&payload_size, data.data () + nano::asset_block::serialized_length_field_offset, sizeof (payload_size));
+	boost::endian::little_to_native_inplace (payload_size);
+	return payload_size;
+}
+}
+
 nano::transport::message_deserializer::message_deserializer (nano::network_constants const & network_constants_a, nano::network_filter & publish_filter_a, nano::block_uniquer & block_uniquer_a, nano::vote_uniquer & vote_uniquer_a,
 read_query read_op) :
 	read_buffer{ std::make_shared<std::vector<uint8_t>> () },
@@ -66,36 +81,89 @@ void nano::transport::message_deserializer::received_header (const nano::transpo
 		return;
 	}
 
-	std::size_t payload_size = header.payload_length_bytes ();
-	if (payload_size > MAX_MESSAGE_SIZE)
-	{
-		status = parse_status::message_size_too_big;
-		callback (boost::asio::error::fault, nullptr);
-		return;
-	}
-	debug_assert (payload_size <= read_buffer->capacity ());
-
-	if (payload_size == 0)
-	{
-		// Payload size will be 0 for `bulk_push` & `telemetry_req` message type
-		received_message (header, 0, std::move (callback));
-	}
-	else
+	if (header.type == nano::message_type::publish && header.block_type () == nano::block_type::asset)
 	{
 		debug_assert (read_op);
-		read_op (read_buffer, payload_size, [this_l = shared_from_this (), payload_size, header, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
+		read_op (read_buffer, nano::asset_block::serialized_prefix_size, [this_l = shared_from_this (), header, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
 			if (ec)
 			{
 				callback (ec, nullptr);
 				return;
 			}
-			if (size_a != payload_size)
+			if (size_a != nano::asset_block::serialized_prefix_size)
 			{
 				callback (boost::asio::error::fault, nullptr);
 				return;
 			}
-			this_l->received_message (header, size_a, std::move (callback));
+			auto const payload_size = read_asset_payload_size (*this_l->read_buffer);
+			auto const total_size = nano::asset_block::serialized_size (payload_size);
+			auto const declared_payload_size = header.payload_length_bytes ();
+			if (declared_payload_size != 0 && declared_payload_size != total_size)
+			{
+				this_l->status = parse_status::message_size_too_big;
+				callback (boost::asio::error::fault, nullptr);
+				return;
+			}
+			if (total_size > MAX_MESSAGE_SIZE)
+			{
+				this_l->status = parse_status::message_size_too_big;
+				callback (boost::asio::error::fault, nullptr);
+				return;
+			}
+			auto const suffix_size = total_size - nano::asset_block::serialized_prefix_size;
+			auto suffix = std::make_shared<std::vector<uint8_t>> ();
+			suffix->resize (suffix_size);
+			this_l->read_buffer->reserve (total_size);
+			read_op (suffix, suffix_size, [this_l, suffix, total_size, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
+				if (ec)
+				{
+					callback (ec, nullptr);
+					return;
+				}
+				if (size_a != suffix->size ())
+				{
+					callback (boost::asio::error::fault, nullptr);
+					return;
+				}
+				this_l->read_buffer->insert (this_l->read_buffer->end (), suffix->begin (), suffix->end ());
+				this_l->read_buffer->resize (total_size);
+				this_l->received_message (header, total_size, std::move (callback));
+			});
 		});
+	}
+	else
+	{
+		std::size_t payload_size = header.payload_length_bytes ();
+		if (payload_size > MAX_MESSAGE_SIZE)
+		{
+			status = parse_status::message_size_too_big;
+			callback (boost::asio::error::fault, nullptr);
+			return;
+		}
+		debug_assert (payload_size <= read_buffer->capacity ());
+
+		if (payload_size == 0)
+		{
+			// Payload size will be 0 for `bulk_push` & `telemetry_req` message type
+			received_message (header, 0, std::move (callback));
+		}
+		else
+		{
+			debug_assert (read_op);
+			read_op (read_buffer, payload_size, [this_l = shared_from_this (), payload_size, header, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
+				if (ec)
+				{
+					callback (ec, nullptr);
+					return;
+				}
+				if (size_a != payload_size)
+				{
+					callback (boost::asio::error::fault, nullptr);
+					return;
+				}
+				this_l->received_message (header, size_a, std::move (callback));
+			});
+		}
 	}
 }
 

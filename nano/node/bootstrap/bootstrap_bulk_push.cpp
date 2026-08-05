@@ -4,7 +4,23 @@
 #include <nano/node/node.hpp>
 #include <nano/node/transport/tcp.hpp>
 
+#include <boost/endian/conversion.hpp>
 #include <boost/format.hpp>
+
+#include <cstring>
+
+namespace
+{
+constexpr std::size_t max_payload_length{ 1024 * 65 };
+
+std::size_t read_asset_block_size (std::vector<uint8_t> const & data)
+{
+	uint16_t payload_size{ 0 };
+	std::memcpy (&payload_size, data.data () + nano::asset_block::serialized_length_field_offset, sizeof (payload_size));
+	boost::endian::little_to_native_inplace (payload_size);
+	return nano::asset_block::serialized_size (payload_size);
+}
+}
 
 nano::bulk_push_client::bulk_push_client (std::shared_ptr<nano::bootstrap_client> const & connection_a, std::shared_ptr<nano::bootstrap_attempt_legacy> const & attempt_a) :
 	connection (connection_a),
@@ -248,6 +264,49 @@ void nano::bulk_push_server::received_type ()
 			node->stats.inc (nano::stat::type::bootstrap, nano::stat::detail::state_block, nano::stat::dir::in);
 			connection->socket->async_read (receive_buffer, nano::state_block::size, [this_l, type] (boost::system::error_code const & ec, std::size_t size_a) {
 				this_l->received_block (ec, size_a, type);
+			});
+			break;
+		}
+		case nano::block_type::asset:
+		{
+			node->stats.inc (nano::stat::type::bootstrap, nano::stat::detail::state_block, nano::stat::dir::in);
+			auto const size = nano::asset_block::serialized_prefix_size;
+			connection->socket->async_read (receive_buffer, size, [this_l, type] (boost::system::error_code const & ec, std::size_t size_a) {
+				if (ec)
+				{
+					this_l->received_block (ec, size_a, type);
+					return;
+				}
+				if (size_a != nano::asset_block::serialized_prefix_size)
+				{
+					this_l->received_block (boost::asio::error::fault, size_a, type);
+					return;
+				}
+				auto const full_size = read_asset_block_size (*this_l->receive_buffer);
+				if (full_size < nano::asset_block::serialized_minimum_size () || full_size > max_payload_length)
+				{
+					this_l->received_block (boost::asio::error::fault, size_a, type);
+					return;
+				}
+				auto const suffix_size = full_size - nano::asset_block::serialized_prefix_size;
+				auto suffix = std::make_shared<std::vector<uint8_t>> ();
+				suffix->resize (suffix_size);
+				this_l->receive_buffer->reserve (full_size);
+				this_l->connection->socket->async_read (suffix, suffix_size, [this_l, suffix, full_size] (boost::system::error_code const & ec, std::size_t size_a) {
+					if (ec)
+					{
+						this_l->received_block (ec, size_a, nano::block_type::asset);
+						return;
+					}
+					if (size_a != suffix->size ())
+					{
+						this_l->received_block (boost::asio::error::fault, size_a, nano::block_type::asset);
+						return;
+					}
+					this_l->receive_buffer->insert (this_l->receive_buffer->end (), suffix->begin (), suffix->end ());
+					this_l->receive_buffer->resize (full_size);
+					this_l->received_block (boost::system::error_code{}, full_size, nano::block_type::asset);
+				});
 			});
 			break;
 		}
