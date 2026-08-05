@@ -32,6 +32,27 @@ extern unsigned char nano_bootstrap_weights_beta[];
 extern std::size_t nano_bootstrap_weights_beta_size;
 }
 
+namespace
+{
+bool has_asset_blocks (nano::transaction const & transaction_a, nano::store const & store_a)
+{
+	auto i (store_a.block.begin (transaction_a));
+	auto n (store_a.block.end ());
+	for (; i != n; ++i)
+	{
+		if (!i->second.block)
+		{
+			continue;
+		}
+		if (i->second.block->type () == nano::block_type::asset)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+} // namespace
+
 /*
  * configs
  */
@@ -454,6 +475,14 @@ nano::node::node (boost::asio::io_context & io_ctx_a, boost::filesystem::path co
 
 		if (ledger.pruning)
 		{
+			if (!flags.inactive_node && has_asset_blocks (store.tx_begin_read (), store))
+			{
+				std::string str = "Pruning is currently incompatible with asset blocks (issue #30): disable pruning or remove asset blocks before enabling pruning";
+				logger.always_log (str);
+				std::cerr << str << std::endl;
+				std::exit (1);
+			}
+
 			if (config.enable_voting && !flags.inactive_node)
 			{
 				std::string str = "Incompatibility detected between config node.enable_voting and existing pruned blocks";
