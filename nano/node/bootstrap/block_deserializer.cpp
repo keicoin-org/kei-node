@@ -76,7 +76,7 @@ void nano::bootstrap::block_deserializer::received_type (nano::transport::socket
 			auto suffix = std::make_shared<std::vector<uint8_t>> ();
 			suffix->resize (suffix_size);
 			this_l->read_buffer->reserve (full_size);
-			socket.async_read (suffix, suffix_size, [this_l, suffix, full_size, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
+			socket.async_read (suffix, suffix_size, [this_l, suffix, full_size, &socket, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
 				if (ec)
 				{
 					callback (ec, nullptr);

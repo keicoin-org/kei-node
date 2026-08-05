@@ -114,7 +114,7 @@ void nano::transport::message_deserializer::received_header (const nano::transpo
 			auto suffix = std::make_shared<std::vector<uint8_t>> ();
 			suffix->resize (suffix_size);
 			this_l->read_buffer->reserve (total_size);
-			read_op (suffix, suffix_size, [this_l, suffix, total_size, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
+			this_l->read_op (suffix, suffix_size, [this_l, suffix, total_size, header, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
 				if (ec)
 				{
 					callback (ec, nullptr);
