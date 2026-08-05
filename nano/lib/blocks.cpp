@@ -82,12 +82,10 @@ size_t nano::block::size (nano::block_type type_a)
 			break;
 		case nano::block_type::asset:
 			// asset_block is variable-length (decisions-m2.md §7) and has no
-			// compile-time size, so it cannot answer the fixed-size wire read
-			// this dispatcher backs (nano::bootstrap::block_deserializer).
-			// M2's definition of done is a single local node — no bootstrap or
-			// block relay — so that path deliberately does not support asset
-			// blocks yet; 0 makes the deserializer reject rather than
-			// misread. Revisit when P2P relay of asset blocks is scoped.
+			// compile-time size, so this switch cannot map it to a fixed-size
+			// wire read.
+			// Callers that need asset blocks now read a fixed prefix first and
+			// then parse the 2-byte payload length to determine the suffix size.
 			result = 0;
 			break;
 	}

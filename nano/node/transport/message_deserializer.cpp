@@ -1,3 +1,4 @@
+#include <nano/node/asset_frame.hpp>
 #include <nano/node/node.hpp>
 #include <nano/node/transport/message_deserializer.hpp>
 
@@ -20,6 +21,15 @@ void nano::transport::message_deserializer::read (const nano::transport::message
 	debug_assert (read_op);
 
 	status = parse_status::none;
+
+	// read_buffer is reused for every message on this channel and
+	// nano::transport::socket::async_read refuses a read larger than its
+	// size (), so a message that left it short would drop the connection on
+	// the next one rather than on itself.
+	if (read_buffer->size () < MAX_MESSAGE_SIZE)
+	{
+		read_buffer->resize (MAX_MESSAGE_SIZE);
+	}
 
 	read_op (read_buffer, HEADER_SIZE, [this_l = shared_from_this (), callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
 		if (ec)
@@ -66,36 +76,77 @@ void nano::transport::message_deserializer::received_header (const nano::transpo
 		return;
 	}
 
-	std::size_t payload_size = header.payload_length_bytes ();
-	if (payload_size > MAX_MESSAGE_SIZE)
-	{
-		status = parse_status::message_size_too_big;
-		callback (boost::asio::error::fault, nullptr);
-		return;
-	}
-	debug_assert (payload_size <= read_buffer->capacity ());
-
-	if (payload_size == 0)
-	{
-		// Payload size will be 0 for `bulk_push` & `telemetry_req` message type
-		received_message (header, 0, std::move (callback));
-	}
-	else
+	if (header.type == nano::message_type::publish && header.block_type () == nano::block_type::asset)
 	{
 		debug_assert (read_op);
-		read_op (read_buffer, payload_size, [this_l = shared_from_this (), payload_size, header, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
+		// An asset block is variable length, so its frame is read in two goes
+		// against the length field inside the block itself. nano::asset_frame
+		// owns that sequence; the frame it assembles occupies the front of
+		// read_buffer, which it leaves at MAX_MESSAGE_SIZE so the next message
+		// on this channel still has a buffer to read into.
+		nano::asset_frame::read (read_op, read_buffer, MAX_MESSAGE_SIZE, [this_l = shared_from_this (), header, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t frame_size) {
 			if (ec)
 			{
-				callback (ec, nullptr);
+				if (ec == boost::asio::error::message_size)
+				{
+					this_l->status = parse_status::message_size_too_big;
+					callback (boost::asio::error::fault, nullptr);
+				}
+				else
+				{
+					callback (ec, nullptr);
+				}
 				return;
 			}
-			if (size_a != payload_size)
+			// Kei senders advertise 0 here, because nano::block::size has no
+			// entry for a variable-length block and the block's own length
+			// field is what frames it. A sender that does declare a length has
+			// to agree with the block it sent.
+			auto const declared_payload_size = header.payload_length_bytes ();
+			if (declared_payload_size != 0 && declared_payload_size != frame_size)
 			{
+				this_l->status = parse_status::message_size_too_big;
 				callback (boost::asio::error::fault, nullptr);
 				return;
 			}
-			this_l->received_message (header, size_a, std::move (callback));
+			this_l->received_message (header, frame_size, std::move (callback));
 		});
+	}
+	else
+	{
+		std::size_t payload_size = header.payload_length_bytes ();
+		if (payload_size > MAX_MESSAGE_SIZE)
+		{
+			status = parse_status::message_size_too_big;
+			callback (boost::asio::error::fault, nullptr);
+			return;
+		}
+		// Not capacity: nano::transport::socket::async_read bounds the read by
+		// size (), and a read past it drops the connection.
+		debug_assert (payload_size <= read_buffer->size ());
+
+		if (payload_size == 0)
+		{
+			// Payload size will be 0 for `bulk_push` & `telemetry_req` message type
+			received_message (header, 0, std::move (callback));
+		}
+		else
+		{
+			debug_assert (read_op);
+			read_op (read_buffer, payload_size, [this_l = shared_from_this (), payload_size, header, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
+				if (ec)
+				{
+					callback (ec, nullptr);
+					return;
+				}
+				if (size_a != payload_size)
+				{
+					callback (boost::asio::error::fault, nullptr);
+					return;
+				}
+				this_l->received_message (header, size_a, std::move (callback));
+			});
+		}
 	}
 }
 

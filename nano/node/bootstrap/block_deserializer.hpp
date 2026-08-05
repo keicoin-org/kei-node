@@ -39,9 +39,10 @@ namespace bootstrap
 		void received_type (nano::transport::socket & socket, callback_type const && callback);
 
 		/**
-		 * Called by received_type when a block is received, it parses the block and calls the callback.
+		 * Called by received_type when a block is received, it parses the first
+		 * `size` bytes of read_buffer as a block and calls the callback.
 		 */
-		void received_block (nano::block_type type, callback_type const && callback);
+		void received_block (nano::block_type type, std::size_t size, callback_type const && callback);
 
 		std::shared_ptr<std::vector<uint8_t>> read_buffer;
 	};
