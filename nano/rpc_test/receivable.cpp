@@ -661,6 +661,11 @@ TEST (rpc, kei_receivables_asset_unconfirmed)
 		ASSERT_EQ (nano::process_result::progress, node->process (transaction, *mint).code);
 	}
 	ASSERT_FALSE (node->block_confirmed (mint->hash ()));
+	// Nothing scheduled an election for either block, and `include_active` is
+	// false below, so the unconfirmed row is only visible while they are outside
+	// the active set. Asserted rather than assumed, as `receivable_unconfirmed`
+	// above does for the same reason.
+	ASSERT_TIMELY (5s, !node->active.active (*mint));
 
 	auto const rpc_ctx = add_rpc (system, node);
 	boost::property_tree::ptree request;
