@@ -36,6 +36,28 @@ constexpr uint64_t market_account_swaps_default_scan_count{ 1024 };
 constexpr char market_account_swaps_snapshot_salt[]{ "kmp1-account-swaps-snapshot-v1" };
 constexpr char market_account_swaps_snapshot_empty_state{ '*' };
 
+void write_market_limit_error (
+	std::function<void (std::string const &)> response_a,
+	char const * field_name_a,
+	boost::optional<std::string> const & requested_a,
+	uint64_t max_a,
+	std::string const & message_a)
+{
+	boost::property_tree::ptree response_error;
+	response_error.put ("error", message_a);
+	if (requested_a.is_initialized ())
+	{
+		response_error.put ("requested", requested_a.get ());
+	}
+	response_error.put ("field", field_name_a);
+	response_error.put ("max", std::to_string (max_a));
+	response_error.put ("suggestion", "Retry with a lower value and the same request.");
+	response_error.put ("maxAllowed", std::to_string (max_a));
+	std::stringstream ostream;
+	nano::json::write (ostream, response_error);
+	response_a (ostream.str ());
+}
+
 bool consume_scan_count (uint64_t & current_scan_count, uint64_t max_scan_count)
 {
 	return current_scan_count == max_scan_count ? false : (++current_scan_count, true);
@@ -6321,8 +6343,21 @@ void nano::json_handler::swap_info ()
 void nano::json_handler::account_swaps ()
 {
 	auto const account (account_impl ());
+	auto const requested_count_text (request.get_optional<std::string> ("count"));
 	auto const count (count_optional_impl (market_account_swaps_default_count, market_account_swaps_default_count));
+	if (ec == nano::error_common::invalid_count)
+	{
+		write_market_limit_error (response, "count", requested_count_text, market_account_swaps_default_count, ec.message ());
+		return;
+	}
+
+	auto const requested_scan_count_text (request.get_optional<std::string> ("scan_count"));
 	auto const scan_count (scan_count_impl (request, ec));
+	if (ec == nano::error_rpc::invalid_scan_count)
+	{
+		write_market_limit_error (response, "scan_count", requested_scan_count_text, market_account_swaps_default_scan_count, ec.message ());
+		return;
+	}
 	std::string state_filter;
 	auto const state_text (request.get_optional<std::string> ("state"));
 	if (!ec && state_text.is_initialized ())
