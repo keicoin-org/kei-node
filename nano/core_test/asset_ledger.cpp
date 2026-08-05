@@ -190,6 +190,28 @@ funded fund_player (nano::ledger & ledger_a, nano::write_transaction const & tra
 	return result;
 }
 
+/**
+ * Add `count_a` rows to an account's `holdings` for assets no block mentions.
+ *
+ * Written straight to the store rather than driven through blocks because the
+ * §7 cap counts rows in that one table and nothing else: `holdings_count` is a
+ * prefix scan over `(account, *)`, so a row put here is indistinguishable from
+ * one a mint and a collect would have left. Driving 1,023 of them properly
+ * would need 1,023 issuances, and issuance burns an escalating amount of Kei
+ * (§5.6.5) — the team allocation cannot pay for that many, and the test would
+ * be about issuance pricing rather than about the cap.
+ *
+ * The ids are small integers. They collide with nothing: a real id is
+ * H(issuer ‖ symbol), and these are never looked up in `assets` — only counted.
+ */
+void fill_holdings (nano::store & store_a, nano::write_transaction const & transaction_a, nano::account const & account_a, std::size_t count_a)
+{
+	for (std::size_t i (0); i < count_a; ++i)
+	{
+		store_a.asset.balance_put (transaction_a, account_a, nano::uint256_union (static_cast<uint64_t> (i + 1)), nano::amount (1));
+	}
+}
+
 /** The JSON shape used by RPC must reproduce an accepted signed block exactly. */
 void assert_rpc_json_round_trip (nano::asset_block const & block_a)
 {
@@ -1945,6 +1967,146 @@ TEST (asset_ledger, swap_cancel_returns_locked_kei)
 	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
 }
 
+// A Kei-denominated lock credits the account's Kei balance, not a row in
+// `holdings`, so the §7 cap has nothing to say about it. Worth pinning: the
+// cancel above and the cancel below take the same branch on everything except
+// whether `lock.asset_id` is zero.
+TEST (asset_ledger, a_kei_cancel_is_unaffected_by_the_holdings_cap)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	fill_holdings (store, transaction, nano::dev::team_key.pub, nano::max_assets_per_account);
+
+	auto offer (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1) - 5), nano::asset_op::swap_offer, 0, 5, 0, offer_payload (issued.id, 100)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto cancel (signed_asset (pool, nano::dev::team_key, offer->hash (), nano::amount (after_issuing (1)), nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *cancel).code);
+	ASSERT_EQ (after_issuing (1), ledger.account_balance (transaction, nano::dev::team_key.pub));
+}
+
+// SPEC §7's cap, which until now was enforced by code no test executed. A mint
+// is fine at the cap — it only leaves a receivable — and the refusal lands on
+// the collect, which is the block that would add the row.
+TEST (asset_ledger, a_collect_at_the_holdings_cap_is_refused)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	fill_holdings (store, transaction, player.pub, nano::max_assets_per_account);
+	ASSERT_EQ (nano::max_assets_per_account, store.asset.holdings_count (transaction, player.pub));
+
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
+	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
+	ASSERT_EQ (nano::process_result::too_many_assets, ledger.process (transaction, *collect).code);
+	ASSERT_EQ (nano::max_assets_per_account, store.asset.holdings_count (transaction, player.pub));
+	// The units are not destroyed by the refusal, and the account was never
+	// opened: the receivable is still there to collect once a row is free.
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, mint->hash ())));
+	ASSERT_FALSE (ledger.account_info (transaction, player.pub));
+}
+
+// A collect into a row the account already has is not a new row, so the cap
+// does not bind on it. Getting this wrong would strand every receivable an
+// account at the cap has for an asset it already holds.
+TEST (asset_ledger, a_collect_at_the_holdings_cap_for_an_asset_already_held_is_accepted)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+	fill_holdings (store, transaction, player.pub, nano::max_assets_per_account - 1);
+	ASSERT_EQ (nano::max_assets_per_account, store.asset.holdings_count (transaction, player.pub));
+
+	auto again (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 300, player.pub));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *again).code);
+	auto collect (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::asset_receive, 0, 0, again->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *collect).code);
+	ASSERT_EQ (nano::amount (800), store.asset.balance (transaction, player.pub, issued.id));
+	ASSERT_EQ (nano::max_assets_per_account, store.asset.holdings_count (transaction, player.pub));
+}
+
+// #46. A `swap_offer` for an account's *whole* balance of an asset deletes the
+// row rather than shrinking it, so a slot under the §7 cap comes free while the
+// units sit in the lock. `swap_cancel` is the only op that puts units straight
+// back into `holdings` — every other credit arrives as a receivable and is
+// caught by the collect — and it had no cap check, so the freed slot could be
+// spent on something else and the cancel would then make the 1,025th row. One
+// per lock-receive-cancel cycle, with no ceiling to converge on.
+TEST (asset_ledger, a_cancel_that_would_exceed_the_holdings_cap_is_refused)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+	fill_holdings (store, transaction, player.pub, nano::max_assets_per_account - 1);
+	ASSERT_EQ (nano::max_assets_per_account, store.asset.holdings_count (transaction, player.pub));
+
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 500, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	ASSERT_TRUE (store.asset.balance (transaction, player.pub, issued.id).is_zero ());
+	ASSERT_EQ (nano::max_assets_per_account - 1, store.asset.holdings_count (transaction, player.pub));
+
+	// Spend the freed slot on a second asset. This must be accepted — 1,023
+	// rows really is under the cap, and refusing it would be the same bug
+	// pointing the other way.
+	auto const second_payload (issuance ("GEM2", nano::transfer_policy::open, 1000));
+	auto const second_id (nano::derive_asset_id (nano::dev::team_key.pub, second_payload.symbol));
+	auto second_issue (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (2)), nano::asset_op::issue, second_id, 0, 0, second_payload));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *second_issue).code);
+	auto second_mint (signed_asset (pool, nano::dev::team_key, second_issue->hash (), nano::amount (after_issuing (2)), nano::asset_op::mint, second_id, 1, player.pub));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *second_mint).code);
+	auto second_collect (signed_asset (pool, player, offer->hash (), 0, nano::asset_op::asset_receive, 0, 0, second_mint->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *second_collect).code);
+	ASSERT_EQ (nano::max_assets_per_account, store.asset.holdings_count (transaction, player.pub));
+
+	auto cancel (signed_asset (pool, player, second_collect->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::too_many_assets, ledger.process (transaction, *cancel).code);
+	ASSERT_EQ (nano::max_assets_per_account, store.asset.holdings_count (transaction, player.pub));
+	ASSERT_TRUE (store.asset.balance (transaction, player.pub, issued.id).is_zero ());
+
+	// The refusal consumes nothing, so the locked asset is not lost. Nothing
+	// expires a lock — `expires_at` is recorded on it and the ledger never
+	// reads it — so this exact cancel stays available indefinitely.
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	ASSERT_TRUE (lock.open ());
+	ASSERT_EQ (nano::amount (500), lock.amount);
+	ASSERT_EQ (issued.id, lock.asset_id);
+
+	// SPEC §7 says the error should name the fix — "burn or transfer
+	// something" — so the fix has to work. `burn` is gated by no policy at
+	// all, which is what makes the way out unconditional.
+	auto burn (signed_asset (pool, player, second_collect->hash (), 0, nano::asset_op::burn, second_id, 1, 0));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *burn).code);
+	ASSERT_EQ (nano::max_assets_per_account - 1, store.asset.holdings_count (transaction, player.pub));
+	auto retried (signed_asset (pool, player, burn->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *retried).code);
+	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
+	ASSERT_EQ (nano::max_assets_per_account, store.asset.holdings_count (transaction, player.pub));
+	ASSERT_FALSE (store.asset.lock_exists (transaction, offer->hash ()));
+}
+
 // SPEC §9.2 point 4: the accept-vs-cancel race. Whichever the ledger applies
 // first wins, and the second is a retryable "nothing moved" rather than a
 // fault — this is the ledger's half of ORV resolving that conflict.
@@ -2060,6 +2222,13 @@ TEST (asset_ledger, rollback_swap_conflict_with_pruned_settler_is_rejected_safel
 	ASSERT_TRUE (ledger.rollback_swap_conflict (transaction, offer->hash (), cancel->hash (), rolled_back));
 	ASSERT_TRUE (rolled_back.empty ());
 	ASSERT_TRUE (store.block.exists (transaction, offer->hash ()));
+	// The assertion with teeth: the pruned accept is still pruned. A rollback
+	// that gave up part-way through unwinding it could have put it back.
+	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.pruned.exists (transaction, accept->hash ()));
+	// The cancel never entered the store — `process` refused it as
+	// `offer_consumed` above — so on its own this line is close to a tautology.
+	// Kept alongside the accept check rather than in place of it.
 	ASSERT_FALSE (store.block.exists (transaction, cancel->hash ()));
 	// The lock is still settled by the accept, exactly as it was found.
 	nano::asset_lock_info lock;

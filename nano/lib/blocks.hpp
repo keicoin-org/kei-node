@@ -607,6 +607,12 @@ public:
 	asset_block (bool &, nano::stream &);
 	asset_block (bool &, boost::property_tree::ptree const &);
 	virtual ~asset_block () = default;
+	static constexpr std::size_t serialized_length_field_offset = sizeof (nano::account) + sizeof (nano::block_hash) + sizeof (nano::account) + sizeof (nano::amount) + sizeof (nano::asset_op) + sizeof (nano::uint256_union) + sizeof (nano::amount) + sizeof (nano::link);
+	static constexpr std::size_t payload_length_bytes = sizeof (uint16_t);
+	static constexpr std::size_t serialized_prefix_size = serialized_length_field_offset + payload_length_bytes;
+	static constexpr std::size_t serialized_suffix_size = sizeof (nano::signature) + sizeof (uint64_t);
+	static constexpr std::size_t serialized_minimum_size () { return serialized_prefix_size + serialized_suffix_size; }
+	static constexpr std::size_t serialized_size (std::size_t payload_size) { return serialized_prefix_size + payload_size + serialized_suffix_size; }
 	using nano::block::hash;
 	void hash (blake2b_state &) const override;
 	uint64_t block_work () const override;
@@ -635,13 +641,9 @@ public:
 	nano::asset_hashables hashables;
 	nano::signature signature;
 	uint64_t work;
-	// Unlike send/receive/open/change/state, this is not a compile-time
-	// constant — the payload is variable length (decisions-m2.md §7). There is
-	// deliberately no `nano::block::size (nano::block_type::asset)` entry
-	// (that dispatcher assumes a fixed size and backs the fixed-size wire read
-	// in nano::bootstrap::block_deserializer); asset blocks do not travel that
-	// path yet because M2's definition of done is a single local node, not
-	// bootstrap or block relay (decisions-m2.md §0).
+	// Unlike send/receive/open/change/state, the payload is variable length
+	// (decisions-m2.md §7). Callers that need wire sizes must read the fixed
+	// prefix, then the 2-byte payload length before the suffix.
 };
 class block_visitor
 {

@@ -16,6 +16,8 @@ add_library(
   ${platform_sources}
   active_transactions.hpp
   active_transactions.cpp
+  asset_frame.hpp
+  asset_frame.cpp
   backlog_population.hpp
   backlog_population.cpp
   bandwidth_limiter.hpp

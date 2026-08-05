@@ -175,6 +175,14 @@ jobs:
       # otherwise see at all — every database here is fresh, and a fresh database
       # is precisely the one that never hits the bug.
       #
+      # `asset_frame.*` and `message_deserializer.*` cover the wire framing for
+      # variable-length asset blocks. Until this filter named them they were
+      # compiled and then skipped, which is how three read paths could disagree
+      # about where a block's suffix goes underneath a green tick. The rest of
+      # message_deserializer is inherited round-trip coverage that does not
+      # touch the genesis balances or block hashes §14 changed, so the whole
+      # suite runs rather than the one new case.
+      #
       # Know the cost of the allowlist before adding to it: a suite that is not
       # named here does not run, and nothing says so. It is not reported as
       # skipped, it does not appear in the output at all, and a coverage report
@@ -183,7 +191,7 @@ jobs:
       # fix, merged, and never once executed. So when you add a test file, add
       # its suite here in the same commit, or say in the PR why you did not.
       - name: Run Kei tests
-        run: ./build/core_test --gtest_filter='asset_block.*:asset_ledger.*:asset_payload.*:asset_id.*:block.kei_hash_domain:block.kei_hash_vectors:genesis_reserve.*:json_response.*:issuance_burn.*:mdb_block_store.a_v23_database_without_the_claim_and_swap_tables_still_opens'
+        run: ./build/core_test --gtest_filter='asset_block.*:asset_frame.*:asset_ledger.*:asset_payload.*:asset_id.*:block.kei_hash_domain:block.kei_hash_vectors:genesis_reserve.*:json_response.*:issuance_burn.*:mdb_block_store.a_v23_database_without_the_claim_and_swap_tables_still_opens:message_deserializer.*'
 
       # The RocksDB suites are gated twice, which is why they slipped: the
       # filter above never names them, and each one opens with a GTEST_SKIP

@@ -4,6 +4,7 @@ add_executable(
   fakes/websocket_client.hpp
   fakes/work_peer.hpp
   active_transactions.cpp
+  asset_frame.cpp
   asset_ledger.cpp
   backlog.cpp
   block.cpp

@@ -1,3 +1,4 @@
+#include <nano/node/asset_frame.hpp>
 #include <nano/node/bootstrap/bootstrap_attempt.hpp>
 #include <nano/node/bootstrap/bootstrap_bulk_push.hpp>
 #include <nano/node/bootstrap/bootstrap_legacy.hpp>
@@ -248,6 +249,23 @@ void nano::bulk_push_server::received_type ()
 			node->stats.inc (nano::stat::type::bootstrap, nano::stat::detail::state_block, nano::stat::dir::in);
 			connection->socket->async_read (receive_buffer, nano::state_block::size, [this_l, type] (boost::system::error_code const & ec, std::size_t size_a) {
 				this_l->received_block (ec, size_a, type);
+			});
+			break;
+		}
+		case nano::block_type::asset:
+		{
+			node->stats.inc (nano::stat::type::bootstrap, nano::stat::detail::asset_block, nano::stat::dir::in);
+			// receive_buffer is 256 bytes at construction, which is smaller
+			// than the 267-byte minimum asset frame; nano::asset_frame::read
+			// grows it as needed and leaves it grown, and received_block reads
+			// only the frame size it reports.
+			nano::asset_frame::read (
+			[this_l] (std::shared_ptr<std::vector<uint8_t>> const & buffer_a, std::size_t size_a, std::function<void (boost::system::error_code const &, std::size_t)> callback_a) {
+				this_l->connection->socket->async_read (buffer_a, size_a, std::move (callback_a));
+			},
+			receive_buffer, nano::asset_frame::max_frame_size,
+			[this_l] (boost::system::error_code const & ec, std::size_t frame_size) {
+				this_l->received_block (ec, frame_size, nano::block_type::asset);
 			});
 			break;
 		}
