@@ -365,14 +365,26 @@ TEST (rpc, account_swaps_scan_count_is_independent_and_legacy_request_still_work
 	{
 		auto request (swaps_request (chain.key.pub, 1, 1));
 		request.put ("scan_count", invalid);
-		ASSERT_EQ ("Invalid scan_count", wait_response (system, rpc_ctx, request, 10s).get<std::string> ("error"));
+		auto const response (wait_response (system, rpc_ctx, request, 10s));
+		ASSERT_EQ ("Invalid scan_count", response.get<std::string> ("error"));
+		ASSERT_EQ (invalid, response.get<std::string> ("requested"));
+		ASSERT_EQ ("scan_count", response.get<std::string> ("field"));
+		ASSERT_EQ ("1024", response.get<std::string> ("max"));
+		ASSERT_EQ ("1024", response.get<std::string> ("maxAllowed"));
+		ASSERT_EQ ("Retry with a lower value and the same request.", response.get<std::string> ("suggestion"));
 	}
 
 	for (auto const & invalid : { "0", "1025" })
 	{
 		auto request (swaps_request (chain.key.pub, static_cast<uint64_t> (1), static_cast<uint64_t> (1)));
 		request.put ("count", invalid);
-		ASSERT_EQ ("Invalid count", wait_response (system, rpc_ctx, request, 10s).get<std::string> ("error"));
+		auto const response (wait_response (system, rpc_ctx, request, 10s));
+		ASSERT_EQ ("Invalid count", response.get<std::string> ("error"));
+		ASSERT_EQ (invalid, response.get<std::string> ("requested"));
+		ASSERT_EQ ("count", response.get<std::string> ("field"));
+		ASSERT_EQ ("1024", response.get<std::string> ("max"));
+		ASSERT_EQ ("1024", response.get<std::string> ("maxAllowed"));
+		ASSERT_EQ ("Retry with a lower value and the same request.", response.get<std::string> ("suggestion"));
 	}
 }
 
