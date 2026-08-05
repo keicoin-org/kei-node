@@ -20,9 +20,18 @@ on:
 # A branch only needs its newest commit built. Without this, a run of quick
 # fixes queues a full build each, and the answer to the one that matters
 # arrives last.
+#
+# `master` is the exception, and it used to be caught by this too: `github.ref`
+# is `refs/heads/master` for every merge, so all merges shared one group and
+# each cancelled the one before it. Every commit on `master` is a state
+# somebody will build on, so each needs its own answer. Keying the group by the
+# commit gives each merge a group of its own — note that `cancel-in-progress:
+# false` alone would not be enough, because a group holds at most one pending
+# run and a third merge arriving would cancel the second while the first still
+# builds. See #64.
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+  group: build-${{ github.ref }}${{ github.ref == 'refs/heads/master' && format('-{0}', github.sha) || '' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   linux:
