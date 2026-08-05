@@ -6350,6 +6350,19 @@ bool swap_offer_to_json (
 void nano::json_handler::swap_info ()
 {
 	auto const hash (hash_impl ("hash"));
+	// The same budget, the same parameter and the same refusal as
+	// `account_swaps`. Both call `swap_offer_to_json`, whose cancelled-offer
+	// branch walks the offerer's chain a block at a time; this caller used to
+	// hand it `UINT64_MAX` and name the variables `ignored_`, so one public
+	// hash and a long chain bought an unbounded walk from an unauthenticated
+	// request. One shared helper with two callers, one of which opted out.
+	auto const requested_scan_count_text (request.get_optional<std::string> ("scan_count"));
+	auto const scan_count (scan_count_impl (request, ec));
+	if (ec == nano::error_rpc::invalid_scan_count)
+	{
+		write_market_limit_error (response, "scan_count", requested_scan_count_text, market_account_swaps_default_scan_count, ec.message ());
+		return;
+	}
 	if (!ec)
 	{
 		auto transaction (node.store.tx_begin_read ());
@@ -6358,10 +6371,26 @@ void nano::json_handler::swap_info ()
 		if (offer != nullptr && offer->hashables.op == nano::asset_op::swap_offer)
 		{
 			boost::property_tree::ptree entry;
-			uint64_t ignored_scan_count (0);
-			bool ignored_scan_limit (false);
-			(void)swap_offer_to_json (node, transaction, hash, *offer, entry, ignored_scan_count, std::numeric_limits<uint64_t>::max (), ignored_scan_limit);
+			uint64_t scanned (0);
+			bool scan_limit_exhausted (false);
+			auto const complete (swap_offer_to_json (node, transaction, hash, *offer, entry, scanned, scan_count, scan_limit_exhausted));
+			if (!complete)
+			{
+				// Only the cancelled branch can stop early, and it stops after
+				// writing `state` and `acceptedBy` but before it knows which
+				// block cancelled the offer or when. Nulled rather than left
+				// out, so the object keeps one shape whatever happened, and
+				// `stopped` below is what says the answer is undetermined
+				// rather than genuinely absent — the difference between "no
+				// cancel exists" and "we stopped looking".
+				nano::json::put_null (entry, "settledBy");
+				nano::json::put_null (entry, "settledAt");
+				nano::json::put_boolean (entry, "confirmed", false);
+			}
 			response_l.add_child ("offer", entry);
+			// `scanned` is zero for an open or accepted offer: those are a
+			// single lock lookup and this must not put a walk in front of them.
+			add_market_page_metadata (response_l, scanned, complete, complete ? "exhausted" : (scan_limit_exhausted ? "scan_limit" : "pruned"), "");
 		}
 		else
 		{
