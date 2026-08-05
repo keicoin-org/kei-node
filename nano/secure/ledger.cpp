@@ -2332,7 +2332,10 @@ bool nano::ledger::rollback_swap_conflict (nano::write_transaction const & trans
 		return false;
 	}
 	auto const offer_asset (dynamic_cast<nano::asset_block const *> (offer_block.get ()));
-	release_assert (offer_asset != nullptr);
+	if (offer_asset == nullptr)
+	{
+		return false;
+	}
 	auto const offerer (offer_asset->hashables.account);
 	auto error (false);
 	while (!error)
@@ -2355,8 +2358,25 @@ bool nano::ledger::rollback_swap_conflict (nano::write_transaction const & trans
 			{
 				break;
 			}
-			auto const settler (account (transaction_a, lock.settled_by));
-			error = rollback (transaction_a, latest (transaction_a, settler), list_a);
+			if (lock.settled_by.is_zero ())
+			{
+				error = true;
+				break;
+			}
+			[[maybe_unused]] bool settler_is_pruned (false);
+			auto const settler (account_safe (transaction_a, lock.settled_by, settler_is_pruned));
+			if (settler_is_pruned)
+			{
+				error = true;
+				break;
+			}
+			auto const rollback_settler (latest (transaction_a, settler));
+			if (rollback_settler.is_zero ())
+			{
+				error = true;
+				break;
+			}
+			error = rollback (transaction_a, rollback_settler, list_a);
 		}
 		else
 		{
@@ -2384,6 +2404,10 @@ std::shared_ptr<nano::block> nano::ledger::swap_consumer (nano::transaction cons
 	// Cancellation removes the lock record, so locate the cancel on the
 	// offerer's chain. It need not immediately follow the offer.
 	auto const offer = store.block.get (transaction_a, offer_hash_a);
+	if (offer == nullptr)
+	{
+		return nullptr;
+	}
 	auto const offer_asset = dynamic_cast<nano::asset_block const *> (offer.get ());
 	if (offer_asset == nullptr)
 	{
