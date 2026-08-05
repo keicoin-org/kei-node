@@ -570,7 +570,15 @@ TEST (rpc, kei_receivables_unconfirmed)
 	nano::node_config config;
 	config.backlog_scan_batch_size = 0;
 	auto node = add_ipc_enabled_node (system, config);
-	auto chain = nano::test::setup_chain (system, *node, 1, nano::dev::genesis_key, false);
+	// The team allocation sends, not the genesis account. `setup_chain`'s
+	// default source is `nano::dev::genesis_key`, which upstream funds and Kei
+	// does not: here it is the reserve, its Kei moves only through a passed
+	// on-chain vote (SPEC §5.7), and `ledger_processor` refuses an ordinary send
+	// from it with `reserve_locked`. So the default builds a block that never
+	// enters the ledger, and the test then reads an empty `pending` table and
+	// blames the handler. Same reason the asset case below issues from the team
+	// allocation.
+	auto chain = nano::test::setup_chain (system, *node, 1, nano::dev::team_key, false);
 	auto block1 = chain[0];
 	ASSERT_TIMELY (5s, !node->active.active (*block1));
 	ASSERT_FALSE (node->block_confirmed (block1->hash ()));
