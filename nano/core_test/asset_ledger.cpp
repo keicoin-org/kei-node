@@ -989,6 +989,71 @@ TEST (asset_ledger, rolling_back_a_collect_with_pruned_source_rejected_safely)
 	ASSERT_EQ ("quest reward", pending.memo);
 }
 
+// If the accepter's tip is pruned, offer rollback cannot walk back to it.
+TEST (asset_ledger, rolling_back_an_accepted_offer_with_pruned_settler_rejected_safely)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction = store.tx_begin_write ();
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto const offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto const accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+
+	ledger.pruning = true;
+	ASSERT_GT (ledger.pruning_action (transaction, accept->hash (), 1), 0);
+	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.pruned.exists (transaction, accept->hash ()));
+
+	ASSERT_TRUE (ledger.rollback (transaction, offer->hash ()));
+	ASSERT_TRUE (store.block.exists (transaction, offer->hash ()));
+	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.pruned.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, accept->hash ())));
+	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_EQ (after_issuing (1) - 50, ledger.account_balance (transaction, nano::dev::team_key.pub));
+}
+
+// If the swap lock record disappears, accept rollback must fail cleanly.
+TEST (asset_ledger, rolling_back_a_swap_accept_with_missing_lock_rejected_safely)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction = store.tx_begin_write ();
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	auto const offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto const accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	store.asset.lock_del (transaction, offer->hash ());
+
+	ASSERT_TRUE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, accept->hash ())));
+	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_TRUE (ledger.rollback (transaction, accept->hash ()));
+	ASSERT_TRUE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, accept->hash ())));
+	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_EQ (after_issuing (1) - 50, ledger.account_balance (transaction, nano::dev::team_key.pub));
+}
+
+
 // The claim model (SPEC §5.5). Everything below is about the one property that
 // makes it worth having: the issuer writes one block, and the claims that block
 // underwrites are written by other accounts, in parallel, on their own chains.

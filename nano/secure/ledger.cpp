@@ -439,7 +439,11 @@ public:
 				auto const offer_hash (block_a.hashables.link.as_block_hash ());
 				nano::asset_lock_info lock;
 				auto const missing (ledger.store.asset.lock_get (transaction, offer_hash, lock));
-				release_assert (!missing);
+				if (missing)
+				{
+					error = true;
+					break;
+				}
 				// Both arrivals this block created might already be collected,
 				// on either side — each a different chain than this one.
 				take_back_arrival (lock.offerer, lock.want_asset, hash);
