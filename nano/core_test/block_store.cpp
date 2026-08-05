@@ -2307,6 +2307,66 @@ namespace rocksdb
 		// Testing the upgrade code worked
 		check_correct_state ();
 	}
+
+	TEST (rocksdb_block_store, clear_preserves_column_family_handle)
+	{
+		if (!nano::rocksdb_config::using_rocksdb_in_tests ())
+		{
+			// Don't test this in LMDB mode
+			GTEST_SKIP ();
+		}
+
+		auto const path = nano::unique_path ();
+		nano::logger_mt logger;
+		{
+			nano::rocksdb::store store (logger, path, nano::dev::constants);
+			auto transaction (store.tx_begin_write ());
+
+			auto * cf_before = store.table_to_column_family (tables::final_votes);
+			auto const root = nano::dev::genesis->qualified_root ();
+			store.final_vote.put (transaction, root, nano::block_hash (42));
+			ASSERT_EQ (1, store.final_vote.count (transaction));
+			store.final_vote.clear (transaction);
+			ASSERT_EQ (0, store.final_vote.count (transaction));
+			ASSERT_EQ (cf_before, store.table_to_column_family (tables::final_votes));
+		}
+	}
+
+	TEST (rocksdb_block_store, clear_is_survivable)
+	{
+		if (!nano::rocksdb_config::using_rocksdb_in_tests ())
+		{
+			// Don't test this in LMDB mode
+			GTEST_SKIP ();
+		}
+
+		auto const path = nano::unique_path ();
+		nano::logger_mt logger;
+		{
+			nano::rocksdb::store store (logger, path, nano::dev::constants);
+			auto transaction (store.tx_begin_write ());
+			auto const root = nano::dev::genesis->qualified_root ();
+			store.online_weight.put (transaction, 1, 1);
+			store.online_weight.clear (transaction);
+			ASSERT_EQ (0, store.online_weight.count (transaction));
+			nano::confirmation_height_info confirmation_height_info;
+			confirmation_height_info.height = 1;
+			confirmation_height_info.frontier = nano::block_hash{ 2 };
+			store.confirmation_height.put (transaction, 1, confirmation_height_info);
+			store.final_vote.put (transaction, root, nano::block_hash (5));
+		}
+
+		nano::rocksdb::store reopened (logger, path, nano::dev::constants);
+		ASSERT_FALSE (reopened.init_error ());
+		auto transaction (reopened.tx_begin_read ());
+		for (auto table : reopened.all_tables ())
+		{
+			ASSERT_NE (reopened.table_to_column_family (table), nullptr);
+		}
+		ASSERT_EQ (0, reopened.online_weight.count (transaction));
+		ASSERT_EQ (0, reopened.final_vote.count (transaction));
+		ASSERT_EQ (1, reopened.confirmation_height.count (transaction));
+	}
 }
 }
 
