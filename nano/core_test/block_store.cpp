@@ -2322,12 +2322,26 @@ namespace rocksdb
 			nano::rocksdb::store store (logger, path, nano::dev::constants);
 			auto transaction (store.tx_begin_write ());
 
+			// Counted by walking rather than by `final_vote.count ()`. For
+			// `final_votes` that is `rocksdb.estimate-num-keys` read straight off
+			// the database (`rocksdb.cpp`), so it is blind to anything this
+			// transaction has not committed and is an estimate even when it is
+			// not. The iterator goes through the transaction and sees both.
+			auto const live_final_votes = [&] () {
+				uint64_t total (0);
+				for (auto i (store.final_vote.begin (transaction)), end (store.final_vote.end ()); i != end; ++i)
+				{
+					++total;
+				}
+				return total;
+			};
+
 			auto * cf_before = store.table_to_column_family (tables::final_votes);
 			auto const root = nano::dev::genesis->qualified_root ();
 			store.final_vote.put (transaction, root, nano::block_hash (42));
-			ASSERT_EQ (1, store.final_vote.count (transaction));
+			ASSERT_EQ (1, live_final_votes ());
 			store.final_vote.clear (transaction);
-			ASSERT_EQ (0, store.final_vote.count (transaction));
+			ASSERT_EQ (0, live_final_votes ());
 			ASSERT_EQ (cf_before, store.table_to_column_family (tables::final_votes));
 		}
 	}
@@ -2363,8 +2377,20 @@ namespace rocksdb
 		{
 			ASSERT_NE (reopened.table_to_column_family (table), nullptr);
 		}
+		// `online_weight` and `confirmation_height` are counted by walking
+		// inside `store::count` and are exact. `final_votes` is not — see the
+		// note in clear_preserves_column_family_handle — so it is walked here.
+		uint64_t surviving_final_votes (0);
+		for (auto i (reopened.final_vote.begin (transaction)), end (reopened.final_vote.end ()); i != end; ++i)
+		{
+			++surviving_final_votes;
+		}
 		ASSERT_EQ (0, reopened.online_weight.count (transaction));
-		ASSERT_EQ (0, reopened.final_vote.count (transaction));
+		// One, not zero: the final vote was written *after* the clear above and
+		// nothing cleared it. Surviving is the whole point — a clear of one
+		// column family must not take the neighbouring writes in the same
+		// transaction with it.
+		ASSERT_EQ (1, surviving_final_votes);
 		ASSERT_EQ (1, reopened.confirmation_height.count (transaction));
 	}
 }

@@ -148,7 +148,7 @@ namespace rocksdb
 		::rocksdb::ColumnFamilyHandle * get_column_family (char const * name) const;
 		bool column_family_exists (char const * name) const;
 		::rocksdb::ColumnFamilyHandle * table_to_column_family (tables table_a) const;
-		int clear (::rocksdb::ColumnFamilyHandle * column_family);
+		int clear (nano::write_transaction const & transaction_a, ::rocksdb::ColumnFamilyHandle * column_family);
 
 		void open (bool & error_a, boost::filesystem::path const & path_a, bool open_read_only_a, ::rocksdb::Options const & options_a, std::vector<::rocksdb::ColumnFamilyDescriptor> column_families);
 

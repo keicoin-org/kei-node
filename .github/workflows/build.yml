@@ -157,6 +157,7 @@ jobs:
       # "It compiles" is a weaker claim than "it works", and until this step
       # existed it was the only claim this workflow could support.
       - name: Build tests
+        id: build_tests
         run: |
           set -o pipefail
           if ! cmake --build build --target core_test -- -k 0 2>&1 | tee test-build.log; then
@@ -181,8 +182,49 @@ jobs:
       # message_deserializer is inherited round-trip coverage that does not
       # touch the genesis balances or block hashes §14 changed, so the whole
       # suite runs rather than the one new case.
+      #
+      # Know the cost of the allowlist before adding to it: a suite that is not
+      # named here does not run, and nothing says so. It is not reported as
+      # skipped, it does not appear in the output at all, and a coverage report
+      # counts its assertions as present. #54 is what that looks like from the
+      # outside — two tests written to stand behind a store-layer correctness
+      # fix, merged, and never once executed. So when you add a test file, add
+      # its suite here in the same commit, or say in the PR why you did not.
       - name: Run Kei tests
         run: ./build/core_test --gtest_filter='asset_block.*:asset_frame.*:asset_ledger.*:asset_payload.*:asset_id.*:block.kei_hash_domain:block.kei_hash_vectors:genesis_reserve.*:json_response.*:issuance_burn.*:mdb_block_store.a_v23_database_without_the_claim_and_swap_tables_still_opens:message_deserializer.*'
+
+      # The RocksDB suites are gated twice, which is why they slipped: the
+      # filter above never names them, and each one opens with a GTEST_SKIP
+      # unless TEST_USE_ROCKSDB is set (nano/lib/rocksdbconfig.cpp:32). Removing
+      # only one gate changes nothing, so removing one was easy to mistake for
+      # having done it. This step removes both.
+      #
+      # It is a second invocation of the same binary rather than a second matrix
+      # job on purpose. RocksDB is compiled and linked into core_test
+      # unconditionally (CMakeLists.txt add_subdirectory(submodules/rocksdb)),
+      # and the backend is a runtime choice made by nano::make_store reading
+      # this variable — so a rocksdb matrix entry would spend ~40 minutes
+      # producing a byte-identical core_test and then race the lmdb job for the
+      # ccache key above. There is no compile coverage to be had from it.
+      #
+      # Whole-suite rather than the two clear_* cases: upgrade_v21_v22 and
+      # tombstone_count are gated by the same two conditions and have therefore
+      # also never run here, and a fresh RocksDB database is the one place the
+      # v23→v24 column families for the claim and swap tables get created from
+      # scratch.
+      # `if` for the same reason the build steps pass `-k 0`: when CI is the
+      # only place the tree runs, a job that stops at the first failing step
+      # spends forty minutes to report a strict subset of what it already knows.
+      # A red lmdb filter should not also cost you the RocksDB answer. This
+      # still fails the job when it fails — it only declines to be silenced by
+      # the step above it. Conditioned on the build rather than on `always()`,
+      # so a run that never produced a `core_test` reports the compile error
+      # instead of a confusing "no such file".
+      - name: Run the RocksDB store tests
+        if: ${{ !cancelled() && steps.build_tests.outcome == 'success' }}
+        env:
+          TEST_USE_ROCKSDB: 1
+        run: ./build/core_test --gtest_filter='rocksdb_block_store.*'
 
       # `rpc_test` is a separate target, so until this step existed the RPC
       # changes shipped without anything compiling their tests — the shapes in
