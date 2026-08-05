@@ -132,7 +132,11 @@ enum class error_rpc
 	rpc_control_disabled,
 	sign_hash_disabled,
 	source_not_found,
-	stopped
+	stopped,
+	invalid_market_cursor,
+	market_cursor_scope,
+	stale_market_cursor,
+	invalid_scan_count
 };
 
 /** process_result related errors */

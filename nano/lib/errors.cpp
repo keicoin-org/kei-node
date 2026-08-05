@@ -213,6 +213,14 @@ std::string nano::error_rpc_messages::message (int ev) const
 			return "Shape \"block\" cannot be combined with account_filter";
 		case nano::error_rpc::invalid_swap_state:
 			return "\"state\" is one of open, accepted or cancelled -- leave it out for all three";
+		case nano::error_rpc::invalid_market_cursor:
+			return "Invalid or tampered market cursor";
+		case nano::error_rpc::market_cursor_scope:
+			return "Market cursor does not belong to this account, asset, or filter";
+		case nano::error_rpc::stale_market_cursor:
+			return "Market cursor is stale because its ledger position is no longer available";
+		case nano::error_rpc::invalid_scan_count:
+			return "Invalid scan_count";
 		case nano::error_rpc::invalid_sources:
 			return "Invalid sources number";
 		case nano::error_rpc::invalid_subtype:

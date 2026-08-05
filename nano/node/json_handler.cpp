@@ -6,6 +6,7 @@
 #include <nano/lib/timer.hpp>
 #include <nano/node/bootstrap/bootstrap_lazy.hpp>
 #include <nano/node/bootstrap_ascending/service.hpp>
+#include <nano/crypto/blake2/blake2.h>
 #include <nano/node/common.hpp>
 #include <nano/node/election.hpp>
 #include <nano/node/json_handler.hpp>
@@ -18,11 +19,230 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <vector>
-
 
 namespace
 {
+bool decode_unsigned (std::string const &, uint64_t &);
+
+constexpr char market_cursor_prefix[]{ "kmp1" };
+constexpr char market_cursor_domain[]{ "kei-market-page-v1:" };
+constexpr std::size_t market_cursor_body_size{ 258 };
+constexpr std::size_t market_cursor_signature_size{ 128 };
+constexpr std::size_t market_cursor_size{ sizeof (market_cursor_prefix) - 1 + market_cursor_body_size + market_cursor_signature_size };
+constexpr uint64_t market_account_swaps_default_count{ 1024 };
+constexpr uint64_t market_account_swaps_default_scan_count{ 1024 };
+constexpr char market_account_swaps_snapshot_salt[]{ "kmp1-account-swaps-snapshot-v1" };
+constexpr char market_account_swaps_snapshot_empty_state{ '*' };
+
+bool consume_scan_count (uint64_t & current_scan_count, uint64_t max_scan_count)
+{
+	return current_scan_count == max_scan_count ? false : (++current_scan_count, true);
+}
+
+enum class market_cursor_result
+{
+	ok,
+	invalid,
+	scope
+};
+
+struct market_cursor
+{
+	char kind{ 0 };
+	char filter{ 0 };
+	nano::uint256_union scope{};
+	nano::block_hash anchor{};
+	nano::block_hash position{};
+	nano::uint256_union snapshot{};
+};
+
+std::string market_cursor_body (market_cursor const & cursor_a)
+{
+	std::string body;
+	body.reserve (market_cursor_body_size);
+	body.push_back (cursor_a.kind);
+	body.push_back (cursor_a.filter);
+	body += cursor_a.scope.to_string ();
+	body += cursor_a.anchor.to_string ();
+	body += cursor_a.position.to_string ();
+	body += cursor_a.snapshot.to_string ();
+	return body;
+}
+
+std::string market_cursor_signed_text (std::string const & body_a)
+{
+	return std::string (market_cursor_domain) + body_a;
+}
+
+std::string encode_market_cursor (nano::node const & node_a, market_cursor const & cursor_a)
+{
+	auto const body (market_cursor_body (cursor_a));
+	auto const signed_text (market_cursor_signed_text (body));
+	auto const signature (nano::sign_message (node_a.node_id.prv, node_a.node_id.pub, reinterpret_cast<uint8_t const *> (signed_text.data ()), signed_text.size ()));
+	return std::string (market_cursor_prefix) + body + signature.to_string ();
+}
+
+market_cursor_result decode_market_cursor (nano::node const & node_a, std::string const & text_a, char expected_kind_a, char expected_filter_a, nano::uint256_union const & expected_scope_a, market_cursor & cursor_a)
+{
+	if (text_a.size () != market_cursor_size || text_a.compare (0, sizeof (market_cursor_prefix) - 1, market_cursor_prefix) != 0)
+	{
+		return market_cursor_result::invalid;
+	}
+	auto const body (text_a.substr (sizeof (market_cursor_prefix) - 1, market_cursor_body_size));
+	nano::signature signature;
+	if (signature.decode_hex (text_a.substr (sizeof (market_cursor_prefix) - 1 + market_cursor_body_size)))
+	{
+		return market_cursor_result::invalid;
+	}
+	auto const signed_text (market_cursor_signed_text (body));
+	if (nano::validate_message (node_a.node_id.pub, reinterpret_cast<uint8_t const *> (signed_text.data ()), signed_text.size (), signature))
+	{
+		return market_cursor_result::invalid;
+	}
+	cursor_a.kind = body[0];
+	cursor_a.filter = body[1];
+	if (cursor_a.scope.decode_hex (body.substr (2, 64)) || cursor_a.anchor.decode_hex (body.substr (66, 64)) || cursor_a.position.decode_hex (body.substr (130, 64)) || cursor_a.snapshot.decode_hex (body.substr (194, 64)))
+	{
+		return market_cursor_result::invalid;
+	}
+	if (cursor_a.kind != expected_kind_a || cursor_a.filter != expected_filter_a || cursor_a.scope != expected_scope_a)
+	{
+		return market_cursor_result::scope;
+	}
+	return market_cursor_result::ok;
+}
+
+char swap_state_cursor_filter (std::string const & state_a)
+{
+	if (state_a == "open")
+	{
+		return 'o';
+	}
+	if (state_a == "accepted")
+	{
+		return 'a';
+	}
+	if (state_a == "cancelled")
+	{
+		return 'c';
+	}
+	return '*';
+}
+
+uint64_t scan_count_impl (boost::property_tree::ptree const & request_a, std::error_code & ec_a)
+{
+	uint64_t result (market_account_swaps_default_scan_count);
+	auto const text (request_a.get_optional<std::string> ("scan_count"));
+	if (!ec_a && text.is_initialized ())
+	{
+		if (decode_unsigned (*text, result) || result > market_account_swaps_default_scan_count || result == 0)
+		{
+			ec_a = nano::error_rpc::invalid_scan_count;
+		}
+	}
+	else if (!ec_a && (result == 0 || result > market_account_swaps_default_scan_count))
+	{
+		ec_a = nano::error_rpc::invalid_scan_count;
+	}
+	return result;
+}
+
+void market_account_swaps_snapshot_hash_update (blake2b_state & hasher_a, nano::block_hash const & block_a, char state_a, nano::block_hash const & settled_by_a)
+{
+	blake2b_update (&hasher_a, block_a.bytes.data (), block_a.bytes.size ());
+	blake2b_update (&hasher_a, reinterpret_cast<uint8_t const *> (&state_a), sizeof (state_a));
+	blake2b_update (&hasher_a, settled_by_a.bytes.data (), settled_by_a.bytes.size ());
+}
+
+bool market_account_swaps_snapshot_hash (nano::node const & node_a, nano::transaction const & transaction_a, nano::uint256_union const & account_a, nano::block_hash const & anchor_a, nano::block_hash const & position_a, nano::uint256_union & snapshot_a)
+{
+	blake2b_state state;
+	auto const ok (blake2b_init (&state, sizeof (nano::uint256_union)));
+	debug_assert (ok == 0);
+	blake2b_update (&state, reinterpret_cast<uint8_t const *> (&account_a), account_a.bytes.size ());
+	blake2b_update (&state, reinterpret_cast<uint8_t const *> (market_account_swaps_snapshot_salt), sizeof (market_account_swaps_snapshot_salt) - 1);
+
+	auto current (anchor_a);
+	while (!current.is_zero () && current != position_a)
+	{
+		auto const block (node_a.store.block.get (transaction_a, current));
+		if (block == nullptr)
+		{
+			return false;
+		}
+		auto const offer (dynamic_cast<nano::asset_block const *> (block.get ()));
+		if (offer != nullptr && offer->hashables.op == nano::asset_op::swap_offer)
+		{
+			std::string state_text (1, market_account_swaps_snapshot_empty_state);
+			nano::block_hash settled_by_hash{ 0 };
+			nano::asset_lock_info lock;
+			if (!node_a.store.asset.lock_get (transaction_a, current, lock))
+			{
+				if (lock.open ())
+				{
+					state_text = "open";
+				}
+				else
+				{
+					state_text = "accepted";
+					settled_by_hash = lock.settled_by;
+				}
+			}
+			else
+			{
+				auto cursor (current);
+				while (true)
+				{
+					auto const next (node_a.store.block.successor (transaction_a, cursor));
+					if (next.is_zero ())
+					{
+						break;
+					}
+					auto const next_block (node_a.store.block.get (transaction_a, next));
+					if (next_block == nullptr)
+					{
+						return false;
+					}
+					auto const next_offer (dynamic_cast<nano::asset_block const *> (next_block.get ()));
+					if (next_offer != nullptr && next_offer->hashables.op == nano::asset_op::swap_cancel && next_offer->hashables.link.as_block_hash () == current)
+					{
+						state_text = "cancelled";
+						settled_by_hash = next;
+						break;
+					}
+					cursor = next;
+				}
+			}
+			market_account_swaps_snapshot_hash_update (state, current, state_text[0], settled_by_hash);
+		}
+		else
+		{
+			market_account_swaps_snapshot_hash_update (state, current, market_account_swaps_snapshot_empty_state, nano::block_hash{ 0 });
+		}
+		current = block->previous ();
+	}
+
+	blake2b_final (&state, snapshot_a.bytes.data (), snapshot_a.bytes.size ());
+	return true;
+}
+
+void add_market_page_metadata (boost::property_tree::ptree & response_a, uint64_t scanned_a, bool exhausted_a, char const * stopped_a, std::string const & next_a)
+{
+	nano::json::put_number (response_a, "scanned", scanned_a);
+	nano::json::put_boolean (response_a, "exhausted", exhausted_a);
+	response_a.put ("stopped", stopped_a);
+	if (next_a.empty ())
+	{
+		nano::json::put_null (response_a, "next");
+	}
+	else
+	{
+		response_a.put ("next", next_a);
+	}
+}
+
 void construct_json (nano::container_info_component * component, boost::property_tree::ptree & parent);
 using ipc_json_handler_no_arg_func_map = std::unordered_map<std::string, std::function<void (nano::json_handler *)>>;
 ipc_json_handler_no_arg_func_map create_ipc_json_handler_no_arg_func_map ();
@@ -531,7 +751,7 @@ uint64_t nano::json_handler::count_impl ()
 	return result;
 }
 
-uint64_t nano::json_handler::count_optional_impl (uint64_t result)
+uint64_t nano::json_handler::count_optional_impl (uint64_t result, uint64_t max_count)
 {
 	boost::optional<std::string> count_text (request.get_optional<std::string> ("count"));
 	if (!ec && count_text.is_initialized ())
@@ -540,6 +760,14 @@ uint64_t nano::json_handler::count_optional_impl (uint64_t result)
 		{
 			ec = nano::error_common::invalid_count;
 		}
+	}
+	if (!ec && result == 0)
+	{
+		ec = nano::error_common::invalid_count;
+	}
+	if (!ec && result > max_count)
+	{
+		ec = nano::error_common::invalid_count;
 	}
 	return result;
 }
@@ -5931,7 +6159,15 @@ void asset_lock_to_json (boost::property_tree::ptree & tree_a, nano::block_hash 
  * every field the offer block itself carries, plus whatever the ledger still
  * knows about how it ended.
  */
-void swap_offer_to_json (nano::node & node_a, nano::transaction const & transaction_a, nano::block_hash const & hash_a, nano::asset_block const & offer_a, boost::property_tree::ptree & entry_a)
+bool swap_offer_to_json (
+	nano::node & node_a,
+	nano::transaction const & transaction_a,
+	nano::block_hash const & hash_a,
+	nano::asset_block const & offer_a,
+	boost::property_tree::ptree & entry_a,
+	uint64_t & scanned_count_a,
+	uint64_t scan_count_a,
+	bool & scan_limit_exhausted_a)
 {
 	entry_a.put ("hash", hash_a.to_string ());
 	entry_a.put ("from", offer_a.hashables.account.to_account ());
@@ -5960,6 +6196,7 @@ void swap_offer_to_json (nano::node & node_a, nano::transaction const & transact
 	// `seenAt`/`settledAt`. The sideband keeps this in seconds; the SDK's
 	// contract wants milliseconds.
 	nano::json::put_number (entry_a, "seenAt", offer_a.sideband ().timestamp * 1000);
+	auto confirmed (node_a.ledger.block_confirmed (transaction_a, hash_a));
 
 	nano::asset_lock_info lock;
 	if (!node_a.store.asset.lock_get (transaction_a, hash_a, lock))
@@ -5968,6 +6205,7 @@ void swap_offer_to_json (nano::node & node_a, nano::transaction const & transact
 		{
 			entry_a.put ("state", "open");
 			nano::json::put_null (entry_a, "acceptedBy");
+			confirmed = false;
 			nano::json::put_null (entry_a, "settledBy");
 			nano::json::put_null (entry_a, "settledAt");
 		}
@@ -5977,7 +6215,17 @@ void swap_offer_to_json (nano::node & node_a, nano::transaction const & transact
 			entry_a.put ("settledBy", lock.settled_by.to_string ());
 			entry_a.put ("acceptedBy", node_a.ledger.account (transaction_a, lock.settled_by).to_account ());
 			auto const accept_block (node_a.store.block.get (transaction_a, lock.settled_by));
-			nano::json::put_number (entry_a, "settledAt", accept_block->sideband ().timestamp * 1000);
+			if (accept_block != nullptr)
+			{
+				nano::json::put_number (entry_a, "settledAt", accept_block->sideband ().timestamp * 1000);
+				confirmed = node_a.ledger.block_confirmed (transaction_a, lock.settled_by);
+			}
+			else
+			{
+				confirmed = false;
+				nano::json::put_null (entry_a, "settledBy");
+				nano::json::put_null (entry_a, "settledAt");
+			}
 		}
 	}
 	else
@@ -5998,17 +6246,27 @@ void swap_offer_to_json (nano::node & node_a, nano::transaction const & transact
 		uint64_t cancel_timestamp{ 0 };
 		while (true)
 		{
+			if (!consume_scan_count (scanned_count_a, scan_count_a))
+			{
+				scan_limit_exhausted_a = true;
+				return false;
+			}
 			auto const next (node_a.store.block.successor (transaction_a, cursor));
 			if (next.is_zero ())
 			{
 				break;
 			}
 			auto const next_block (node_a.store.block.get (transaction_a, next));
+			if (next_block == nullptr)
+			{
+				return false;
+			}
 			auto const next_asset (dynamic_cast<nano::asset_block const *> (next_block.get ()));
 			if (next_asset != nullptr && next_asset->hashables.op == nano::asset_op::swap_cancel && next_asset->hashables.link.as_block_hash () == hash_a)
 			{
 				cancel_hash = next;
 				cancel_timestamp = next_block->sideband ().timestamp;
+				confirmed = node_a.ledger.block_confirmed (transaction_a, next);
 				break;
 			}
 			cursor = next;
@@ -6027,6 +6285,8 @@ void swap_offer_to_json (nano::node & node_a, nano::transaction const & transact
 			nano::json::put_number (entry_a, "settledAt", cancel_timestamp * 1000);
 		}
 	}
+	nano::json::put_boolean (entry_a, "confirmed", confirmed);
+	return true;
 }
 }
 
@@ -6041,7 +6301,9 @@ void nano::json_handler::swap_info ()
 		if (offer != nullptr && offer->hashables.op == nano::asset_op::swap_offer)
 		{
 			boost::property_tree::ptree entry;
-			swap_offer_to_json (node, transaction, hash, *offer, entry);
+			uint64_t ignored_scan_count (0);
+			bool ignored_scan_limit (false);
+			(void)swap_offer_to_json (node, transaction, hash, *offer, entry, ignored_scan_count, std::numeric_limits<uint64_t>::max (), ignored_scan_limit);
 			response_l.add_child ("offer", entry);
 		}
 		else
@@ -6059,7 +6321,8 @@ void nano::json_handler::swap_info ()
 void nano::json_handler::account_swaps ()
 {
 	auto const account (account_impl ());
-	auto const count (count_optional_impl ());
+	auto const count (count_optional_impl (market_account_swaps_default_count, market_account_swaps_default_count));
+	auto const scan_count (scan_count_impl (request, ec));
 	std::string state_filter;
 	auto const state_text (request.get_optional<std::string> ("state"));
 	if (!ec && state_text.is_initialized ())
@@ -6078,20 +6341,74 @@ void nano::json_handler::account_swaps ()
 		boost::property_tree::ptree offers;
 		auto transaction (node.store.tx_begin_read ());
 		uint64_t returned (0);
+		uint64_t scanned (0);
+		auto const filter_code (swap_state_cursor_filter (state_filter));
+		nano::block_hash anchor;
+		nano::block_hash hash;
+		bool scan_limit_exhausted (false);
+		auto const before (request.get_optional<std::string> ("before"));
+		auto const has_before (before.is_initialized ());
+		if (has_before)
+		{
+			market_cursor cursor;
+			auto const result (decode_market_cursor (node, *before, 'a', filter_code, account, cursor));
+			if (result == market_cursor_result::invalid)
+			{
+				ec = nano::error_rpc::invalid_market_cursor;
+			}
+			else if (result == market_cursor_result::scope)
+			{
+				ec = nano::error_rpc::market_cursor_scope;
+			}
+			else
+			{
+				anchor = cursor.anchor;
+				hash = cursor.position;
+				if (!state_filter.empty () && node.ledger.latest (transaction, account) != anchor)
+				{
+					ec = nano::error_rpc::stale_market_cursor;
+				}
+				nano::uint256_union expected_snapshot;
+				if (!market_account_swaps_snapshot_hash (node, transaction, account, anchor, hash, expected_snapshot) || expected_snapshot != cursor.snapshot)
+				{
+					ec = nano::error_rpc::stale_market_cursor;
+				}
+				auto const anchor_block (node.store.block.get (transaction, anchor));
+				auto const position_block (node.store.block.get (transaction, hash));
+				if (anchor.is_zero () || hash.is_zero () || anchor_block == nullptr || position_block == nullptr || node.ledger.account (transaction, anchor) != account || node.ledger.account (transaction, hash) != account)
+				{
+					ec = nano::error_rpc::stale_market_cursor;
+				}
+			}
+		}
+		else
+		{
+			anchor = node.ledger.latest (transaction, account);
+			hash = anchor;
+		}
 		// One account's own chain is a bounded scan (SPEC §9.1), and every
 		// `swap_offer` that account ever made lives on it — open, accepted or
 		// cancelled — which is what lets this answer every `state` without a
 		// second index. Walked tip-first, the same direction
 		// `account_history` reads by default.
-		auto hash (node.ledger.latest (transaction, account));
 		auto block (hash.is_zero () ? nullptr : node.store.block.get (transaction, hash));
-		while (block != nullptr && returned < count)
+		while (!ec && block != nullptr && returned < count && scanned < scan_count)
 		{
+			++scanned;
 			auto const offer (dynamic_cast<nano::asset_block const *> (block.get ()));
 			if (offer != nullptr && offer->hashables.op == nano::asset_op::swap_offer)
 			{
 				boost::property_tree::ptree entry;
-				swap_offer_to_json (node, transaction, hash, *offer, entry);
+				bool offer_scan_limit_exhausted (false);
+				if (!swap_offer_to_json (node, transaction, hash, *offer, entry, scanned, scan_count, offer_scan_limit_exhausted))
+				{
+					scan_limit_exhausted = scan_limit_exhausted || offer_scan_limit_exhausted;
+					if (!offer_scan_limit_exhausted)
+					{
+						ec = nano::error_rpc::stale_market_cursor;
+					}
+					break;
+				}
 				if (state_filter.empty () || entry.get<std::string> ("state") == state_filter)
 				{
 					offers.push_back (std::make_pair ("", entry));
@@ -6101,7 +6418,75 @@ void nano::json_handler::account_swaps ()
 			hash = block->previous ();
 			block = hash.is_zero () ? nullptr : node.store.block.get (transaction, hash);
 		}
-		nano::json::add_array (response_l, "offers", offers);
+		if (!ec)
+		{
+			nano::json::add_array (response_l, "offers", offers);
+			if (hash.is_zero ())
+			{
+				nano::uint256_union snapshot;
+				if (!market_account_swaps_snapshot_hash (node, transaction, account, anchor, hash, snapshot))
+				{
+					ec = nano::error_rpc::stale_market_cursor;
+				}
+				else
+				{
+					add_market_page_metadata (response_l, scanned, true, "exhausted", "");
+					if (anchor.is_zero ())
+					{
+						nano::json::put_null (response_l, "snapshot");
+					}
+					else
+					{
+						response_l.put ("snapshot", snapshot.to_string ());
+					}
+				}
+			}
+			else if (block == nullptr)
+			{
+				if (has_before)
+				{
+					ec = nano::error_rpc::stale_market_cursor;
+				}
+				else
+				{
+					// Pruned history can cut a first-page walk short while still
+					// returning a useful prefix. `next` is intentionally empty:
+					// there is no valid start position before the pruned gap.
+					nano::uint256_union snapshot;
+					if (!market_account_swaps_snapshot_hash (node, transaction, account, anchor, hash, snapshot))
+					{
+						ec = nano::error_rpc::stale_market_cursor;
+					}
+					else
+					{
+						add_market_page_metadata (response_l, scanned, false, "pruned", "");
+						if (anchor.is_zero ())
+						{
+							nano::json::put_null (response_l, "snapshot");
+						}
+						else
+						{
+							response_l.put ("snapshot", snapshot.to_string ());
+						}
+					}
+				}
+			}
+			else
+			{
+				nano::uint256_union snapshot;
+				if (!market_account_swaps_snapshot_hash (node, transaction, account, anchor, hash, snapshot))
+				{
+					ec = nano::error_rpc::stale_market_cursor;
+				}
+				else
+				{
+					auto const stopped (scan_limit_exhausted || (scanned >= scan_count && returned < count) ? "scan_limit" : "result_limit");
+					auto const next (encode_market_cursor (node, market_cursor{ 'a', filter_code, account, anchor, hash, snapshot }));
+					add_market_page_metadata (response_l, scanned, false, stopped, next);
+					response_l.put ("snapshot", snapshot.to_string ());
+				}
+			}
+		}
 	}
 	response_errors ();
 }
