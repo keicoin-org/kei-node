@@ -505,6 +505,17 @@ public:
 				break;
 			}
 		}
+		if (error)
+		{
+			// A rejected rollback has to leave the block where it found it.
+			// Every `error` above is set before its case writes anything, so
+			// returning here is the whole undo. Falling through would delete
+			// the block and wind the account's head back to its predecessor
+			// while `ledger::rollback ()` reports failure and leaves
+			// `cache.block_count` alone — a chain one block shorter than the
+			// ledger believes it is, which no later block can repair.
+			return;
+		}
 		ledger.stats.inc (nano::stat::type::rollback, nano::stat::detail::asset_block);
 
 		// ledger.representative () answers with the representative *block's*

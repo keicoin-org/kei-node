@@ -977,16 +977,19 @@ TEST (asset_ledger, rolling_back_a_collect_with_pruned_source_rejected_safely)
 	ASSERT_FALSE (store.block.exists (transaction, mint->hash ()));
 	ASSERT_TRUE (store.pruned.exists (transaction, mint->hash ()));
 
+	// The source is what says who sent the units, which asset they were and
+	// what memo rode along, so without it the receivable cannot be rebuilt and
+	// the rollback is refused.
 	ASSERT_TRUE (ledger.rollback (transaction, collect->hash ()));
+	// Refused has to mean nothing moved. The three facts below are the ones a
+	// half-applied rollback would put out of step with each other: the collect
+	// stays on the chain, the player keeps what it collected, and the
+	// receivable it consumed stays consumed. Restoring the receivable while
+	// leaving the balance would credit the player twice.
 	ASSERT_TRUE (store.block.exists (transaction, collect->hash ()));
+	ASSERT_EQ (collect->hash (), ledger.latest (transaction, player.pub));
 	ASSERT_EQ (nano::amount (500), store.asset.balance (transaction, player.pub, issued.id));
-	nano::asset_pending_info pending;
-	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, mint->hash ())));
-	ASSERT_FALSE (store.asset.pending_get (transaction, nano::pending_key (player.pub, mint->hash ()), pending));
-	ASSERT_EQ (nano::dev::team_key.pub, pending.source);
-	ASSERT_EQ (issued.id, pending.asset_id);
-	ASSERT_EQ (nano::amount (500), pending.amount);
-	ASSERT_EQ ("quest reward", pending.memo);
+	ASSERT_FALSE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, mint->hash ())));
 }
 
 // If the accepter's tip is pruned, offer rollback cannot walk back to it.
@@ -1014,10 +1017,15 @@ TEST (asset_ledger, rolling_back_an_accepted_offer_with_pruned_settler_rejected_
 
 	ASSERT_TRUE (ledger.rollback (transaction, offer->hash ()));
 	ASSERT_TRUE (store.block.exists (transaction, offer->hash ()));
+	ASSERT_EQ (offer->hash (), ledger.latest (transaction, player.pub));
 	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
 	ASSERT_TRUE (store.pruned.exists (transaction, accept->hash ()));
-	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, accept->hash ())));
-	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	// Both arrivals the accept created are still uncollected and still where it
+	// put them: the asset went to the accepter, and the Kei the offer asked for
+	// went to the offerer — and Kei rides in the inherited `pending` table
+	// rather than `asset_pending`, told apart by the zero asset id.
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (player.pub, accept->hash ())));
 	ASSERT_EQ (after_issuing (1) - 50, ledger.account_balance (transaction, nano::dev::team_key.pub));
 }
 
@@ -1043,13 +1051,18 @@ TEST (asset_ledger, rolling_back_a_swap_accept_with_missing_lock_rejected_safely
 	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
 	store.asset.lock_del (transaction, offer->hash ());
 
+	// The asset leg arrived for the accepter and the Kei leg for the offerer.
 	ASSERT_TRUE (store.block.exists (transaction, accept->hash ()));
-	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, accept->hash ())));
-	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (player.pub, accept->hash ())));
+	// The lock is the only record of what the two legs were worth, so with it
+	// gone the accept cannot be inverted and the rollback is refused.
 	ASSERT_TRUE (ledger.rollback (transaction, accept->hash ()));
+	// And refusing leaves every one of those three facts untouched.
 	ASSERT_TRUE (store.block.exists (transaction, accept->hash ()));
-	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (player.pub, accept->hash ())));
-	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_EQ (accept->hash (), ledger.latest (transaction, nano::dev::team_key.pub));
+	ASSERT_TRUE (store.asset.pending_exists (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ())));
+	ASSERT_TRUE (store.pending.exists (transaction, nano::pending_key (player.pub, accept->hash ())));
 	ASSERT_EQ (after_issuing (1) - 50, ledger.account_balance (transaction, nano::dev::team_key.pub));
 }
 
@@ -2029,16 +2042,29 @@ TEST (asset_ledger, rollback_swap_conflict_with_pruned_settler_is_rejected_safel
 	auto const accept = signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ());
 	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
 
+	// A competing consumer, so that reconciling towards it actually has to
+	// unwind the accept. Naming the accept itself would be a no-op: it is
+	// already the settler, and the function would return before it ever looked
+	// at the pruned chain.
+	auto const cancel = signed_asset (pool, player, offer->hash (), 0, nano::asset_op::swap_cancel, 0, 0, offer->hash ());
+	ASSERT_EQ (nano::process_result::offer_consumed, ledger.process (transaction, *cancel).code);
+
 	ledger.pruning = true;
 	ASSERT_GT (ledger.pruning_action (transaction, accept->hash (), 1), 0);
 	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
 	ASSERT_TRUE (store.pruned.exists (transaction, accept->hash ()));
 
+	// Unwinding the accept means walking the accepter's chain down, and the
+	// pruned tip is where that walk runs out of blocks to walk.
 	std::vector<std::shared_ptr<nano::block>> rolled_back;
-	ASSERT_TRUE (ledger.rollback_swap_conflict (transaction, offer->hash (), accept->hash (), rolled_back));
+	ASSERT_TRUE (ledger.rollback_swap_conflict (transaction, offer->hash (), cancel->hash (), rolled_back));
 	ASSERT_TRUE (rolled_back.empty ());
 	ASSERT_TRUE (store.block.exists (transaction, offer->hash ()));
-	ASSERT_FALSE (store.block.exists (transaction, accept->hash ()));
+	ASSERT_FALSE (store.block.exists (transaction, cancel->hash ()));
+	// The lock is still settled by the accept, exactly as it was found.
+	nano::asset_lock_info lock;
+	ASSERT_FALSE (store.asset.lock_get (transaction, offer->hash (), lock));
+	ASSERT_EQ (accept->hash (), lock.settled_by);
 }
 
 TEST (asset_ledger, an_elected_accept_replaces_an_applied_cancel)
