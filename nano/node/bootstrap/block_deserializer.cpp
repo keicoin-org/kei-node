@@ -1,27 +1,12 @@
 #include <nano/lib/blocks.hpp>
+#include <nano/node/asset_frame.hpp>
 #include <nano/node/bootstrap/block_deserializer.hpp>
 #include <nano/node/transport/socket.hpp>
 #include <nano/secure/buffer.hpp>
 
-#include <boost/endian/conversion.hpp>
-#include <cstring>
-
 nano::bootstrap::block_deserializer::block_deserializer () :
 	read_buffer{ std::make_shared<std::vector<uint8_t>> () }
 {
-}
-
-namespace
-{
-constexpr std::size_t max_payload_length{ 1024 * 65 };
-
-std::size_t read_asset_block_size (std::vector<uint8_t> const & data)
-{
-	uint16_t payload_size{ 0 };
-	std::memcpy (&payload_size, data.data () + nano::asset_block::serialized_length_field_offset, sizeof (payload_size));
-	boost::endian::little_to_native_inplace (payload_size);
-	return nano::asset_block::serialized_size (payload_size);
-}
 }
 
 void nano::bootstrap::block_deserializer::read (nano::transport::socket & socket, callback_type const && callback)
@@ -53,44 +38,18 @@ void nano::bootstrap::block_deserializer::received_type (nano::transport::socket
 	}
 	if (type == nano::block_type::asset)
 	{
-		auto const size = nano::asset_block::serialized_prefix_size;
-		read_buffer->resize (size);
-		socket.async_read (read_buffer, size, [this_l = shared_from_this (), &socket, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
+		nano::asset_frame::read (
+		[&socket] (std::shared_ptr<std::vector<uint8_t>> const & buffer_a, std::size_t size_a, std::function<void (boost::system::error_code const &, std::size_t)> callback_a) {
+			socket.async_read (buffer_a, size_a, std::move (callback_a));
+		},
+		read_buffer, nano::asset_frame::max_frame_size,
+		[this_l = shared_from_this (), callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t frame_size) {
 			if (ec)
 			{
 				callback (ec, nullptr);
 				return;
 			}
-			if (size_a != nano::asset_block::serialized_prefix_size)
-			{
-				callback (boost::asio::error::fault, nullptr);
-				return;
-			}
-			auto const full_size = read_asset_block_size (*this_l->read_buffer);
-			if (full_size < nano::asset_block::serialized_minimum_size () || full_size > max_payload_length)
-			{
-				callback (boost::asio::error::fault, nullptr);
-				return;
-			}
-			auto const suffix_size = full_size - nano::asset_block::serialized_prefix_size;
-			auto suffix = std::make_shared<std::vector<uint8_t>> ();
-			suffix->resize (suffix_size);
-			this_l->read_buffer->reserve (full_size);
-			socket.async_read (suffix, suffix_size, [this_l, suffix, full_size, &socket, callback = std::move (callback)] (boost::system::error_code const & ec, std::size_t size_a) {
-				if (ec)
-				{
-					callback (ec, nullptr);
-					return;
-				}
-				if (size_a != suffix->size ())
-				{
-					callback (boost::asio::error::fault, nullptr);
-					return;
-				}
-				this_l->read_buffer->insert (this_l->read_buffer->end (), suffix->begin (), suffix->end ());
-				this_l->read_buffer->resize (full_size);
-				this_l->received_block (nano::block_type::asset, std::move (callback));
-			});
+			this_l->received_block (nano::block_type::asset, frame_size, std::move (callback));
 		});
 	}
 	else
@@ -113,14 +72,19 @@ void nano::bootstrap::block_deserializer::received_type (nano::transport::socket
 				callback (boost::asio::error::fault, nullptr);
 				return;
 			}
-			this_l->received_block (type, std::move (callback));
+			this_l->received_block (type, size, std::move (callback));
 		});
 	}
 }
 
-void nano::bootstrap::block_deserializer::received_block (nano::block_type type, callback_type const && callback)
+void nano::bootstrap::block_deserializer::received_block (nano::block_type type, std::size_t size, callback_type const && callback)
 {
-	nano::bufferstream stream{ read_buffer->data (), read_buffer->size () };
+	// `size`, not read_buffer->size (): nano::asset_frame::read only grows the
+	// buffer, so after a large asset block it stays large and a following
+	// smaller one would otherwise be parsed with the previous block's tail
+	// still on the end.
+	debug_assert (size <= read_buffer->size ());
+	nano::bufferstream stream{ read_buffer->data (), size };
 	auto block = nano::deserialize_block (stream, type);
 	callback (boost::system::error_code{}, block);
 }
