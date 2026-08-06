@@ -178,11 +178,20 @@ jobs:
       # genesis balances that decisions-m2.md §14 changed on purpose, so it is
       # red for reasons that are not regressions. Bringing it back to green is
       # its own job, and pretending otherwise here would only hide this signal.
-      # The one mdb_block_store case named individually rather than by wildcard:
-      # its neighbours are part of the inherited red above (supported_version_upgrades
-      # dies in upgrade_v14_to_v15), but the v23 case guards something CI cannot
-      # otherwise see at all — every database here is fresh, and a fresh database
-      # is precisely the one that never hits the bug.
+      # The cases named individually rather than by wildcard are named that way
+      # because their neighbours are part of the inherited red above and a
+      # wildcard would drag those in:
+      #
+      # - mdb_block_store.a_v23_... — supported_version_upgrades next to it dies
+      #   in upgrade_v14_to_v15, but the v23 case guards something CI cannot
+      #   otherwise see at all: every database here is fresh, and a fresh
+      #   database is precisely the one that never hits the bug.
+      # - ledger.state_rollback_send_refused_... — `ledger.*` is largely the
+      #   inherited suite, red on the genesis balances §14 changed on purpose.
+      #   This case is Kei's, and it is the only executable evidence that a
+      #   refused state-block rollback leaves the block alone (#55). Without the
+      #   guard it does not merely fail, it aborts core_test outright under
+      #   lmdb — see the PR for why.
       #
       # `asset_frame.*` and `message_deserializer.*` cover the wire framing for
       # variable-length asset blocks. Until this filter named them they were
@@ -200,7 +209,7 @@ jobs:
       # fix, merged, and never once executed. So when you add a test file, add
       # its suite here in the same commit, or say in the PR why you did not.
       - name: Run Kei tests
-        run: ./build/core_test --gtest_filter='asset_block.*:asset_frame.*:asset_ledger.*:asset_payload.*:asset_id.*:block.kei_hash_domain:block.kei_hash_vectors:genesis_reserve.*:json_response.*:issuance_burn.*:mdb_block_store.a_v23_database_without_the_claim_and_swap_tables_still_opens:message_deserializer.*:asset_work_tiers.*'
+        run: ./build/core_test --gtest_filter='asset_block.*:asset_frame.*:asset_ledger.*:asset_payload.*:asset_id.*:block.kei_hash_domain:block.kei_hash_vectors:genesis_reserve.*:json_response.*:issuance_burn.*:mdb_block_store.a_v23_database_without_the_claim_and_swap_tables_still_opens:message_deserializer.*:asset_work_tiers.*:ledger.state_rollback_send_refused_when_receiver_is_cemented'
 
       # The RocksDB suites are gated twice, which is why they slipped: the
       # filter above never names them, and each one opens with a GTEST_SKIP

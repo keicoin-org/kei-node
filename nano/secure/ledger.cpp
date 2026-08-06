@@ -187,6 +187,73 @@ public:
 		}
 		auto balance (ledger.balance (transaction, block_a.hashables.previous));
 		auto is_send (block_a.hashables.balance < balance);
+		auto info = ledger.account_info (transaction, block_a.hashables.account);
+		debug_assert (info);
+
+		if (is_send)
+		{
+			nano::pending_key key (block_a.hashables.link.as_account (), hash);
+			while (!error && !ledger.store.pending.exists (transaction, key))
+			{
+				error = ledger.rollback (transaction, ledger.latest (transaction, block_a.hashables.link.as_account ()), list);
+			}
+			if (error)
+			{
+				// A refused rollback has to leave this block where it found it.
+				// Everything below is destructive — the representative weights,
+				// the account head, the successor link, `store.block.del` — and
+				// used to run regardless, while `ledger::rollback ()` reported
+				// failure and so left `cache.block_count` alone. That is a chain
+				// one block shorter than the ledger believes it is, and nothing
+				// later repairs it: `blockprocessor` logs `rollback_failed` and
+				// carries on with the same write transaction, so whatever was
+				// written is committed.
+				//
+				// `store.pending.del` below is destructive too, and reached this
+				// loop's failing exit with the key still absent — the loop only
+				// runs *while* it is absent. LMDB reports that as MDB_NOTFOUND
+				// and `release_assert_success` aborts the process; RocksDB does
+				// not report not-found at all ("it is a pre-condition that the
+				// key exists", `nano/node/rocksdb/rocksdb.cpp`) and returns kOk.
+				// So the one line was a crash on one backend and a silent no-op
+				// on the other, and only on the second did the tail then run.
+				//
+				// Not a full undo, and not claimed as one: the earlier passes of
+				// the loop above succeeded and really did roll blocks off the
+				// destination's chain. This stops that from compounding and
+				// nothing more. The residual is #52.
+				//
+				// This is upstream's fix, not a local invention — see
+				// `nano::ledger_rollback::state_block` in
+				// nanocurrency/nano-node `nano/secure/ledger_rollback.cpp`,
+				// where the guard sits in the same place.
+				return;
+			}
+			ledger.store.pending.del (transaction, key);
+			ledger.stats.inc (nano::stat::type::rollback, nano::stat::detail::send);
+		}
+		else if (!block_a.hashables.link.is_zero () && !ledger.is_epoch_link (block_a.hashables.link))
+		{
+			// Pending account entry can be incorrect if source block was pruned. But it's not affecting correct ledger processing
+			[[maybe_unused]] bool is_pruned (false);
+			auto source_account (ledger.account_safe (transaction, block_a.hashables.link.as_block_hash (), is_pruned));
+			nano::pending_info pending_info (source_account, block_a.hashables.balance.number () - balance, block_a.sideband ().source_epoch);
+			ledger.store.pending.put (transaction, nano::pending_key (block_a.hashables.account, block_a.hashables.link.as_block_hash ()), pending_info);
+			ledger.stats.inc (nano::stat::type::rollback, nano::stat::detail::receive);
+		}
+
+		// `release_assert` rather than the `debug_assert` that used to stand
+		// here. `is_send` is the only branch that can set `error` and it now
+		// returns instead of falling through, so this is unreachable — but it is
+		// unreachable in a shipped build only if it is compiled into one, and
+		// RelWithDebInfo defines NDEBUG. Upstream made the same change.
+		release_assert (!error);
+
+		// The weights move here rather than at the top of the visitor, so a
+		// refused rollback does not leave them adjusted for a block that is
+		// still on the chain. Safe to defer: nothing between the two positions
+		// reads a weight, and the nested rollbacks above only accumulate their
+		// own deltas. Upstream orders it the same way.
 		nano::account representative{};
 		if (!rep_block_hash.is_zero ())
 		{
@@ -206,30 +273,6 @@ public:
 			ledger.cache.rep_weights.representation_add (block_a.representative (), 0 - block_a.hashables.balance.number ());
 		}
 
-		auto info = ledger.account_info (transaction, block_a.hashables.account);
-		debug_assert (info);
-
-		if (is_send)
-		{
-			nano::pending_key key (block_a.hashables.link.as_account (), hash);
-			while (!error && !ledger.store.pending.exists (transaction, key))
-			{
-				error = ledger.rollback (transaction, ledger.latest (transaction, block_a.hashables.link.as_account ()), list);
-			}
-			ledger.store.pending.del (transaction, key);
-			ledger.stats.inc (nano::stat::type::rollback, nano::stat::detail::send);
-		}
-		else if (!block_a.hashables.link.is_zero () && !ledger.is_epoch_link (block_a.hashables.link))
-		{
-			// Pending account entry can be incorrect if source block was pruned. But it's not affecting correct ledger processing
-			[[maybe_unused]] bool is_pruned (false);
-			auto source_account (ledger.account_safe (transaction, block_a.hashables.link.as_block_hash (), is_pruned));
-			nano::pending_info pending_info (source_account, block_a.hashables.balance.number () - balance, block_a.sideband ().source_epoch);
-			ledger.store.pending.put (transaction, nano::pending_key (block_a.hashables.account, block_a.hashables.link.as_block_hash ()), pending_info);
-			ledger.stats.inc (nano::stat::type::rollback, nano::stat::detail::receive);
-		}
-
-		debug_assert (!error);
 		auto previous_version (ledger.store.block.version (transaction, block_a.hashables.previous));
 		nano::account_info new_info (block_a.hashables.previous, representative, info->open_block, balance, nano::seconds_since_epoch (), info->block_count - 1, previous_version);
 		ledger.update_account (transaction, block_a.hashables.account, *info, new_info);
