@@ -148,3 +148,45 @@ TEST (difficulty, network_constants)
 	// Epoch
 	ASSERT_EQ (nano::dev::network_params.work.epoch_2_receive, nano::dev::network_params.work.threshold (version, nano::block_details (nano::epoch::epoch_2, false, false, true)));
 }
+
+// SPEC §5.6.4's tier table, checked as constants rather than by processing a
+// block. That is deliberate: the defect this guards was the *value* of tier C
+// on `banano_live_network`, and the live network is the one configuration no
+// ledger test here can run against. A test that drives a `claim` through the
+// dev ledger would have passed throughout.
+TEST (asset_work_tiers, tier_c_is_never_free_on_any_network)
+{
+	for (auto const * thresholds : { &nano::work_thresholds::publish_full, &nano::work_thresholds::publish_beta, &nano::work_thresholds::publish_dev, &nano::work_thresholds::publish_test })
+	{
+		auto const & work (*thresholds);
+		// The whole point. `difficulty >= 0` is true for `work = 0`, so a zero
+		// here is not a low price, it is no price: one asset issuance and one
+		// commit bought a million permanent accounts, each with an `account`
+		// record, a `holdings` row, a `holders` row and an `asset_claim_roots`
+		// row, on every node forever.
+		ASSERT_NE (0, work.tier_c ());
+		ASSERT_NE (0, work.threshold_asset (nano::asset_op::claim));
+		ASSERT_NE (0, work.threshold_asset (nano::asset_op::burn));
+		ASSERT_NE (0, work.threshold_asset (nano::asset_op::asset_receive));
+
+		// Cheap is still the point. §5.5's design depends on a thousand players
+		// claiming at once without a visible pause, so tier C must stay the
+		// cheapest of the three — the failure this pairs with is someone
+		// "fixing" the line above by raising tier C to tier B.
+		ASSERT_LT (work.tier_c (), work.tier_b ());
+		ASSERT_LT (work.tier_b (), work.tier_a);
+		// And work generated at the pool's default must satisfy every tier.
+		ASSERT_LE (work.tier_a, work.base);
+	}
+
+	// Ordinary Kei receives are deliberately *not* repriced. They are `state`
+	// blocks and read `epoch_2_receive` through `threshold (version, details)`,
+	// which stays zero on the live network so a Banano-shaped zero-work receive
+	// is still valid (SPEC §5.6.8). Only `threshold_asset` reads tier C.
+	// Asserted rather than left in a comment, because the two being separate
+	// fields is exactly what someone tidying up would merge back together.
+	ASSERT_EQ (0, nano::work_thresholds::publish_full.epoch_2_receive);
+	ASSERT_NE (nano::work_thresholds::publish_full.epoch_2_receive, nano::work_thresholds::publish_full.tier_c ());
+	ASSERT_EQ (nano::work_thresholds::publish_full.epoch_1, nano::work_thresholds::publish_full.threshold (nano::work_version::work_1, nano::block_details (nano::epoch::epoch_1, false, true, false)));
+	ASSERT_EQ (0, nano::work_thresholds::publish_full.threshold (nano::work_version::work_1, nano::block_details (nano::epoch::epoch_2, false, true, false)));
+}

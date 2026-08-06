@@ -30,28 +30,39 @@ nano::work_thresholds const nano::work_thresholds::publish_full (
 0xfffffe0000000000,
 0xfffffff000000000, // 32x higher than originally
 0x0000000000000000, // remove receive work requirements
-0xfffffffe00000000 // tier A: 8x higher than epoch_2
-);
+0xfffffffe00000000, // tier A: 8x higher than epoch_2
+// Tier C. Was the `0` above, inherited from Banano's removal of receive work
+// and unsafe here for the reason on the field: Kei's `claim` and `burn` are
+// self-authorising, so nothing upstream of them has paid. 16x lower than
+// epoch_1 — the same absolute threshold publish_beta uses — which is roughly
+// 2^19 hashes, tens of milliseconds on a phone. Tier C has to stay cheap;
+// SPEC §5.5's thousand-simultaneous-claims requirement is real and is the
+// reason `claim` is in this tier at all. Cheap and free are different numbers
+// and only one of them bounds anything.
+0xffffe00000000000);
 
 nano::work_thresholds const nano::work_thresholds::publish_beta (
 0xfffff00000000000, // 64x lower than publish_full.epoch_1
 0xfffff00000000000, // same as epoch_1
 0xffffe00000000000, // 2x lower than epoch_1
-0xfffffe0000000000 // tier A: 8x higher than epoch_2
+0xfffffe0000000000, // tier A: 8x higher than epoch_2
+0xffffe00000000000 // tier C: what epoch_2_receive already was here
 );
 
 nano::work_thresholds const nano::work_thresholds::publish_dev (
 0xfe00000000000000, // Very low for tests
 0xffc0000000000000, // 8x higher than epoch_1
 0xf000000000000000, // 8x lower than epoch_1
-0xfff8000000000000 // tier A: 8x higher than epoch_2
+0xfff8000000000000, // tier A: 8x higher than epoch_2
+0xf000000000000000 // tier C: what epoch_2_receive already was here
 );
 
 nano::work_thresholds const nano::work_thresholds::publish_test ( // defaults to live network levels
 get_env_threshold_or_default ("NANO_TEST_EPOCH_1", 0xffffffc000000000),
 get_env_threshold_or_default ("NANO_TEST_EPOCH_2", 0xfffffff800000000), // 8x higher than epoch_1
 get_env_threshold_or_default ("NANO_TEST_EPOCH_2_RECV", 0xfffffe0000000000), // 8x lower than epoch_1
-get_env_threshold_or_default ("NANO_TEST_TIER_A", 0xffffffff00000000) // tier A: 8x higher than epoch_2
+get_env_threshold_or_default ("NANO_TEST_TIER_A", 0xffffffff00000000), // tier A: 8x higher than epoch_2
+get_env_threshold_or_default ("NANO_TEST_TIER_C", 0xfffffe0000000000) // tier C: what epoch_2_receive already was here
 );
 
 uint64_t nano::work_thresholds::threshold_entry (nano::work_version const version_a, nano::block_type const type_a) const
