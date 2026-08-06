@@ -33,6 +33,9 @@ class rocksdb_block_store_tombstone_count_Test;
 namespace rocksdb
 {
 	class rocksdb_block_store_upgrade_v21_v22_Test;
+	class rocksdb_block_store_upgrade_v22_v23_creates_the_asset_tables_Test;
+	class rocksdb_block_store_upgrade_v23_v24_also_repairs_missing_v22_v23_tables_Test;
+	class rocksdb_block_store_get_column_family_aborts_on_a_missing_family_Test;
 	class rocksdb_block_store_clear_preserves_column_family_handle_Test;
 	class rocksdb_block_store_clear_is_survivable_Test;
 
@@ -181,6 +184,9 @@ namespace rocksdb
 
 		friend class nano::rocksdb_block_store_tombstone_count_Test;
 		friend class nano::rocksdb::rocksdb_block_store_upgrade_v21_v22_Test;
+		friend class nano::rocksdb::rocksdb_block_store_upgrade_v22_v23_creates_the_asset_tables_Test;
+		friend class nano::rocksdb::rocksdb_block_store_upgrade_v23_v24_also_repairs_missing_v22_v23_tables_Test;
+		friend class nano::rocksdb::rocksdb_block_store_get_column_family_aborts_on_a_missing_family_Test;
 		friend class nano::rocksdb::rocksdb_block_store_clear_preserves_column_family_handle_Test;
 		friend class nano::rocksdb::rocksdb_block_store_clear_is_survivable_Test;
 	};
