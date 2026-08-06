@@ -20,9 +20,20 @@ on:
 # A branch only needs its newest commit built. Without this, a run of quick
 # fixes queues a full build each, and the answer to the one that matters
 # arrives last.
+#
+# Master is the exception, and cancelling there cost this project dearly. With
+# `cancel-in-progress: true` applied everywhere, each merge killed the previous
+# master build: the runs for #42, #43, #48, #44, #49 and #66 all concluded
+# `cancelled`, and a cancelled run reports no failure. That is how four red
+# `asset_ledger` rollback tests reached master unseen and stayed there, and why
+# every master tick over that stretch was worthless. `gh run watch` exits 0 on
+# cancellation as well, so nothing anywhere said no.
+#
+# A master build must be allowed to finish and answer, however many merges land
+# behind it. Branch builds keep the behaviour the paragraph above describes.
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   linux:
