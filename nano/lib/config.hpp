@@ -154,12 +154,32 @@ public:
 
 	/**
 	 * Tier A (decisions-m2.md §11): `issue` and `mint`, the two operations that
-	 * create permanent state and are the cheapest to abuse. Tiers B and C are
-	 * not new constants — B is `epoch_2`, the send threshold, and C is
-	 * `epoch_2_receive`, which is what §11 means by "= Banano send" and
-	 * "= Banano receive". Only A had no inherited equivalent.
+	 * create permanent state and are the cheapest to abuse. Tier B is not a new
+	 * constant — it is `epoch_2`, the send threshold, which is what §11 means by
+	 * "= Banano send".
 	 */
 	uint64_t const tier_a;
+
+	/**
+	 * Tier C: `burn`, `asset_receive` and `claim`. §11 called this "= Banano
+	 * receive" and it was an alias for `epoch_2_receive`, which on the live
+	 * network is `0`. That equivalence does not survive Kei's asset ops.
+	 *
+	 * Banano can charge nothing for a receive because a receive cannot exist
+	 * without a send that already paid: every zero-work receive is authorised by
+	 * a counterparty block someone bought. Kei's tier C is not that population.
+	 * A `claim` is self-authorising — one `commit` covers a whole Merkle tree of
+	 * them (SPEC §5.5), and the ledger lets a `claim` open an account that has
+	 * never held Kei — and a `burn` has no counterparty at all. So the inherited
+	 * constant carried an argument that no longer holds, and a free tier C let
+	 * one asset issuance and one commit buy a million permanent accounts.
+	 *
+	 * Its own field rather than a fifth use of `epoch_2_receive`, so that
+	 * pricing Kei's asset ops does not silently reprice ordinary Kei receives.
+	 * Those are `state` blocks and go through `threshold (version, details)`;
+	 * only `threshold_asset` reads this.
+	 */
+	uint64_t const tier_c_threshold;
 
 	// Automatically calculated. The base threshold is the maximum of all thresholds and is used for all work multiplier calculations
 	uint64_t const base;
@@ -167,9 +187,16 @@ public:
 	// Automatically calculated. The entry threshold is the minimum of all thresholds and defines the required work to enter the node, but does not guarantee a block is processed
 	uint64_t const entry;
 
-	constexpr work_thresholds (uint64_t epoch_1_a, uint64_t epoch_2_a, uint64_t epoch_2_receive_a, uint64_t tier_a_a) :
-		epoch_1 (epoch_1_a), epoch_2 (epoch_2_a), epoch_2_receive (epoch_2_receive_a), tier_a (tier_a_a),
-		base (std::max ({ epoch_1, epoch_2, epoch_2_receive, tier_a })),
+	constexpr work_thresholds (uint64_t epoch_1_a, uint64_t epoch_2_a, uint64_t epoch_2_receive_a, uint64_t tier_a_a, uint64_t tier_c_a) :
+		epoch_1 (epoch_1_a), epoch_2 (epoch_2_a), epoch_2_receive (epoch_2_receive_a), tier_a (tier_a_a), tier_c_threshold (tier_c_a),
+		base (std::max ({ epoch_1, epoch_2, epoch_2_receive, tier_a, tier_c_threshold })),
+		// Deliberately excludes tier C. `entry` is the door, and it is shared
+		// with ordinary `state` receives, which stay free; raising it to price
+		// asset blocks would price those too. So a zero-work `claim` still gets
+		// through the door on the live network and is refused by the ledger
+		// instead. That costs a deserialize, a signature check and a queue slot
+		// per block, which is a smaller problem than permanent state but is not
+		// nothing, and closing it needs a per-block-type entry threshold.
 		entry (std::min ({ epoch_1, epoch_2, epoch_2_receive }))
 	{
 	}
@@ -189,7 +216,7 @@ public:
 	}
 	uint64_t tier_c () const
 	{
-		return epoch_2_receive;
+		return tier_c_threshold;
 	}
 	// Ledger threshold
 	uint64_t threshold (nano::work_version const, nano::block_details const) const;
