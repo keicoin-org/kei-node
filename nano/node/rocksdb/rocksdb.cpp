@@ -292,10 +292,31 @@ bool nano::rocksdb::store::do_upgrades (nano::write_transaction const & transact
 void nano::rocksdb::store::upgrade_v22_to_v23 (nano::write_transaction const & transaction_a)
 {
 	logger.always_log ("Preparing v22 to v23 database upgrade...");
-	// Nothing to migrate — a v22 database predates asset blocks, and
+	// Nothing to *migrate* — a v22 database predates asset blocks, and
 	// ledger_processor rejected every one of them, so no asset-typed state can
-	// exist to carry forward. The column families themselves are created by
-	// create_column_families () when the database is opened.
+	// exist to carry forward.
+	//
+	// The tables themselves still have to be made here. create_column_families ()
+	// only describes the families a database is *created* with; an existing one
+	// is reopened through get_current_column_families (), which reports the
+	// families it actually has on disk. A v22 database has none of these, so
+	// leaving it to the open path stamped the ledger v23 (and then v24 through
+	// the fallthrough) with the five v23 asset tables still absent —
+	// get_column_family () then returns the end () of its own handle list and
+	// release builds dereference it (#61).
+	//
+	// Same shape as upgrade_v23_to_v24 () below, which creates the five M4/M5
+	// tables it introduced for exactly this reason.
+	for (auto const & name : { "assets", "holdings", "holders", "asset_pending", "issued" })
+	{
+		if (!column_family_exists (name))
+		{
+			::rocksdb::ColumnFamilyHandle * handle = nullptr;
+			auto status = db->CreateColumnFamily (get_cf_options (name), name, &handle);
+			release_assert (status.ok ());
+			handles.emplace_back (handle);
+		}
+	}
 	version.put (transaction_a, 23);
 	logger.always_log ("Finished creating the asset tables");
 }
@@ -309,7 +330,15 @@ void nano::rocksdb::store::upgrade_v23_to_v24 (nano::write_transaction const & t
 	// LMDB does — an existing database is reopened with the column families it
 	// actually has (get_current_column_families ()), so it starts and then finds
 	// nothing where a claim or an offer should be — but the repair is the same.
-	for (auto const & name : { "asset_commits", "asset_claims", "asset_claim_roots", "swap_locks", "swap_offers" })
+	//
+	// The v22/v23 tables are named here too, alongside v23/v24's own. A
+	// database already stamped v23 before upgrade_v22_to_v23 learned to create
+	// them (#61) skips that function entirely — do_upgrades () switches on the
+	// stored version — so without this it would fall through to v24 still
+	// missing assets/holdings/holders/asset_pending/issued. Idempotent either
+	// way: column_family_exists () guards each name, so a database that already
+	// has a table from the earlier upgrade does nothing here for it.
+	for (auto const & name : { "assets", "holdings", "holders", "asset_pending", "issued", "asset_commits", "asset_claims", "asset_claim_roots", "swap_locks", "swap_offers" })
 	{
 		if (!column_family_exists (name))
 		{
@@ -583,7 +612,12 @@ rocksdb::ColumnFamilyHandle * nano::rocksdb::store::get_column_family (char cons
 	auto iter = std::find_if (handles_l.begin (), handles_l.end (), [name] (auto & handle) {
 		return (handle->GetName () == name);
 	});
-	debug_assert (iter != handles_l.end ());
+	// A missing family has to fail loudly. This used to be a debug_assert,
+	// which compiles out of the RelWithDebInfo builds this project ships, so a
+	// gap here — such as the one an incomplete upgrade left (#61) — read past
+	// handles_l.end () instead of stopping. release_assert turns that into an
+	// abort naming the fact rather than undefined behaviour.
+	release_assert (iter != handles_l.end ());
 	return (*iter).get ();
 }
 

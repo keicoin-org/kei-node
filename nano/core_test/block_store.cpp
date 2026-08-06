@@ -2308,6 +2308,148 @@ namespace rocksdb
 		check_correct_state ();
 	}
 
+	// A v22 database predates asset blocks and so has none of the v23 asset
+	// tables. create_column_families () only describes the families a database
+	// is *created* with — an existing one is reopened through
+	// get_current_column_families (), which reports what is actually on disk —
+	// so the upgrade has to create them itself. When it did not, the ledger was
+	// stamped current with five tables missing and get_column_family () returned
+	// the end () of its own handle list, which release builds dereference (#61).
+	TEST (rocksdb_block_store, upgrade_v22_v23_creates_the_asset_tables)
+	{
+		if (!nano::rocksdb_config::using_rocksdb_in_tests ())
+		{
+			// Don't test this in LMDB mode
+			GTEST_SKIP ();
+		}
+
+		auto const path = nano::unique_path ();
+		nano::logger_mt logger;
+		char const * const asset_tables[] = { "assets", "holdings", "holders", "asset_pending", "issued" };
+
+		// Setting the database to its 22nd version state: the asset tables are
+		// dropped, exactly as a database written before v23 would never have had
+		// them.
+		{
+			nano::rocksdb::store store (logger, path, nano::dev::constants);
+			for (auto const & name : asset_tables)
+			{
+				ASSERT_TRUE (store.column_family_exists (name));
+				auto const handle = store.get_column_family (name);
+				ASSERT_TRUE (store.db->DropColumnFamily (handle).ok ());
+				store.db->DestroyColumnFamilyHandle (handle);
+				for (auto it = store.handles.begin (); it != store.handles.end (); ++it)
+				{
+					if (it->get () == handle)
+					{
+						// The handle resource is deleted by RocksDB.
+						[[maybe_unused]] auto ptr = it->release ();
+						store.handles.erase (it);
+						break;
+					}
+				}
+			}
+			auto transaction (store.tx_begin_write ());
+			store.version.put (transaction, 22);
+			ASSERT_EQ (store.version.get (transaction), 22);
+		}
+
+		// Reopening runs the upgrade, which has to put all five back before the
+		// fallthrough to v24 stamps the ledger current.
+		{
+			nano::rocksdb::store store (logger, path, nano::dev::constants);
+			ASSERT_FALSE (store.init_error ());
+			auto transaction (store.tx_begin_read ());
+			ASSERT_EQ (store.version.get (transaction), store.version_current);
+			for (auto const & name : asset_tables)
+			{
+				ASSERT_TRUE (store.column_family_exists (name));
+				ASSERT_NE (nullptr, store.get_column_family (name));
+			}
+		}
+	}
+
+	// upgrade_v22_to_v23 () is what creates the five M2/M3 asset tables now, but
+	// a database that was already stamped v23 by a node built before that fix
+	// skips it entirely — do_upgrades () switches on the stored version, and v23
+	// falls straight into upgrade_v23_to_v24 (). Without also naming the earlier
+	// five there, such a database would reach version_current still missing
+	// assets/holdings/holders/asset_pending/issued. This pins the self-healing
+	// half of #61: a v23-stamped, pre-tables database still gets every table.
+	TEST (rocksdb_block_store, upgrade_v23_v24_also_repairs_missing_v22_v23_tables)
+	{
+		if (!nano::rocksdb_config::using_rocksdb_in_tests ())
+		{
+			// Don't test this in LMDB mode
+			GTEST_SKIP ();
+		}
+
+		auto const path = nano::unique_path ();
+		nano::logger_mt logger;
+		char const * const older_asset_tables[] = { "assets", "holdings", "holders", "asset_pending", "issued" };
+
+		// A database stamped v23 with the earlier five tables missing — the
+		// state a database built before #61's fix to upgrade_v22_to_v23 would
+		// have been left in.
+		{
+			nano::rocksdb::store store (logger, path, nano::dev::constants);
+			for (auto const & name : older_asset_tables)
+			{
+				ASSERT_TRUE (store.column_family_exists (name));
+				auto const handle = store.get_column_family (name);
+				ASSERT_TRUE (store.db->DropColumnFamily (handle).ok ());
+				store.db->DestroyColumnFamilyHandle (handle);
+				for (auto it = store.handles.begin (); it != store.handles.end (); ++it)
+				{
+					if (it->get () == handle)
+					{
+						// The handle resource is deleted by RocksDB.
+						[[maybe_unused]] auto ptr = it->release ();
+						store.handles.erase (it);
+						break;
+					}
+				}
+			}
+			auto transaction (store.tx_begin_write ());
+			store.version.put (transaction, 23);
+			ASSERT_EQ (store.version.get (transaction), 23);
+		}
+
+		// Reopening runs only upgrade_v23_to_v24 (), which has to notice and
+		// repair the older tables too, not just the ones it introduced.
+		{
+			nano::rocksdb::store store (logger, path, nano::dev::constants);
+			ASSERT_FALSE (store.init_error ());
+			auto transaction (store.tx_begin_read ());
+			ASSERT_EQ (store.version.get (transaction), store.version_current);
+			for (auto const & name : older_asset_tables)
+			{
+				ASSERT_TRUE (store.column_family_exists (name));
+				ASSERT_NE (nullptr, store.get_column_family (name));
+			}
+		}
+	}
+
+	// get_column_family () used to debug_assert on a name with no handle, which
+	// compiles out of the RelWithDebInfo builds this project ships — so the
+	// incomplete-upgrade case above would have read past handles_l.end () in any
+	// build CI or an operator actually runs, rather than stopping. It is a
+	// release_assert now (#61): a missing family aborts loudly, naming the fact,
+	// instead of handing a garbage pointer into RocksDB.
+	TEST (rocksdb_block_store, get_column_family_aborts_on_a_missing_family)
+	{
+		if (!nano::rocksdb_config::using_rocksdb_in_tests ())
+		{
+			// Don't test this in LMDB mode
+			GTEST_SKIP ();
+		}
+
+		auto const path = nano::unique_path ();
+		nano::logger_mt logger;
+		nano::rocksdb::store store (logger, path, nano::dev::constants);
+		ASSERT_DEATH_IF_SUPPORTED (store.get_column_family ("no_such_table"), "");
+	}
+
 	TEST (rocksdb_block_store, clear_preserves_column_family_handle)
 	{
 		if (!nano::rocksdb_config::using_rocksdb_in_tests ())
