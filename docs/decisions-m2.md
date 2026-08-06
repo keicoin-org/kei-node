@@ -623,6 +623,56 @@ available until definition-of-done (6) can run.
 `faucet` (testnet only) is still not implemented at all, which is consistent
 with §0 putting the public testnet in M3.
 
+### 15.1 Both shapes answer the same question about confirmation
+
+Added by [#50](https://github.com/keicoin-org/kei-node/issues/50). Serving two
+shapes under one name split the confirmation contract as well as the response
+shape, and only the inherited half kept it. The Kei half consulted nothing and
+said nothing, which is the failure mode §15 named — an answer that looks correct
+— in its most expensive form: a `pending` row is written by `ledger_processor`
+when a send is *processed*, and deleted again when a losing fork is rolled back,
+so a game reading this branch delivered goods for a block that had not been
+cemented and could still disappear. SPEC §9.2 settles the rule for the swap half
+of the same question ("a swap is confirmed when the `swap_accept` block is
+cemented. Until then the SDK reports it as pending, and clients must not show the
+trade as done"), and a payment is not a weaker promise than a trade.
+
+So the Kei branch takes the same two options with the same defaults as the
+inherited one:
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `include_only_confirmed` | `true` | Only rows whose creating block is cemented. |
+| `include_active` | `false` | With `include_only_confirmed: false`, admits a block still in an election rather than only one that has left it. |
+
+and every row carries `confirmed`, a real JSON boolean, read from
+`ledger::block_confirmed` — the fact itself rather than the filter's verdict,
+which with `include_active` is true for a block that is not cemented. This is the
+same field and the same source `swap_offer_to_json` already emits for the market
+read model, so a caller that opts into unconfirmed rows can tell the two apart
+(SPEC §9.6 criterion 3). Both loops are gated: an item arriving in `asset_pending`
+is written at process time exactly as Kei in `pending` is.
+
+**The default is the security boundary, not a convenience.** Every existing
+`@keicoin/transaction` release polls this action with `account` and nothing else,
+so anything but confirmed-by-default leaves those integrations exploitable without
+a line of their code changing. `kei-transaction/docs/rpc.md` carries the response
+shape for this action and needs the field and the default added there; that is a
+separate repo, and it is sequenced with
+[kei-transaction#155](https://github.com/keicoin-org/kei-transaction/issues/155).
+
+`count` now bounds rows returned rather than rows scanned, which is what it means
+in the inherited branch: a row the filter dropped was never the caller's, so it
+must not spend the caller's budget. As there, the scan is then bounded by the
+account's pending range rather than by `count`.
+
+`asset_offers` is deliberately left unfiltered and without the field — see the
+comment on the handler. An offer is an advertisement, SPEC §9.2's problem 5 is
+that accepting an uncemented one costs the accepter nothing they do not get back,
+and `confirmed` in this file's market vocabulary means the *swap* completed, which
+is false for every open offer by construction. Reporting "the offer block is
+cemented" needs a differently named field and is not part of this fix.
+
 ## 16. What is not finished, stated plainly
 
 One acceptance blocker remains, and what is implemented is unevenly demonstrated.

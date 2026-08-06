@@ -256,8 +256,14 @@ jobs:
       # Filtered to the Kei case for the same reason the core_test filter is:
       # the inherited RPC suite is red on genesis balances §14 changed on
       # purpose, and widening this before that is fixed would bury the signal.
+      # The two `kei_receivables_*` cases are the confirmation gate on the Kei
+      # branch of `accounts_receivable` (issue #50). They are named here because
+      # this filter is an allow-list: a test not in it does not run, so adding a
+      # test file without adding its name here leaves the test compiled and
+      # never executed, which is the same "looks correct" failure mode
+      # decisions-m2.md §15 is about.
       - name: Run Kei RPC tests
-        run: ./build/rpc_test --gtest_filter='rpc.account_history_block_shape:rpc.commit_info_claim_status_contract:rpc.asset_offers_bounds_count_and_pages_each_offer_once:rpc.asset_holders_bounds_count_and_pages_each_holder_once'
+        run: ./build/rpc_test --gtest_filter='rpc.account_history_block_shape:rpc.commit_info_claim_status_contract:rpc.asset_offers_bounds_count_and_pages_each_offer_once:rpc.asset_holders_bounds_count_and_pages_each_holder_once:rpc.kei_receivables_unconfirmed:rpc.kei_receivables_asset_unconfirmed'
 
       - name: Start a clean dev node and wait for RPC
         env:
