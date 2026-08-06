@@ -497,6 +497,64 @@ std::vector<std::string> page_values (boost::property_tree::ptree const & respon
 	}
 	return values;
 }
+
+// `append_market_block` only makes offers and burns. A cancelled offer needs a
+// `swap_cancel` whose link names the offer, and the lock deleted — deleting it
+// is what a real cancel does (decisions-m5.md §7) and is what forces
+// `swap_offer_to_json` down the chain walk instead of the cheap lock lookup.
+nano::block_hash append_cancel (nano::node & node_a, fake_market_chain & chain_a, nano::block_hash const & offer_a)
+{
+	auto const height (chain_a.hashes.size () + 1);
+	auto const previous (chain_a.hashes.back ());
+	nano::asset_payload payload;
+	auto block (std::make_shared<nano::asset_block> (
+	chain_a.key.pub,
+	previous,
+	chain_a.key.pub,
+	nano::amount (100000 - height),
+	nano::asset_op::swap_cancel,
+	0,
+	nano::amount (0),
+	offer_a,
+	payload,
+	chain_a.key.prv,
+	chain_a.key.pub,
+	0));
+	block->sideband_set (nano::block_sideband{
+	chain_a.key.pub,
+	0,
+	nano::amount (100000 - height),
+	static_cast<uint64_t> (height),
+	static_cast<nano::seconds_t> (1000 + height),
+	nano::block_details{ nano::epoch::epoch_0, false, false, false },
+	nano::epoch::epoch_0 });
+
+	auto transaction (node_a.store.tx_begin_write ());
+	auto previous_block (node_a.store.block.get (transaction, previous));
+	auto sideband (previous_block->sideband ());
+	sideband.successor = block->hash ();
+	previous_block->sideband_set (sideband);
+	node_a.store.block.put (transaction, previous, *previous_block);
+	node_a.store.block.put (transaction, block->hash (), *block);
+	chain_a.hashes.push_back (block->hash ());
+	node_a.store.asset.lock_del (transaction, offer_a);
+	node_a.store.asset.offer_del (transaction, chain_a.asset, offer_a);
+	node_a.store.account.put (transaction, chain_a.key.pub, nano::account_info{ block->hash (), chain_a.key.pub, chain_a.hashes.front (), nano::amount (100000 - height), static_cast<nano::seconds_t> (1000 + height), static_cast<uint64_t> (height), nano::epoch::epoch_0 });
+	node_a.store.confirmation_height.put (transaction, chain_a.key.pub, nano::confirmation_height_info{ static_cast<uint64_t> (height), block->hash () });
+	return block->hash ();
+}
+
+boost::property_tree::ptree swap_info_request (nano::block_hash const & hash_a, boost::optional<std::string> const & scan_count_a = boost::none)
+{
+	boost::property_tree::ptree request;
+	request.put ("action", "swap_info");
+	request.put ("hash", hash_a.to_string ());
+	if (scan_count_a.is_initialized ())
+	{
+		request.put ("scan_count", *scan_count_a);
+	}
+	return request;
+}
 }
 
 TEST (rpc, asset_offers_bounds_count_and_pages_each_offer_once)
@@ -616,4 +674,66 @@ TEST (rpc, asset_holders_bounds_count_and_pages_each_holder_once)
 	ASSERT_EQ ("Invalid count", response.get<std::string> ("error"));
 	ASSERT_EQ ("count", response.get<std::string> ("field"));
 	ASSERT_EQ ("1024", response.get<std::string> ("maxAllowed"));
+}
+
+TEST (rpc, swap_info_bounds_the_cancelled_offer_walk)
+{
+	nano::test::system system;
+	auto node (add_ipc_enabled_node (system));
+	auto const rpc_ctx (add_rpc (system, node));
+	fake_market_chain chain;
+	auto const offer (append_market_block (*node, chain, true));
+	auto const open_offer (append_market_block (*node, chain, true));
+	append_market_block (*node, chain, false);
+	append_market_block (*node, chain, false);
+	auto const cancel (append_cancel (*node, chain, offer));
+
+	// An offer that is still open is one lock lookup and must stay one: the
+	// budget must not be spent in front of the cheap path.
+	{
+		auto request (swap_info_request (open_offer));
+		auto const response (wait_response (system, rpc_ctx, request, 10s));
+		ASSERT_EQ ("open", response.get<std::string> ("offer.state"));
+		ASSERT_EQ (0, response.get<uint64_t> ("scanned"));
+		ASSERT_TRUE (response.get<bool> ("exhausted"));
+		ASSERT_EQ ("exhausted", response.get<std::string> ("stopped"));
+	}
+
+	// The default budget is wide enough to find a cancel four blocks along.
+	{
+		auto request (swap_info_request (offer));
+		auto const response (wait_response (system, rpc_ctx, request, 10s));
+		ASSERT_EQ ("cancelled", response.get<std::string> ("offer.state"));
+		ASSERT_EQ (cancel.to_string (), response.get<std::string> ("offer.settledBy"));
+		ASSERT_TRUE (response.get<bool> ("exhausted"));
+		ASSERT_EQ ("exhausted", response.get<std::string> ("stopped"));
+	}
+
+	// And the budget is actually consulted. Before this change `swap_info`
+	// passed `UINT64_MAX` and had no `scan_count` at all, so this request
+	// would have walked to the cancel and reported it.
+	{
+		auto request (swap_info_request (offer, std::string ("1")));
+		auto const response (wait_response (system, rpc_ctx, request, 10s));
+		ASSERT_EQ ("cancelled", response.get<std::string> ("offer.state"));
+		// Undetermined, not absent: the walk stopped before it knew.
+		ASSERT_EQ ("null", response.get<std::string> ("offer.settledBy"));
+		ASSERT_EQ ("null", response.get<std::string> ("offer.settledAt"));
+		ASSERT_FALSE (response.get<bool> ("offer.confirmed"));
+		ASSERT_FALSE (response.get<bool> ("exhausted"));
+		ASSERT_EQ ("scan_limit", response.get<std::string> ("stopped"));
+		ASSERT_EQ (1, response.get<uint64_t> ("scanned"));
+	}
+
+	// Refused above the cap, the same way and with the same fields
+	// `account_swaps` refuses it.
+	for (auto const & invalid : { "0", "1025" })
+	{
+		auto request (swap_info_request (offer, std::string (invalid)));
+		auto const response (wait_response (system, rpc_ctx, request, 10s));
+		ASSERT_EQ ("Invalid scan_count", response.get<std::string> ("error"));
+		ASSERT_EQ (invalid, response.get<std::string> ("requested"));
+		ASSERT_EQ ("scan_count", response.get<std::string> ("field"));
+		ASSERT_EQ ("1024", response.get<std::string> ("maxAllowed"));
+	}
 }

@@ -257,7 +257,7 @@ jobs:
       # the inherited RPC suite is red on genesis balances §14 changed on
       # purpose, and widening this before that is fixed would bury the signal.
       - name: Run Kei RPC tests
-        run: ./build/rpc_test --gtest_filter='rpc.account_history_block_shape:rpc.commit_info_claim_status_contract:rpc.asset_offers_bounds_count_and_pages_each_offer_once:rpc.asset_holders_bounds_count_and_pages_each_holder_once'
+        run: ./build/rpc_test --gtest_filter='rpc.account_history_block_shape:rpc.commit_info_claim_status_contract:rpc.asset_offers_bounds_count_and_pages_each_offer_once:rpc.asset_holders_bounds_count_and_pages_each_holder_once:rpc.swap_info_bounds_the_cancelled_offer_walk'
 
       - name: Start a clean dev node and wait for RPC
         env:
