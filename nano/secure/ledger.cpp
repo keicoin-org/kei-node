@@ -310,11 +310,14 @@ public:
 				break;
 			case nano::asset_op::asset_receive:
 			{
-				// Put the receivable back exactly as it was, which means
-				// reading the source block for the source account and the memo.
+				// Put the receivable back exactly as it was. The apply credits
+				// whatever the *arrival record* said — `pending.asset_id` and
+				// `pending.amount`, read from `asset_pending` — and consumes
+				// that record on the way through, so there is nothing left to
+				// read here and rollback has to reconstruct it.
 				auto const source_hash (block_a.hashables.link.as_block_hash ());
-				[[maybe_unused]] bool source_is_pruned (false);
-				[[maybe_unused]] auto const source_account (ledger.account_safe (transaction, source_hash, source_is_pruned));
+				bool source_is_pruned (false);
+				auto const source_account (ledger.account_safe (transaction, source_hash, source_is_pruned));
 				if (source_is_pruned)
 				{
 					error = true;
@@ -332,10 +335,69 @@ public:
 					error = true;
 					break;
 				}
-				asset_id = source_asset->hashables.asset_id;
-				auto const collected (source_asset->hashables.amount.number ());
+				// For `mint` and `transfer` the arrival is the source block's own
+				// header — those two push `block_a.hashables.amount` and their
+				// own `asset_id` — so these four start out already correct.
+				auto collected_asset (source_asset->hashables.asset_id);
+				auto collected (source_asset->hashables.amount.number ());
+				auto collected_from (source_account);
+				auto collected_memo (source_asset->hashables.payload.memo);
+				if (source_asset->hashables.op == nano::asset_op::swap_accept)
+				{
+					// A `swap_accept` settles two legs, and its header describes
+					// neither of them as collected: the terms check pins that
+					// header to the *want* side, which is what the accepter pays.
+					// Read literally it debits the wrong asset by the wrong
+					// amount, and for the accepter — who by construction need not
+					// hold the want asset at all — `held - collected` underflows
+					// and credits ~2^128 units of it while leaving the item they
+					// really collected in place (#59).
+					//
+					// The legs are `want_asset` to the offerer and `asset_id` to
+					// the accepter, exactly as the apply stages them and exactly
+					// the pairing `take_back_arrival` uses to undo the accept.
+					//
+					// Only the accepter's leg is corrupted by reading the
+					// header, because the want side the terms check pins that
+					// header to happens to be the offerer's arrival. The offerer
+					// branch below therefore reproduces what the header already
+					// said — deliberately, so the two legs are derived from the
+					// lock the apply used rather than from a coincidence, and so
+					// the memo is right for both.
+					nano::asset_lock_info lock;
+					if (ledger.store.asset.lock_get (transaction, source_asset->hashables.link.as_block_hash (), lock))
+					{
+						error = true;
+						break;
+					}
+					// Self-accept is refused at apply time as
+					// `swap_not_counterparty`, so the two legs always land on
+					// two different accounts and this cannot be ambiguous.
+					auto const to_offerer (block_a.hashables.account == lock.offerer);
+					collected_asset = to_offerer ? lock.want_asset : lock.asset_id;
+					collected = (to_offerer ? lock.want_amount : lock.amount).number ();
+					collected_from = to_offerer ? source_asset->hashables.account : lock.offerer;
+					// The arrivals are staged with an empty memo. The accept's
+					// own memo describes the accept, not either leg.
+					collected_memo.clear ();
+				}
+				// A zero asset id never reaches `asset_pending`: a Kei leg
+				// arrives in the inherited `pending` table and is collected by a
+				// state block, never by this op. One here means the arrival was
+				// reconstructed wrongly, and writing it would leave a receivable
+				// nothing can ever collect.
+				if (collected_asset.is_zero ())
+				{
+					error = true;
+					break;
+				}
+				asset_id = collected_asset;
 				auto const held (ledger.store.asset.balance (transaction, block_a.hashables.account, asset_id).number ());
-				debug_assert (held >= collected);
+				// Deliberately not a debug_assert. Underflowing here credits
+				// ~2^128 units of a real asset to a real account and diverges
+				// this node from every node that never saw the conflict, which
+				// is worse than stopping.
+				release_assert (held >= collected);
 				if (held == collected)
 				{
 					ledger.store.asset.balance_del (transaction, block_a.hashables.account, asset_id);
@@ -344,7 +406,7 @@ public:
 				{
 					ledger.store.asset.balance_put (transaction, block_a.hashables.account, asset_id, nano::amount (held - collected));
 				}
-				ledger.store.asset.pending_put (transaction, nano::pending_key (block_a.hashables.account, source_hash), nano::asset_pending_info (source_account, asset_id, collected, source_asset->hashables.payload.memo));
+				ledger.store.asset.pending_put (transaction, nano::pending_key (block_a.hashables.account, source_hash), nano::asset_pending_info (collected_from, asset_id, collected, collected_memo));
 				break;
 			}
 			case nano::asset_op::commit:

@@ -1849,6 +1849,96 @@ TEST (asset_ledger, swap_accept_settles_both_legs_and_each_side_collects)
 	ASSERT_EQ (nano::amount (200), store.asset.balance (transaction, nano::dev::team_key.pub, issued.id));
 }
 
+// Rolling back a collect whose source is a `swap_accept` has to undo the
+// arrival, not the accept's header (issue #59). The terms check pins that
+// header to the *want* side — what the accepter pays — so for the accepter's
+// leg it names an asset they need not hold at all. Read literally it debits
+// that asset, `held - collected` underflows, and the accepter is credited
+// ~2^128 units of it while the item they really collected stays in their
+// holdings. Nodes that never saw the conflict never take this path, so the
+// result is a silent divergence rather than a crash.
+TEST (asset_ledger, rolling_back_a_swap_collect_undoes_the_arrival_not_the_accept_header)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	auto transaction (store.tx_begin_write ());
+	auto const held (fund_player (ledger, transaction, pool, issued.id, issued.block->hash (), player, 500));
+
+	// 200 GEM offered for 50 raw Kei, and the team allocation takes it.
+	auto offer (signed_asset (pool, player, held.collect->hash (), 0, nano::asset_op::swap_offer, issued.id, 200, 0, offer_payload (0, 50)));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *offer).code);
+	auto accept (signed_asset (pool, nano::dev::team_key, held.mint->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::swap_accept, 0, 50, offer->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *accept).code);
+
+	// The accepter collects the GEM leg. The accept's own header reads asset 0,
+	// amount 50 — the Kei it paid — which is what the rollback used to trust.
+	auto collect (signed_asset (pool, nano::dev::team_key, accept->hash (), nano::amount (after_issuing (1) - 50), nano::asset_op::asset_receive, 0, 0, accept->hash ()));
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *collect).code);
+	ASSERT_EQ (nano::amount (200), store.asset.balance (transaction, nano::dev::team_key.pub, issued.id));
+
+	// This is the ordinary swap-conflict path: a competing consumer wins the
+	// offer's election and the accepter's head is walked down past the collect.
+	ASSERT_FALSE (ledger.rollback (transaction, collect->hash ()));
+
+	// The GEM actually collected is gone...
+	ASSERT_TRUE (store.asset.balance (transaction, nano::dev::team_key.pub, issued.id).is_zero ());
+	// ...and no phantom holding of the header's asset was invented. This is the
+	// assertion with teeth: the accepter held none of asset id 0, so the old
+	// code stored `0 - 50` here and this balance was ~2^128.
+	nano::uint256_union const kei_asset{ 0 };
+	ASSERT_TRUE (store.asset.balance (transaction, nano::dev::team_key.pub, kei_asset).is_zero ());
+	ASSERT_EQ (0, store.asset.holdings_count (transaction, nano::dev::team_key.pub));
+
+	// The receivable comes back naming what was receivable, from whom.
+	nano::asset_pending_info pending;
+	ASSERT_FALSE (store.asset.pending_get (transaction, nano::pending_key (nano::dev::team_key.pub, accept->hash ()), pending));
+	ASSERT_EQ (player.pub, pending.source);
+	ASSERT_EQ (issued.id, pending.asset_id);
+	ASSERT_EQ (nano::amount (200), pending.amount);
+
+	// And the chain is not stuck. A receivable naming the wrong asset made the
+	// re-apply fail `no_such_asset`, which no later block could repair.
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *collect).code);
+	ASSERT_EQ (nano::amount (200), store.asset.balance (transaction, nano::dev::team_key.pub, issued.id));
+}
+
+// The offerer's leg of the same accept, which the header happens to describe
+// correctly. It must survive the rewrite unchanged — and a `mint` source, whose
+// header really is its arrival, must too.
+TEST (asset_ledger, rolling_back_a_collect_from_a_mint_source_is_unchanged)
+{
+	auto ctx = nano::test::context::ledger_empty ();
+	auto & ledger = ctx.ledger ();
+	auto & store = ctx.store ();
+	nano::work_pool pool{ nano::dev::network_params.network, std::numeric_limits<unsigned>::max () };
+	nano::keypair player;
+
+	auto const issued (issue_one (ledger, store, pool, nano::transfer_policy::open, 1000));
+	nano::asset_payload payload;
+	payload.memo = "quest reward";
+	auto mint (signed_asset (pool, nano::dev::team_key, issued.block->hash (), nano::amount (after_issuing (1)), nano::asset_op::mint, issued.id, 500, player.pub, payload));
+	auto collect (signed_asset (pool, player, 0, 0, nano::asset_op::asset_receive, 0, 0, mint->hash ()));
+	auto transaction (store.tx_begin_write ());
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *mint).code);
+	ASSERT_EQ (nano::process_result::progress, ledger.process (transaction, *collect).code);
+	ASSERT_FALSE (ledger.rollback (transaction, collect->hash ()));
+
+	// Asset, amount, source and memo all still come from the mint's header,
+	// because for a mint the header is the arrival.
+	nano::asset_pending_info pending;
+	ASSERT_FALSE (store.asset.pending_get (transaction, nano::pending_key (player.pub, mint->hash ()), pending));
+	ASSERT_EQ (nano::dev::team_key.pub, pending.source);
+	ASSERT_EQ (issued.id, pending.asset_id);
+	ASSERT_EQ (nano::amount (500), pending.amount);
+	ASSERT_EQ ("quest reward", pending.memo);
+	ASSERT_EQ (0, store.asset.holdings_count (transaction, player.pub));
+}
+
 // SPEC §9.2: "the same sword cannot be promised into ten swaps because after
 // the first offer the sword is not in A's spendable balance to offer again."
 TEST (asset_ledger, self_locking_prevents_offering_units_already_locked)
